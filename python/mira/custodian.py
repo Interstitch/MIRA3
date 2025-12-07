@@ -480,18 +480,25 @@ def _detect_lifecycle_sequence(messages: list) -> tuple[Optional[str], float]:
     ordered_phases = sorted(first_occurrence.items(), key=lambda x: x[1])
 
     # Build the lifecycle sequence (up to 4 phases)
-    # Include commit if it appears early (indicates frequent committer)
     # Skip 'review' and 'document' as they're less actionable
     lifecycle_phases = []
+    total_msgs = len(user_messages)
+
     for phase, idx in ordered_phases:
         if phase in ('review', 'document'):
             continue
-        # Include commit only if it appears in first half of conversation
-        # (indicates "commit as you go" style vs "commit at end")
+
+        # Handle commit specially:
+        # - Skip if it's the VERY FIRST thing (likely cleanup from previous session)
+        # - Skip if it's in the last 20% (late commit, not distinctive)
+        # - Include if it's in the middle (indicates "commit as you go" style)
         if phase == 'commit':
-            midpoint = len(user_messages) // 2
-            if idx > midpoint:
+            if idx <= 1:
+                continue  # Very first message - probably previous session cleanup
+            if idx > total_msgs * 0.8:
                 continue  # Late commit - not distinctive
+            # Commit in middle = meaningful workflow signal
+
         lifecycle_phases.append(phase)
         if len(lifecycle_phases) >= 4:
             break

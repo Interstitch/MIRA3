@@ -315,13 +315,29 @@ def _build_claude_guidance(custodian: dict, alerts: list, work_context: dict) ->
     if name and name != 'Unknown':
         guidance["actions"].append(f"Address user as {name} naturally (don't announce you know their name)")
 
-    # Development lifecycle guidance
+    # Development lifecycle guidance - be directive about driving the cycle
     lifecycle = custodian.get('development_lifecycle')
     if lifecycle:
-        guidance["actions"].append(
-            f"Follow user's dev workflow: {lifecycle}. "
-            "When implementing features, structure your work in this order unless they specify otherwise."
-        )
+        # Parse the lifecycle to give specific guidance
+        lifecycle_lower = lifecycle.lower()
+        has_commit = 'commit' in lifecycle_lower
+        has_test = 'test' in lifecycle_lower
+        has_plan = 'plan' in lifecycle_lower
+
+        base_guidance = f"ACTIVELY DRIVE the user's dev workflow: {lifecycle}."
+
+        specific_actions = []
+        if has_plan:
+            specific_actions.append("Start by outlining your approach")
+        if has_test:
+            specific_actions.append("write/run tests at the appropriate phase")
+        if has_commit:
+            specific_actions.append("proactively offer to commit when a logical unit of work is complete")
+
+        if specific_actions:
+            base_guidance += f" This means: {', '.join(specific_actions)}."
+
+        guidance["actions"].append(base_guidance)
 
     # Interaction tips - convert to actions
     tips = custodian.get('interaction_tips', [])
