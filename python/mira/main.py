@@ -11,9 +11,11 @@ from pathlib import Path
 
 from .utils import log, get_mira_path
 from .bootstrap import ensure_venv_and_deps, reexec_in_venv
+from .db_manager import get_db_manager, shutdown_db_manager
 from .artifacts import init_artifact_db
 from .custodian import init_custodian_db
 from .insights import init_insights_db
+from .concepts import init_concepts_db
 from .embedding import MiraEmbeddingFunction
 from .handlers import handle_rpc_request
 from .watcher import run_file_watcher
@@ -47,14 +49,15 @@ def run_backend():
     for path in [chroma_path, archives_path, metadata_path]:
         path.mkdir(parents=True, exist_ok=True)
 
-    # Initialize artifact database
+    # Initialize centralized database manager (handles WAL mode and write queue)
+    db_manager = get_db_manager()
+    log("Database manager initialized")
+
+    # Initialize all SQLite databases (through db_manager for thread safety)
     init_artifact_db()
-
-    # Initialize custodian learning database
     init_custodian_db()
-
-    # Initialize insights database (errors, decisions)
     init_insights_db()
+    init_concepts_db()
 
     # Initialize embedding function
     embedding_fn = MiraEmbeddingFunction()

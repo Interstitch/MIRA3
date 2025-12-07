@@ -50,8 +50,18 @@ def get_artifact_db_path() -> Path:
 
 
 def log(message: str):
-    """Log a message to stderr (visible to Node.js)."""
-    print(f"[MIRA Backend] {message}", file=sys.stderr, flush=True)
+    """Log a message to stderr and to a log file for monitoring."""
+    timestamp = datetime.now().strftime("%H:%M:%S")
+    formatted = f"[MIRA {timestamp}] {message}"
+    print(formatted, file=sys.stderr, flush=True)
+
+    # Also write to log file for easy monitoring
+    try:
+        log_path = get_mira_path() / "mira.log"
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write(f"{formatted}\n")
+    except Exception:
+        pass  # Don't fail if logging fails
 
 
 def configure_model_cache():

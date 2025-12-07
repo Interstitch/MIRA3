@@ -5,112 +5,99 @@ Provides advanced analysis features:
 - Error pattern recognition and solution lookup
 - Decision journal with reasoning
 - Conversation similarity detection
+
+Uses centralized db_manager for thread-safe writes during parallel ingestion.
 """
 
 import json
 import re
-import sqlite3
 import hashlib
-from pathlib import Path
 from datetime import datetime
 from typing import Optional, List, Dict
 
-from .utils import log, get_mira_path, extract_query_terms
+from .utils import log, extract_query_terms
+from .db_manager import get_db_manager
 
 
-def get_insights_db_path() -> Path:
-    """Get the path to the insights database."""
-    return get_mira_path() / "insights.db"
+# Database name for insights
+INSIGHTS_DB = "insights.db"
+
+# Schema for insights database
+INSIGHTS_SCHEMA = """
+-- Error patterns table - tracks errors and their solutions
+CREATE TABLE IF NOT EXISTS error_patterns (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    error_signature TEXT NOT NULL,
+    error_type TEXT,
+    error_message TEXT NOT NULL,
+    normalized_message TEXT,
+    solution_summary TEXT,
+    solution_details TEXT,
+    file_context TEXT,
+    occurrence_count INTEGER DEFAULT 1,
+    first_seen TEXT,
+    last_seen TEXT,
+    source_sessions TEXT,
+    resolution_success INTEGER DEFAULT 0
+);
+
+-- Error solutions - links errors to specific solutions found
+CREATE TABLE IF NOT EXISTS error_solutions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    error_pattern_id INTEGER,
+    solution_text TEXT NOT NULL,
+    solution_type TEXT,
+    confidence REAL DEFAULT 0.5,
+    session_id TEXT,
+    timestamp TEXT,
+    FOREIGN KEY (error_pattern_id) REFERENCES error_patterns(id)
+);
+
+-- Decision journal - tracks architectural and design decisions
+CREATE TABLE IF NOT EXISTS decisions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    decision_hash TEXT UNIQUE,
+    decision_summary TEXT NOT NULL,
+    decision_details TEXT,
+    reasoning TEXT,
+    alternatives_considered TEXT,
+    context TEXT,
+    category TEXT,
+    outcome TEXT,
+    session_id TEXT,
+    timestamp TEXT,
+    confidence REAL DEFAULT 0.5
+);
+
+-- Create indexes
+CREATE INDEX IF NOT EXISTS idx_error_sig ON error_patterns(error_signature);
+CREATE INDEX IF NOT EXISTS idx_error_type ON error_patterns(error_type);
+CREATE INDEX IF NOT EXISTS idx_decision_cat ON decisions(category);
+
+-- Create FTS for error search
+CREATE VIRTUAL TABLE IF NOT EXISTS errors_fts USING fts5(
+    error_message,
+    solution_summary,
+    file_context,
+    content='error_patterns',
+    content_rowid='id'
+);
+
+-- Create FTS for decision search
+CREATE VIRTUAL TABLE IF NOT EXISTS decisions_fts USING fts5(
+    decision_summary,
+    reasoning,
+    context,
+    content='decisions',
+    content_rowid='id'
+);
+"""
 
 
 def init_insights_db():
     """Initialize the insights database for errors, decisions, etc."""
-    db_path = get_insights_db_path()
-
-    conn = sqlite3.connect(str(db_path))
-    cursor = conn.cursor()
-
-    # Error patterns table - tracks errors and their solutions
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS error_patterns (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            error_signature TEXT NOT NULL,
-            error_type TEXT,
-            error_message TEXT NOT NULL,
-            normalized_message TEXT,
-            solution_summary TEXT,
-            solution_details TEXT,
-            file_context TEXT,
-            occurrence_count INTEGER DEFAULT 1,
-            first_seen TEXT,
-            last_seen TEXT,
-            source_sessions TEXT,
-            resolution_success INTEGER DEFAULT 0
-        )
-    """)
-
-    # Error solutions - links errors to specific solutions found
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS error_solutions (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            error_pattern_id INTEGER,
-            solution_text TEXT NOT NULL,
-            solution_type TEXT,
-            confidence REAL DEFAULT 0.5,
-            session_id TEXT,
-            timestamp TEXT,
-            FOREIGN KEY (error_pattern_id) REFERENCES error_patterns(id)
-        )
-    """)
-
-    # Decision journal - tracks architectural and design decisions
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS decisions (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            decision_hash TEXT UNIQUE,
-            decision_summary TEXT NOT NULL,
-            decision_details TEXT,
-            reasoning TEXT,
-            alternatives_considered TEXT,
-            context TEXT,
-            category TEXT,
-            outcome TEXT,
-            session_id TEXT,
-            timestamp TEXT,
-            confidence REAL DEFAULT 0.5
-        )
-    """)
-
-    # Create indexes
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_error_sig ON error_patterns(error_signature)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_error_type ON error_patterns(error_type)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_decision_cat ON decisions(category)")
-
-    # Create FTS for error search
-    cursor.execute("""
-        CREATE VIRTUAL TABLE IF NOT EXISTS errors_fts USING fts5(
-            error_message,
-            solution_summary,
-            file_context,
-            content='error_patterns',
-            content_rowid='id'
-        )
-    """)
-
-    # Create FTS for decision search
-    cursor.execute("""
-        CREATE VIRTUAL TABLE IF NOT EXISTS decisions_fts USING fts5(
-            decision_summary,
-            reasoning,
-            context,
-            content='decisions',
-            content_rowid='id'
-        )
-    """)
-
-    conn.commit()
-    conn.close()
-
+    db = get_db_manager()
+    db.init_schema(INSIGHTS_DB, INSIGHTS_SCHEMA)
     log("Insights database initialized")
 
 
@@ -153,7 +140,6 @@ def normalize_error_message(error_msg: str) -> str:
 
 def extract_error_type(error_msg: str) -> Optional[str]:
     """Extract the error type from an error message."""
-    # Common error type patterns
     patterns = [
         r'^(\w+Error):',
         r'^(\w+Exception):',
@@ -177,12 +163,11 @@ def compute_error_signature(error_msg: str) -> str:
     normalized = normalize_error_message(error_msg)
     error_type = extract_error_type(error_msg) or "Unknown"
 
-    # Create signature from type + normalized message hash
     msg_hash = hashlib.md5(normalized.encode()).hexdigest()[:12]
     return f"{error_type}:{msg_hash}"
 
 
-def extract_errors_from_conversation(conversation: dict, session_id: str):
+def extract_errors_from_conversation(conversation: dict, session_id: str) -> int:
     """
     Extract error patterns and solutions from a conversation.
 
@@ -190,27 +175,21 @@ def extract_errors_from_conversation(conversation: dict, session_id: str):
     - Error messages in user messages
     - Solutions in subsequent assistant messages
     """
-    db_path = get_insights_db_path()
-    if not db_path.exists():
-        init_insights_db()
-
     messages = conversation.get('messages', [])
     if len(messages) < 2:
-        return
+        return 0
 
-    conn = sqlite3.connect(str(db_path))
-    cursor = conn.cursor()
+    db = get_db_manager()
     now = datetime.now().isoformat()
 
     errors_found = 0
 
-    # Error detection patterns
     error_patterns = [
         r'((?:Error|Exception|Traceback|Failed|Panic)[^\n]*(?:\n[^\n]*){0,5})',
         r'((?:\w+Error|\w+Exception):\s*[^\n]+)',
         r'(npm ERR![^\n]+)',
-        r'(error\[E\d+\]:[^\n]+)',  # Rust errors
-        r'(fatal:[^\n]+)',  # Git errors
+        r'(error\[E\d+\]:[^\n]+)',
+        r'(fatal:[^\n]+)',
     ]
 
     try:
@@ -225,7 +204,6 @@ def extract_errors_from_conversation(conversation: dict, session_id: str):
                     if isinstance(item, dict) and item.get('type') == 'text'
                 )
 
-            # Look for errors in user message
             for pattern in error_patterns:
                 matches = re.findall(pattern, content, re.IGNORECASE)
                 for error_match in matches:
@@ -237,7 +215,6 @@ def extract_errors_from_conversation(conversation: dict, session_id: str):
                     error_type = extract_error_type(error_msg)
                     normalized = normalize_error_message(error_msg)
 
-                    # Look for solution in next assistant message
                     solution_summary = None
                     solution_details = None
                     if i + 1 < len(messages):
@@ -249,56 +226,51 @@ def extract_errors_from_conversation(conversation: dict, session_id: str):
                                     item.get('text', '') for item in solution_details
                                     if isinstance(item, dict) and item.get('type') == 'text'
                                 )
-                            # Extract first actionable sentence as summary
                             solution_summary = _extract_solution_summary(solution_details)
 
-                    # Check if error pattern exists
-                    cursor.execute("""
-                        SELECT id, occurrence_count, source_sessions FROM error_patterns
-                        WHERE error_signature = ?
-                    """, (signature,))
-
-                    row = cursor.fetchone()
-                    if row:
-                        # Update existing
-                        pattern_id, count, sources = row
-                        sources_list = json.loads(sources) if sources else []
-                        if session_id not in sources_list:
-                            sources_list.append(session_id)
-
+                    def upsert_error(cursor):
                         cursor.execute("""
-                            UPDATE error_patterns
-                            SET occurrence_count = ?, last_seen = ?, source_sessions = ?,
-                                solution_summary = COALESCE(?, solution_summary),
-                                solution_details = COALESCE(?, solution_details)
-                            WHERE id = ?
-                        """, (count + 1, now, json.dumps(sources_list[-10:]),
-                              solution_summary, solution_details[:2000] if solution_details else None,
-                              pattern_id))
-                    else:
-                        # Insert new
-                        cursor.execute("""
-                            INSERT INTO error_patterns
-                            (error_signature, error_type, error_message, normalized_message,
-                             solution_summary, solution_details, first_seen, last_seen, source_sessions)
-                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                        """, (signature, error_type, error_msg[:500], normalized[:500],
-                              solution_summary, solution_details[:2000] if solution_details else None,
-                              now, now, json.dumps([session_id])))
+                            SELECT id, occurrence_count, source_sessions FROM error_patterns
+                            WHERE error_signature = ?
+                        """, (signature,))
 
-                        # Update FTS
-                        cursor.execute("""
-                            INSERT INTO errors_fts(rowid, error_message, solution_summary, file_context)
-                            VALUES (last_insert_rowid(), ?, ?, ?)
-                        """, (error_msg[:500], solution_summary or '', ''))
+                        row = cursor.fetchone()
+                        if row:
+                            pattern_id, count, sources = row
+                            sources_list = json.loads(sources) if sources else []
+                            if session_id not in sources_list:
+                                sources_list.append(session_id)
 
-                    errors_found += 1
+                            cursor.execute("""
+                                UPDATE error_patterns
+                                SET occurrence_count = ?, last_seen = ?, source_sessions = ?,
+                                    solution_summary = COALESCE(?, solution_summary),
+                                    solution_details = COALESCE(?, solution_details)
+                                WHERE id = ?
+                            """, (count + 1, now, json.dumps(sources_list[-10:]),
+                                  solution_summary, solution_details[:2000] if solution_details else None,
+                                  pattern_id))
+                            return 0
+                        else:
+                            cursor.execute("""
+                                INSERT INTO error_patterns
+                                (error_signature, error_type, error_message, normalized_message,
+                                 solution_summary, solution_details, first_seen, last_seen, source_sessions)
+                                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            """, (signature, error_type, error_msg[:500], normalized[:500],
+                                  solution_summary, solution_details[:2000] if solution_details else None,
+                                  now, now, json.dumps([session_id])))
 
-        conn.commit()
+                            cursor.execute("""
+                                INSERT INTO errors_fts(rowid, error_message, solution_summary, file_context)
+                                VALUES (last_insert_rowid(), ?, ?, ?)
+                            """, (error_msg[:500], solution_summary or '', ''))
+                            return 1
+
+                    errors_found += db.execute_write_func(INSIGHTS_DB, upsert_error)
+
     except Exception as e:
         log(f"Error extracting error patterns: {e}")
-    finally:
-        conn.close()
 
     return errors_found
 
@@ -308,7 +280,6 @@ def _extract_solution_summary(solution_text: str) -> Optional[str]:
     if not solution_text:
         return None
 
-    # Look for solution indicators
     solution_patterns = [
         r"(?:The (?:fix|solution|issue|problem) is)[:\s]+([^.!?\n]+[.!?])",
         r"(?:To fix this|To solve this|To resolve this)[,:\s]+([^.!?\n]+[.!?])",
@@ -323,7 +294,6 @@ def _extract_solution_summary(solution_text: str) -> Optional[str]:
             if 20 < len(summary) < 200:
                 return summary
 
-    # Fallback: first substantive sentence
     sentences = re.split(r'(?<=[.!?])\s+', solution_text)
     for sent in sentences[:3]:
         sent = sent.strip()
@@ -339,22 +309,15 @@ def search_error_solutions(query: str, limit: int = 5) -> List[Dict]:
 
     Returns list of matching errors with their solutions.
     """
-    db_path = get_insights_db_path()
-    if not db_path.exists():
-        return []
-
+    db = get_db_manager()
     results = []
 
     try:
-        conn = sqlite3.connect(str(db_path))
-        cursor = conn.cursor()
-
-        # Try FTS search first
         terms = extract_query_terms(query, max_terms=5)
         if terms:
             fts_query = ' OR '.join(f'"{t}"' for t in terms)
 
-            cursor.execute("""
+            rows = db.execute_read(INSIGHTS_DB, """
                 SELECT e.id, e.error_type, e.error_message, e.solution_summary,
                        e.solution_details, e.occurrence_count, e.last_seen
                 FROM error_patterns e
@@ -364,21 +327,20 @@ def search_error_solutions(query: str, limit: int = 5) -> List[Dict]:
                 LIMIT ?
             """, (fts_query, limit))
 
-            for row in cursor.fetchall():
+            for row in rows:
                 results.append({
-                    'id': row[0],
-                    'error_type': row[1],
-                    'error_message': row[2],
-                    'solution_summary': row[3],
-                    'solution_details': row[4][:500] if row[4] else None,
-                    'occurrence_count': row[5],
-                    'last_seen': row[6],
+                    'id': row['id'],
+                    'error_type': row['error_type'],
+                    'error_message': row['error_message'],
+                    'solution_summary': row['solution_summary'],
+                    'solution_details': row['solution_details'][:500] if row['solution_details'] else None,
+                    'occurrence_count': row['occurrence_count'],
+                    'last_seen': row['last_seen'],
                 })
 
-        # If no FTS results, try pattern matching
         if not results:
             normalized_query = normalize_error_message(query)
-            cursor.execute("""
+            rows = db.execute_read(INSIGHTS_DB, """
                 SELECT id, error_type, error_message, solution_summary,
                        solution_details, occurrence_count, last_seen
                 FROM error_patterns
@@ -387,18 +349,17 @@ def search_error_solutions(query: str, limit: int = 5) -> List[Dict]:
                 LIMIT ?
             """, (f'%{normalized_query[:50]}%', limit))
 
-            for row in cursor.fetchall():
+            for row in rows:
                 results.append({
-                    'id': row[0],
-                    'error_type': row[1],
-                    'error_message': row[2],
-                    'solution_summary': row[3],
-                    'solution_details': row[4][:500] if row[4] else None,
-                    'occurrence_count': row[5],
-                    'last_seen': row[6],
+                    'id': row['id'],
+                    'error_type': row['error_type'],
+                    'error_message': row['error_message'],
+                    'solution_summary': row['solution_summary'],
+                    'solution_details': row['solution_details'][:500] if row['solution_details'] else None,
+                    'occurrence_count': row['occurrence_count'],
+                    'last_seen': row['last_seen'],
                 })
 
-        conn.close()
     except Exception as e:
         log(f"Error searching error solutions: {e}")
 
@@ -407,18 +368,13 @@ def search_error_solutions(query: str, limit: int = 5) -> List[Dict]:
 
 def get_error_stats() -> Dict:
     """Get statistics about stored error patterns."""
-    db_path = get_insights_db_path()
-    if not db_path.exists():
-        return {'total': 0, 'by_type': {}}
+    db = get_db_manager()
 
     try:
-        conn = sqlite3.connect(str(db_path))
-        cursor = conn.cursor()
+        row = db.execute_read_one(INSIGHTS_DB, "SELECT COUNT(*) as cnt FROM error_patterns")
+        total = row['cnt'] if row else 0
 
-        cursor.execute("SELECT COUNT(*) FROM error_patterns")
-        total = cursor.fetchone()[0]
-
-        cursor.execute("""
+        rows = db.execute_read(INSIGHTS_DB, """
             SELECT error_type, COUNT(*) as cnt
             FROM error_patterns
             WHERE error_type IS NOT NULL
@@ -426,9 +382,8 @@ def get_error_stats() -> Dict:
             ORDER BY cnt DESC
             LIMIT 10
         """)
-        by_type = {row[0]: row[1] for row in cursor.fetchall()}
+        by_type = {row['error_type']: row['cnt'] for row in rows}
 
-        conn.close()
         return {'total': total, 'by_type': by_type}
     except Exception as e:
         log(f"Error getting error stats: {e}")
@@ -439,7 +394,7 @@ def get_error_stats() -> Dict:
 # DECISION JOURNAL
 # =============================================================================
 
-def extract_decisions_from_conversation(conversation: dict, session_id: str):
+def extract_decisions_from_conversation(conversation: dict, session_id: str) -> int:
     """
     Extract architectural and design decisions from a conversation.
 
@@ -448,29 +403,19 @@ def extract_decisions_from_conversation(conversation: dict, session_id: str):
     - Reasoning patterns
     - Alternative considerations
     """
-    db_path = get_insights_db_path()
-    if not db_path.exists():
-        init_insights_db()
-
     messages = conversation.get('messages', [])
     if not messages:
-        return
+        return 0
 
-    conn = sqlite3.connect(str(db_path))
-    cursor = conn.cursor()
+    db = get_db_manager()
     now = datetime.now().isoformat()
 
     decisions_found = 0
 
-    # Decision detection patterns
     decision_patterns = [
-        # Explicit decisions
         (r"(?:I (?:decided|chose|went with|selected)|We should use|Let's use|The best approach is)\s+([^.!?\n]{10,150}[.!?])", 'explicit'),
-        # Recommendations
         (r"(?:I recommend|I suggest|My recommendation is)\s+([^.!?\n]{10,150}[.!?])", 'recommendation'),
-        # Reasoning
         (r"(?:because|since|the reason is)\s+([^.!?\n]{10,100})", 'reasoning'),
-        # Trade-off discussions
         (r"(?:instead of|rather than|over)\s+(\w+[^.!?\n]{10,100})", 'alternative'),
     ]
 
@@ -490,24 +435,16 @@ def extract_decisions_from_conversation(conversation: dict, session_id: str):
 
         for pattern, decision_type in decision_patterns:
             matches = re.findall(pattern, combined_text, re.IGNORECASE)
-            for match in matches[:5]:  # Limit per pattern
+            for match in matches[:5]:
                 decision_text = match.strip()
                 if len(decision_text) < 15:
                     continue
 
-                # Skip if it's code
                 if decision_text.count('(') > 2 or '{' in decision_text:
                     continue
 
-                # Compute hash for deduplication
                 decision_hash = hashlib.md5(decision_text[:100].lower().encode()).hexdigest()
 
-                # Check if exists
-                cursor.execute("SELECT id FROM decisions WHERE decision_hash = ?", (decision_hash,))
-                if cursor.fetchone():
-                    continue
-
-                # Extract context (surrounding text)
                 context_match = re.search(
                     rf".{{0,100}}{re.escape(decision_text[:30])}.{{0,100}}",
                     combined_text,
@@ -515,28 +452,29 @@ def extract_decisions_from_conversation(conversation: dict, session_id: str):
                 )
                 context = context_match.group(0) if context_match else ""
 
-                # Determine category
                 category = _categorize_decision(decision_text)
 
-                cursor.execute("""
-                    INSERT INTO decisions
-                    (decision_hash, decision_summary, context, category, session_id, timestamp, confidence)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
-                """, (decision_hash, decision_text[:200], context[:500], category, session_id, now, 0.5))
+                def insert_decision(cursor):
+                    cursor.execute("SELECT id FROM decisions WHERE decision_hash = ?", (decision_hash,))
+                    if cursor.fetchone():
+                        return 0
 
-                # Update FTS
-                cursor.execute("""
-                    INSERT INTO decisions_fts(rowid, decision_summary, reasoning, context)
-                    VALUES (last_insert_rowid(), ?, ?, ?)
-                """, (decision_text[:200], '', context[:500]))
+                    cursor.execute("""
+                        INSERT INTO decisions
+                        (decision_hash, decision_summary, context, category, session_id, timestamp, confidence)
+                        VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """, (decision_hash, decision_text[:200], context[:500], category, session_id, now, 0.5))
 
-                decisions_found += 1
+                    cursor.execute("""
+                        INSERT INTO decisions_fts(rowid, decision_summary, reasoning, context)
+                        VALUES (last_insert_rowid(), ?, ?, ?)
+                    """, (decision_text[:200], '', context[:500]))
+                    return 1
 
-        conn.commit()
+                decisions_found += db.execute_write_func(INSIGHTS_DB, insert_decision)
+
     except Exception as e:
         log(f"Error extracting decisions: {e}")
-    finally:
-        conn.close()
 
     return decisions_found
 
@@ -568,22 +506,16 @@ def search_decisions(query: str, category: Optional[str] = None, limit: int = 10
 
     Returns list of matching decisions with context.
     """
-    db_path = get_insights_db_path()
-    if not db_path.exists():
-        return []
-
+    db = get_db_manager()
     results = []
 
     try:
-        conn = sqlite3.connect(str(db_path))
-        cursor = conn.cursor()
-
         terms = extract_query_terms(query, max_terms=5)
         if terms:
             fts_query = ' OR '.join(f'"{t}"' for t in terms)
 
             if category:
-                cursor.execute("""
+                rows = db.execute_read(INSIGHTS_DB, """
                     SELECT d.id, d.decision_summary, d.context, d.category,
                            d.session_id, d.timestamp, d.confidence
                     FROM decisions d
@@ -593,7 +525,7 @@ def search_decisions(query: str, category: Optional[str] = None, limit: int = 10
                     LIMIT ?
                 """, (fts_query, category, limit))
             else:
-                cursor.execute("""
+                rows = db.execute_read(INSIGHTS_DB, """
                     SELECT d.id, d.decision_summary, d.context, d.category,
                            d.session_id, d.timestamp, d.confidence
                     FROM decisions d
@@ -603,18 +535,17 @@ def search_decisions(query: str, category: Optional[str] = None, limit: int = 10
                     LIMIT ?
                 """, (fts_query, limit))
 
-            for row in cursor.fetchall():
+            for row in rows:
                 results.append({
-                    'id': row[0],
-                    'decision': row[1],
-                    'context': row[2],
-                    'category': row[3],
-                    'session_id': row[4],
-                    'timestamp': row[5],
-                    'confidence': row[6],
+                    'id': row['id'],
+                    'decision': row['decision_summary'],
+                    'context': row['context'],
+                    'category': row['category'],
+                    'session_id': row['session_id'],
+                    'timestamp': row['timestamp'],
+                    'confidence': row['confidence'],
                 })
 
-        conn.close()
     except Exception as e:
         log(f"Error searching decisions: {e}")
 
@@ -623,26 +554,20 @@ def search_decisions(query: str, category: Optional[str] = None, limit: int = 10
 
 def get_decision_stats() -> Dict:
     """Get statistics about stored decisions."""
-    db_path = get_insights_db_path()
-    if not db_path.exists():
-        return {'total': 0, 'by_category': {}}
+    db = get_db_manager()
 
     try:
-        conn = sqlite3.connect(str(db_path))
-        cursor = conn.cursor()
+        row = db.execute_read_one(INSIGHTS_DB, "SELECT COUNT(*) as cnt FROM decisions")
+        total = row['cnt'] if row else 0
 
-        cursor.execute("SELECT COUNT(*) FROM decisions")
-        total = cursor.fetchone()[0]
-
-        cursor.execute("""
+        rows = db.execute_read(INSIGHTS_DB, """
             SELECT category, COUNT(*) as cnt
             FROM decisions
             GROUP BY category
             ORDER BY cnt DESC
         """)
-        by_category = {row[0]: row[1] for row in cursor.fetchall()}
+        by_category = {row['category']: row['cnt'] for row in rows}
 
-        conn.close()
         return {'total': total, 'by_category': by_category}
     except Exception as e:
         log(f"Error getting decision stats: {e}")

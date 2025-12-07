@@ -13,26 +13,21 @@ MIRA3 watches your Claude Code chat directory, ingests conversations into a loca
 ## Installation
 
 ```bash
-npm install -g claude-mira3
+claude mcp add claude-mira3 -- npx claude-mira3
 ```
 
-The installation process automatically handles all prerequisites and dependencies including ChromaDB.
+That's it. On first use, MIRA3 automatically creates a Python venv and installs ChromaDB, sentence-transformers.
 
-### Add to Claude Code
+### Alternative: Manual Configuration
 
-```bash
-claude mcp add mira3 -- npx claude-mira3
-```
-
-Or manually add to your MCP configuration:
+Add to your MCP settings (`~/.claude/settings.json`):
 
 ```json
 {
   "mcpServers": {
-    "mira3": {
+    "claude-mira3": {
       "command": "npx",
-      "args": ["claude-mira3"],
-      "env": {}
+      "args": ["claude-mira3"]
     }
   }
 }

@@ -8,19 +8,23 @@ Extracts and tracks key concepts about the codebase from conversation analysis:
 - Integration patterns (JSON-RPC over stdio, etc.)
 - Design patterns and conventions
 - User-provided facts and rules about the codebase
+
+Uses centralized db_manager for thread-safe writes during parallel ingestion.
 """
 
 import json
 import re
-import sqlite3
 import hashlib
-from pathlib import Path
 from datetime import datetime
 from typing import Optional, List, Dict, Tuple
 from collections import Counter
 
-from .utils import log, get_mira_path
+from .utils import log
+from .db_manager import get_db_manager
 
+
+# Database name for concepts
+CONCEPTS_DB = "concepts.db"
 
 # Concept types
 CONCEPT_COMPONENT = "component"       # Major architectural pieces
@@ -31,58 +35,46 @@ CONCEPT_PATTERN = "pattern"           # Design patterns and conventions
 CONCEPT_FACT = "fact"                 # User-provided facts about the codebase
 CONCEPT_RULE = "rule"                 # User-provided rules/conventions
 
+# Schema for concepts database
+CONCEPTS_SCHEMA = """
+-- Main concepts table
+CREATE TABLE IF NOT EXISTS codebase_concepts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_path TEXT NOT NULL,
+    concept_type TEXT NOT NULL,
+    name TEXT NOT NULL,
+    description TEXT,
+    related_files TEXT,
+    related_concepts TEXT,
+    metadata TEXT,
+    frequency INTEGER DEFAULT 1,
+    confidence REAL DEFAULT 0.5,
+    source_sessions TEXT,
+    first_seen TEXT,
+    last_updated TEXT,
+    UNIQUE(project_path, concept_type, name)
+);
 
-def get_concepts_db_path() -> Path:
-    """Get the path to the concepts database."""
-    return get_mira_path() / "concepts.db"
+-- Create indexes
+CREATE INDEX IF NOT EXISTS idx_concepts_project ON codebase_concepts(project_path);
+CREATE INDEX IF NOT EXISTS idx_concepts_type ON codebase_concepts(concept_type);
+CREATE INDEX IF NOT EXISTS idx_concepts_confidence ON codebase_concepts(confidence DESC);
+CREATE INDEX IF NOT EXISTS idx_concepts_name ON codebase_concepts(name);
+
+-- FTS for concept search
+CREATE VIRTUAL TABLE IF NOT EXISTS concepts_fts USING fts5(
+    name,
+    description,
+    content='codebase_concepts',
+    content_rowid='id'
+);
+"""
 
 
 def init_concepts_db():
     """Initialize the codebase concepts database."""
-    db_path = get_concepts_db_path()
-
-    conn = sqlite3.connect(str(db_path))
-    cursor = conn.cursor()
-
-    # Main concepts table
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS codebase_concepts (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            project_path TEXT NOT NULL,
-            concept_type TEXT NOT NULL,
-            name TEXT NOT NULL,
-            description TEXT,
-            related_files TEXT,
-            related_concepts TEXT,
-            metadata TEXT,
-            frequency INTEGER DEFAULT 1,
-            confidence REAL DEFAULT 0.5,
-            source_sessions TEXT,
-            first_seen TEXT,
-            last_updated TEXT,
-            UNIQUE(project_path, concept_type, name)
-        )
-    """)
-
-    # Create indexes
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_concepts_project ON codebase_concepts(project_path)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_concepts_type ON codebase_concepts(concept_type)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_concepts_confidence ON codebase_concepts(confidence DESC)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_concepts_name ON codebase_concepts(name)")
-
-    # FTS for concept search
-    cursor.execute("""
-        CREATE VIRTUAL TABLE IF NOT EXISTS concepts_fts USING fts5(
-            name,
-            description,
-            content='codebase_concepts',
-            content_rowid='id'
-        )
-    """)
-
-    conn.commit()
-    conn.close()
-
+    db = get_db_manager()
+    db.init_schema(CONCEPTS_DB, CONCEPTS_SCHEMA)
     log("Concepts database initialized")
 
 
@@ -99,76 +91,53 @@ class ConceptExtractor:
     """
 
     # Patterns for definitional statements (component detection)
-    # Be very specific - require architecture-related words
     DEFINITIONAL_PATTERNS = [
-        # "The X backend/frontend/server/layer handles Y"
         (r"(?:The\s+)?(\w+\s+(?:backend|frontend|server|daemon|service|layer))\s+(?:handles?|manages?|provides?|is responsible for)\s+([^.!?\n]{15,120})", 0.75),
-        # "X component/module serves as Y"
         (r"(?:The\s+)?(\w+\s+(?:component|module|system))\s+(?:is the|serves as|acts as)\s+([^.!?\n]{15,100})", 0.7),
     ]
 
     # File purpose patterns
-    # Note: longer extensions (tsx, json) must come before shorter ones (ts, js)
     FILE_PURPOSE_PATTERNS = [
-        # "handlers.py - RPC request handlers"
         (r"(\w+\.(?:py|tsx|ts|jsonl|json|jsx|js|go|rs|java|rb))\s*[-:–]\s*([^.!?\n]{10,120})", 0.75),
-        # "handlers.py handles/contains/implements X"
         (r"(\w+\.(?:py|tsx|ts|jsonl|json|jsx|js|go|rs|java|rb))\s+(?:contains?|implements?|defines?|handles?|provides?)\s+([^.!?\n]{10,100})", 0.7),
-        # "The X file does Y"
         (r"(?:The\s+)?(\w+\.(?:py|tsx|ts|jsx|js))\s+file\s+(?:does|handles?|contains?)\s+([^.!?\n]{10,100})", 0.7),
     ]
 
-    # Technology role patterns - require known tech or very specific patterns
+    # Technology role patterns
     TECHNOLOGY_PATTERNS = [
-        # "use ChromaDB/Redis/etc for Y" - specific tech names
         (r"(?:use|using|uses)\s+(ChromaDB|Redis|PostgreSQL|MongoDB|SQLite|Elasticsearch|sentence-transformers?|watchdog|FastAPI|Express|React|Vue|Angular)\s+(?:for|to)\s+([^.!?\n]{10,80})", 0.85),
-        # "X database/library/framework provides Y"
         (r"([\w\-]+)\s+(?:database|library|framework|package)\s+(?:provides?|enables?|handles?)\s+([^.!?\n]{15,80})", 0.7),
     ]
 
-    # Integration/communication patterns - require specific terms
+    # Integration/communication patterns
     INTEGRATION_PATTERNS = [
-        # "X communicates with Y via Z" - explicit communication
         (r"(\w+(?:\s+(?:backend|frontend|server|client|layer))?)\s+communicates?\s+with\s+(\w+(?:\s+(?:backend|frontend|server|client|layer))?)\s+(?:via|using|over)\s+([^.!?\n]{5,60})", 0.8),
-        # "X spawns/calls Y" - process relationships
         (r"(\w+(?:\s+server)?)\s+(?:spawns|calls|invokes)\s+(\w+(?:\s+(?:backend|process|daemon))?)", 0.75),
     ]
 
-    # Design pattern descriptions - be very specific
+    # Design pattern patterns
     PATTERN_PATTERNS = [
-        # "We use X pattern" or "follows X pattern"
         (r"(?:we use|uses?|follows?|implements?)\s+(?:the\s+)?([\w\-]+(?:\s+[\w\-]+)?)\s+pattern", 0.75),
-        # Only specific architecture types like "two-layer architecture", "microservice architecture"
         (r"(two-layer|microservice|monolithic|event-driven|serverless|layered)\s+architecture", 0.8),
-        # "X-based design" or "X design pattern"
         (r"([\w\-]+)-based\s+(?:design|approach)", 0.7),
     ]
 
-    # User-provided fact patterns (explicit statements about the codebase)
-    # Be conservative - only clear statements of fact
+    # User-provided fact patterns
     FACT_PATTERNS = [
-        # "This codebase/project uses X" - specific tech statements
         (r"(?:This|The)\s+(?:codebase|project)\s+uses?\s+([^.!?\n]{10,100})", 0.8),
-        # "Important: X" or "Note: X" - explicit callouts
         (r"(?:Important|Note):\s*([^.!?\n]{20,150})", 0.85),
-        # "Key point: X"
         (r"(?:Key\s+point|Key\s+thing|Remember):\s*([^.!?\n]{20,150})", 0.85),
     ]
 
-    # User-provided rule patterns (conventions and requirements)
-    # Only capture explicit user-stated rules
+    # User-provided rule patterns
     RULE_PATTERNS = [
-        # "Always X" at start of sentence (imperative)
         (r"^Always\s+([^.!?\n]{15,100})", 0.85),
-        # "Never X" at start of sentence (imperative)
         (r"^Never\s+([^.!?\n]{15,100})", 0.85),
-        # "We always/never X" - team conventions
         (r"We\s+(?:always|never)\s+([^.!?\n]{15,100})", 0.8),
-        # "Convention: X" or "Rule: X" - explicit labels
         (r"(?:Convention|Rule|Standard):\s*([^.!?\n]{15,150})", 0.9),
     ]
 
-    # Known technology names (for better detection)
+    # Known technology names
     KNOWN_TECHNOLOGIES = {
         'chromadb', 'chroma', 'faiss', 'sqlite', 'postgresql', 'postgres', 'mysql', 'mongodb',
         'redis', 'elasticsearch', 'pinecone', 'weaviate', 'milvus', 'qdrant',
@@ -185,35 +154,21 @@ class ConceptExtractor:
 
     def __init__(self, project_path: str = ""):
         self.project_path = project_path
-        self._file_mentions = Counter()  # Track file mentions per session
+        self._file_mentions = Counter()
 
     def extract_from_message(self, content: str, role: str, session_id: str) -> List[Dict]:
-        """
-        Extract concept candidates from a single message.
-
-        Args:
-            content: Message text content
-            role: 'user' or 'assistant'
-            session_id: Current session ID
-
-        Returns:
-            List of concept candidate dicts
-        """
+        """Extract concept candidates from a single message."""
         candidates = []
 
         if not content or len(content) < 20:
             return candidates
 
-        # Track file mentions
         self._track_file_mentions(content)
 
-        # Extract different concept types
-        # User messages are better for facts/rules, assistant for explanations
         if role == 'user':
             candidates.extend(self._extract_facts(content, session_id))
             candidates.extend(self._extract_rules(content, session_id))
 
-        # Both roles can provide component/tech info, but weight assistant higher
         confidence_boost = 0.1 if role == 'assistant' else 0.0
 
         candidates.extend(self._extract_components(content, session_id, confidence_boost))
@@ -226,7 +181,6 @@ class ConceptExtractor:
 
     def _track_file_mentions(self, content: str):
         """Track which files are mentioned in conversation."""
-        # Note: json/jsonl must come before js, tsx before ts to match longer extensions first
         file_pattern = r'(\w+\.(?:py|tsx|ts|jsonl|json|jsx|js|go|rs|java|rb|yaml|yml|md|sql))'
         for match in re.finditer(file_pattern, content):
             filename = match.group(1)
@@ -241,7 +195,6 @@ class ConceptExtractor:
                 name = match.group(1).strip()
                 description = match.group(2).strip()
 
-                # Validate
                 if not self._is_valid_component_name(name):
                     continue
                 if not self._is_valid_description(description):
@@ -260,8 +213,6 @@ class ConceptExtractor:
     def _extract_file_purposes(self, content: str, session_id: str, confidence_boost: float) -> List[Dict]:
         """Extract file/module purpose concepts."""
         candidates = []
-
-        # Skip these - they look like files but aren't (technology names)
         skip_filenames = {'node.js', 'vue.js', 'next.js', 'nuxt.js', 'express.js', 'react.js', 'angular.js'}
 
         for pattern, base_confidence in self.FILE_PURPOSE_PATTERNS:
@@ -269,7 +220,6 @@ class ConceptExtractor:
                 filename = match.group(1).strip()
                 purpose = match.group(2).strip()
 
-                # Skip technology names that look like files
                 if filename.lower() in skip_filenames:
                     continue
 
@@ -290,8 +240,6 @@ class ConceptExtractor:
     def _extract_technologies(self, content: str, session_id: str, confidence_boost: float) -> List[Dict]:
         """Extract technology role concepts."""
         candidates = []
-
-        # Words that aren't standalone technologies
         skip_tech_names = {
             'daemon', 'server', 'client', 'backend', 'frontend', 'layer',
             'component', 'module', 'service', 'handler', 'the', 'a', 'an',
@@ -305,27 +253,21 @@ class ConceptExtractor:
                 tech_name = match.group(1).strip()
                 role = match.group(2).strip()
 
-                # Skip generic words that aren't technology names
                 if tech_name.lower() in skip_tech_names:
                     continue
 
-                # Tech name must be at least 3 chars and look like a tech name
                 if len(tech_name) < 3:
                     continue
 
-                # Must start with a letter
                 if not tech_name[0].isalpha():
                     continue
 
-                # Boost confidence for known technologies
                 confidence = base_confidence + confidence_boost
                 if tech_name.lower() in self.KNOWN_TECHNOLOGIES:
                     confidence = min(0.95, confidence + 0.15)
                 else:
-                    # Skip if not a recognized tech and description is weak
                     if len(role) < 15:
                         continue
-                    # For unknown tech, lower base confidence
                     confidence = min(confidence, 0.6)
 
                 if not self._is_valid_description(role):
@@ -344,8 +286,6 @@ class ConceptExtractor:
     def _extract_integrations(self, content: str, session_id: str, confidence_boost: float) -> List[Dict]:
         """Extract integration/communication pattern concepts."""
         candidates = []
-
-        # Skip generic/noise words in integration names
         skip_words = {
             'the', 'a', 'an', 'and', 'or', 'to', 'in', 'on', 'at', 'for', 'with',
             'it', 'this', 'that', 'any', 'all', 'needed', 'work', 'tool', 'api',
@@ -357,28 +297,24 @@ class ConceptExtractor:
                 groups = match.groups()
 
                 if len(groups) >= 3:
-                    # "X communicates with Y via Z"
                     from_component = groups[0].strip()
                     to_component = groups[1].strip()
                     mechanism = groups[2].strip()
 
-                    name = f"{from_component} → {to_component}"
+                    name = f"{from_component} -> {to_component}"
                     description = f"Communicates via {mechanism}"
                 elif len(groups) == 2:
-                    # "X → Y" simple flow
                     from_component = groups[0].strip()
                     to_component = groups[1].strip()
 
-                    name = f"{from_component} → {to_component}"
+                    name = f"{from_component} -> {to_component}"
                     description = "Connected"
                 else:
                     continue
 
-                # Skip if either component is a noise word
                 if from_component.lower() in skip_words or to_component.lower() in skip_words:
                     continue
 
-                # Skip if components are too short
                 if len(from_component) < 3 or len(to_component) < 3:
                     continue
 
@@ -400,8 +336,6 @@ class ConceptExtractor:
     def _extract_patterns(self, content: str, session_id: str, confidence_boost: float) -> List[Dict]:
         """Extract design pattern concepts."""
         candidates = []
-
-        # Skip markdown-like content
         skip_prefixes = ['- ', '* ', '# ', '## ', '### ']
 
         for pattern, base_confidence in self.PATTERN_PATTERNS:
@@ -409,16 +343,12 @@ class ConceptExtractor:
                 pattern_name = match.group(1).strip()
                 full_match = match.group(0).strip()
 
-                # Skip if starts with markdown markers
                 if any(full_match.startswith(p) for p in skip_prefixes):
                     continue
 
-                # Skip if too short or looks like code
                 if len(pattern_name) < 5 or '{' in pattern_name or '(' in pattern_name:
                     continue
 
-                # Pattern name should be descriptive (e.g., "two-layer", "microservice")
-                # Skip single common words and generic terms
                 skip_pattern_names = {
                     'the', 'a', 'an', 'this', 'that', 'current', 'new', 'old',
                     'error', 'implement', 'basic', 'simple', 'complex', 'general',
@@ -428,7 +358,7 @@ class ConceptExtractor:
 
                 candidates.append({
                     'concept_type': CONCEPT_PATTERN,
-                    'name': pattern_name.title(),  # Normalize case
+                    'name': pattern_name.title(),
                     'description': full_match[:200],
                     'confidence': min(0.95, base_confidence + confidence_boost),
                     'session_id': session_id,
@@ -445,7 +375,6 @@ class ConceptExtractor:
                 groups = match.groups()
 
                 if len(groups) >= 2:
-                    # Pattern with subject and predicate
                     subject = groups[0].strip()
                     predicate = groups[1].strip()
                     fact_text = f"{subject}: {predicate}"
@@ -455,7 +384,6 @@ class ConceptExtractor:
                 if not self._is_valid_description(fact_text):
                     continue
 
-                # Skip facts that look like garbage or system output
                 fact_lower = fact_text.lower()
                 if any(garbage in fact_lower for garbage in [
                     'no response', '/mcp', 'command', '<', '>', 'error:',
@@ -463,11 +391,9 @@ class ConceptExtractor:
                 ]):
                     continue
 
-                # Must start with capital letter and be a complete thought
                 if not fact_text[0].isupper():
                     continue
 
-                # Generate a short name from the fact
                 name = self._generate_fact_name(fact_text)
 
                 candidates.append({
@@ -497,7 +423,6 @@ class ConceptExtractor:
                 if not self._is_valid_description(rule_text):
                     continue
 
-                # Detect rule type from the MATCHED text, not entire content
                 rule_type = 'guideline'
                 match_lower = full_match.lower()
                 if match_lower.startswith('always') or 'always' in match_lower[:20]:
@@ -527,12 +452,10 @@ class ConceptExtractor:
 
         name_lower = name.lower()
 
-        # Must have at least one significant word (5+ chars)
         words = name.split()
         if not any(len(w) >= 4 for w in words):
             return False
 
-        # Skip common false positives
         skip_words = {
             'the', 'this', 'that', 'which', 'what', 'when', 'where', 'how', 'why',
             'it', 'they', 'we', 'you', 'i', 'he', 'she', 'and', 'or', 'but',
@@ -544,7 +467,6 @@ class ConceptExtractor:
         if name_lower in skip_words:
             return False
 
-        # Skip names that start/end with common words
         skip_starts = ['let ', 'did ', 'and ', 'but ', 'the ', 'a ', 'an ', 'to ', 'i ']
         for prefix in skip_starts:
             if name_lower.startswith(prefix):
@@ -555,7 +477,6 @@ class ConceptExtractor:
             if name_lower.endswith(suffix):
                 return False
 
-        # Must contain at least one letter
         if not any(c.isalpha() for c in name):
             return False
 
@@ -566,12 +487,10 @@ class ConceptExtractor:
         if not desc or len(desc) < 10 or len(desc) > 200:
             return False
 
-        # Must be primarily alphabetic
         alpha_ratio = sum(1 for c in desc if c.isalpha() or c.isspace()) / len(desc)
         if alpha_ratio < 0.7:
             return False
 
-        # Skip code-like content
         if '{' in desc or '(' in desc and ')' in desc:
             return False
         if '`' in desc or '```' in desc:
@@ -581,12 +500,10 @@ class ConceptExtractor:
 
     def _normalize_name(self, name: str) -> str:
         """Normalize a concept name for consistency."""
-        # Title case, remove extra whitespace
         return ' '.join(name.split()).title()
 
     def _generate_fact_name(self, fact_text: str) -> str:
         """Generate a short name from a fact description."""
-        # Take first few significant words
         words = fact_text.split()[:5]
         name = ' '.join(words)
         if len(name) > 40:
@@ -611,15 +528,11 @@ class ConceptStore:
     """
     Persistent storage for codebase concepts.
 
-    Handles upsert with confidence merging, deduplication,
-    and retrieval for mira_init.
+    Uses centralized db_manager for thread-safe writes.
     """
 
     def __init__(self, project_path: str = ""):
         self.project_path = project_path
-        db_path = get_concepts_db_path()
-        if not db_path.exists():
-            init_concepts_db()
 
     def upsert(self, concept: Dict) -> bool:
         """
@@ -628,9 +541,7 @@ class ConceptStore:
         If concept exists, updates confidence based on frequency.
         Returns True if new concept, False if updated existing.
         """
-        db_path = get_concepts_db_path()
-        conn = sqlite3.connect(str(db_path))
-        cursor = conn.cursor()
+        db = get_db_manager()
         now = datetime.now().isoformat()
 
         concept_type = concept.get('concept_type')
@@ -639,29 +550,24 @@ class ConceptStore:
         confidence = concept.get('confidence', 0.5)
         session_id = concept.get('session_id', '')
         metadata = json.dumps(concept.get('metadata', {}))
+        project_path = self.project_path
 
-        is_new = False
-
-        try:
-            # Check if exists
+        def upsert_concept(cursor):
             cursor.execute("""
                 SELECT id, frequency, confidence, source_sessions, description
                 FROM codebase_concepts
                 WHERE project_path = ? AND concept_type = ? AND name = ?
-            """, (self.project_path, concept_type, name))
+            """, (project_path, concept_type, name))
 
             row = cursor.fetchone()
             if row:
-                # Update existing
                 concept_id, freq, old_confidence, sources, old_desc = row
                 sources_list = json.loads(sources) if sources else []
                 if session_id and session_id not in sources_list:
                     sources_list.append(session_id)
 
-                # Boost confidence with frequency (diminishing returns)
                 new_confidence = min(0.95, old_confidence + (confidence * 0.1))
 
-                # Use longer/better description
                 if len(description) > len(old_desc or ''):
                     new_desc = description
                 else:
@@ -674,60 +580,44 @@ class ConceptStore:
                     WHERE id = ?
                 """, (freq + 1, new_confidence, json.dumps(sources_list[-20:]),
                       new_desc, now, metadata, concept_id))
+                return False
             else:
-                # Insert new
                 cursor.execute("""
                     INSERT INTO codebase_concepts
                     (project_path, concept_type, name, description, metadata,
                      confidence, source_sessions, first_seen, last_updated)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """, (self.project_path, concept_type, name, description, metadata,
+                """, (project_path, concept_type, name, description, metadata,
                       confidence, json.dumps([session_id] if session_id else []),
                       now, now))
 
-                # Update FTS
                 cursor.execute("""
                     INSERT INTO concepts_fts(rowid, name, description)
                     VALUES (last_insert_rowid(), ?, ?)
                 """, (name, description))
 
-                is_new = True
+                return True
 
-            conn.commit()
+        try:
+            return db.execute_write_func(CONCEPTS_DB, upsert_concept)
         except Exception as e:
             log(f"Error upserting concept: {e}")
-        finally:
-            conn.close()
-
-        return is_new
+            return False
 
     def _is_valid_purpose(self, purpose: str) -> bool:
-        """
-        Validate that a purpose string is meaningful, not a conversation fragment.
-
-        Filters out:
-        - Incomplete sentences / fragments
-        - Code snippets or technical fragments
-        - Tool output / debug messages
-        """
+        """Validate that a purpose string is meaningful."""
         if not purpose or len(purpose.strip()) < 10:
             return False
 
         purpose_lower = purpose.lower()
 
-        # Fragments that indicate conversation noise, not real purposes
         garbage_indicators = [
-            # Code/technical fragments
             'return type', 'redundant code', 'import ', 'def ', 'class ',
             '():', '()', '{}', '[]', '===', '!==', '=>',
-            # Incomplete sentences
             ' and ', ' or ', ' the ', ' that ', ' which ',
-            # Debug/tool output
             'sanitized', 'exception', 'error:', 'warning:',
             'todo:', 'fixme:', 'hack:',
-            # Process narration
             'let me', "i'll", 'now we', 'checking', 'looking at',
-            # Status messages
             'has been', 'was changed', 'is now', 'updated to',
         ]
 
@@ -735,33 +625,20 @@ class ConceptStore:
             if indicator in purpose_lower:
                 return False
 
-        # Must end with valid punctuation or be a noun phrase
-        # Allow phrases like "User authentication module" without punctuation
         valid_endings = '.!?)'
         if not purpose.rstrip()[-1] in valid_endings:
-            # If no punctuation, must look like a noun phrase (capitalized, reasonable length)
             words = purpose.split()
             if len(words) < 2 or len(words) > 15:
                 return False
 
-        # Check for coherent structure - avoid fragments like "type and redundant code:"
         if purpose.rstrip().endswith(':'):
             return False
 
         return True
 
     def get_concepts_for_init(self, min_confidence: float = 0.6) -> Dict:
-        """
-        Get codebase concepts for mira_init response.
-
-        Returns structured data suitable for inclusion in mira_init.
-        """
-        db_path = get_concepts_db_path()
-        if not db_path.exists():
-            return self._empty_response()
-
-        conn = sqlite3.connect(str(db_path))
-        cursor = conn.cursor()
+        """Get codebase concepts for mira_init response."""
+        db = get_db_manager()
 
         result = {
             'architecture_summary': '',
@@ -777,7 +654,7 @@ class ConceptStore:
 
         try:
             # Get components
-            cursor.execute("""
+            rows = db.execute_read(CONCEPTS_DB, """
                 SELECT name, description, related_files, confidence, frequency
                 FROM codebase_concepts
                 WHERE project_path = ? AND concept_type = ? AND confidence >= ?
@@ -785,22 +662,21 @@ class ConceptStore:
                 LIMIT 10
             """, (self.project_path, CONCEPT_COMPONENT, min_confidence))
 
-            for name, desc, files, conf, freq in cursor.fetchall():
+            for row in rows:
                 result['components'].append({
-                    'name': name,
-                    'purpose': desc,
-                    'files': json.loads(files) if files else [],
-                    'confidence': round(conf, 2),
-                    'mentions': freq
+                    'name': row['name'],
+                    'purpose': row['description'],
+                    'files': json.loads(row['related_files']) if row['related_files'] else [],
+                    'confidence': f"{int(row['confidence'] * 100)}%",
+                    'mentions': row['frequency']
                 })
 
-            # Build architecture summary from top components
             if result['components']:
                 top_components = [c['name'] for c in result['components'][:3]]
                 result['architecture_summary'] = f"Key components: {', '.join(top_components)}"
 
             # Get integrations
-            cursor.execute("""
+            rows = db.execute_read(CONCEPTS_DB, """
                 SELECT name, description, metadata, confidence
                 FROM codebase_concepts
                 WHERE project_path = ? AND concept_type = ? AND confidence >= ?
@@ -808,17 +684,17 @@ class ConceptStore:
                 LIMIT 10
             """, (self.project_path, CONCEPT_INTEGRATION, min_confidence))
 
-            for name, desc, metadata, conf in cursor.fetchall():
-                meta = json.loads(metadata) if metadata else {}
-                mechanism = meta.get('mechanism') or desc or 'Connected'
+            for row in rows:
+                meta = json.loads(row['metadata']) if row['metadata'] else {}
+                mechanism = meta.get('mechanism') or row['description'] or 'Connected'
                 result['integrations'].append({
-                    'flow': name,
+                    'flow': row['name'],
                     'mechanism': mechanism,
-                    'confidence': round(conf, 2)
+                    'confidence': f"{int(row['confidence'] * 100)}%"
                 })
 
             # Get technologies
-            cursor.execute("""
+            rows = db.execute_read(CONCEPTS_DB, """
                 SELECT name, description, confidence, frequency
                 FROM codebase_concepts
                 WHERE project_path = ? AND concept_type = ? AND confidence >= ?
@@ -826,15 +702,15 @@ class ConceptStore:
                 LIMIT 10
             """, (self.project_path, CONCEPT_TECHNOLOGY, min_confidence))
 
-            for name, desc, conf, freq in cursor.fetchall():
+            for row in rows:
                 result['technologies'].append({
-                    'name': name,
-                    'role': desc,
-                    'confidence': round(conf, 2)
+                    'name': row['name'],
+                    'role': row['description'],
+                    'confidence': f"{int(row['confidence'] * 100)}%"
                 })
 
-            # Get key modules - filter out invalid purposes
-            cursor.execute("""
+            # Get key modules
+            rows = db.execute_read(CONCEPTS_DB, """
                 SELECT name, description, confidence
                 FROM codebase_concepts
                 WHERE project_path = ? AND concept_type = ? AND confidence >= ?
@@ -842,25 +718,22 @@ class ConceptStore:
                 LIMIT 25
             """, (self.project_path, CONCEPT_MODULE, min_confidence))
 
-            for name, desc, conf in cursor.fetchall():
-                # Only include modules with valid, meaningful purposes
-                if self._is_valid_purpose(desc):
+            for row in rows:
+                if self._is_valid_purpose(row['description']):
                     result['key_modules'].append({
-                        'file': name,
-                        'purpose': desc,
-                        'confidence': round(conf, 2)
+                        'file': row['name'],
+                        'purpose': row['description'],
+                        'confidence': f"{int(row['confidence'] * 100)}%"
                     })
-                elif conf >= 0.9:
-                    # High confidence but invalid purpose - include with generic description
+                elif row['confidence'] >= 0.9:
                     result['key_modules'].append({
-                        'file': name,
-                        'purpose': f"Frequently discussed file ({name})",
-                        'confidence': round(conf, 2)
+                        'file': row['name'],
+                        'purpose': f"Frequently discussed file ({row['name']})",
+                        'confidence': f"{int(row['confidence'] * 100)}%"
                     })
-                # Skip low-confidence modules with garbage purposes
 
             # Get patterns
-            cursor.execute("""
+            rows = db.execute_read(CONCEPTS_DB, """
                 SELECT name, description, confidence
                 FROM codebase_concepts
                 WHERE project_path = ? AND concept_type = ? AND confidence >= ?
@@ -868,15 +741,15 @@ class ConceptStore:
                 LIMIT 8
             """, (self.project_path, CONCEPT_PATTERN, min_confidence))
 
-            for name, desc, conf in cursor.fetchall():
+            for row in rows:
                 result['patterns'].append({
-                    'name': name,
-                    'description': desc,
-                    'confidence': round(conf, 2)
+                    'name': row['name'],
+                    'description': row['description'],
+                    'confidence': f"{int(row['confidence'] * 100)}%"
                 })
 
             # Get user-provided facts
-            cursor.execute("""
+            rows = db.execute_read(CONCEPTS_DB, """
                 SELECT name, description, confidence
                 FROM codebase_concepts
                 WHERE project_path = ? AND concept_type = ? AND confidence >= ?
@@ -884,14 +757,14 @@ class ConceptStore:
                 LIMIT 10
             """, (self.project_path, CONCEPT_FACT, min_confidence - 0.1))
 
-            for name, desc, conf in cursor.fetchall():
+            for row in rows:
                 result['facts'].append({
-                    'fact': desc,
-                    'confidence': round(conf, 2)
+                    'fact': row['description'],
+                    'confidence': f"{int(row['confidence'] * 100)}%"
                 })
 
             # Get user-provided rules
-            cursor.execute("""
+            rows = db.execute_read(CONCEPTS_DB, """
                 SELECT name, description, metadata, confidence
                 FROM codebase_concepts
                 WHERE project_path = ? AND concept_type = ? AND confidence >= ?
@@ -899,19 +772,16 @@ class ConceptStore:
                 LIMIT 10
             """, (self.project_path, CONCEPT_RULE, min_confidence - 0.1))
 
-            for name, desc, metadata, conf in cursor.fetchall():
-                meta = json.loads(metadata) if metadata else {}
+            for row in rows:
+                meta = json.loads(row['metadata']) if row['metadata'] else {}
                 result['rules'].append({
-                    'rule': desc,
+                    'rule': row['description'],
                     'type': meta.get('rule_type', 'guideline'),
-                    'confidence': round(conf, 2)
+                    'confidence': f"{int(row['confidence'] * 100)}%"
                 })
-
-            conn.close()
 
         except Exception as e:
             log(f"Error getting concepts for init: {e}")
-            conn.close()
             return self._empty_response()
 
         return result
@@ -932,25 +802,19 @@ class ConceptStore:
 
     def get_stats(self) -> Dict:
         """Get statistics about stored concepts."""
-        db_path = get_concepts_db_path()
-        if not db_path.exists():
-            return {'total': 0, 'by_type': {}}
+        db = get_db_manager()
 
         try:
-            conn = sqlite3.connect(str(db_path))
-            cursor = conn.cursor()
-
-            cursor.execute("""
+            rows = db.execute_read(CONCEPTS_DB, """
                 SELECT concept_type, COUNT(*) as cnt
                 FROM codebase_concepts
                 WHERE project_path = ?
                 GROUP BY concept_type
             """, (self.project_path,))
 
-            by_type = {row[0]: row[1] for row in cursor.fetchall()}
+            by_type = {row['concept_type']: row['cnt'] for row in rows}
             total = sum(by_type.values())
 
-            conn.close()
             return {'total': total, 'by_type': by_type}
         except Exception as e:
             log(f"Error getting concept stats: {e}")
@@ -976,7 +840,6 @@ def extract_concepts_from_conversation(conversation: dict, session_id: str, proj
         role = msg.get('role', '')
         content = msg.get('content', '')
 
-        # Handle content that might be a list
         if isinstance(content, list):
             content = ' '.join(
                 item.get('text', '') for item in content
@@ -986,14 +849,12 @@ def extract_concepts_from_conversation(conversation: dict, session_id: str, proj
         if not content:
             continue
 
-        # Extract concepts from this message
         candidates = extractor.extract_from_message(content, role, session_id)
 
         for candidate in candidates:
             if store.upsert(candidate):
                 concepts_found += 1
 
-    # Store hot files as module concepts (skip non-file names)
     skip_hot_files = {'node.js', 'vue.js', 'next.js', 'react.js', 'express.js'}
     for filename, count in extractor.get_hot_files():
         if count >= 3 and filename.lower() not in skip_hot_files:

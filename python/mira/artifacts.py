@@ -2,88 +2,70 @@
 MIRA3 Artifact Storage Module
 
 SQLite-based storage for artifacts (code blocks, file operations, etc.)
+Uses centralized db_manager for thread-safe writes during parallel ingestion.
 """
 
 import json
 import re
 
-from .utils import get_artifact_db_path, log, extract_query_terms
+from .utils import log, extract_query_terms
+from .db_manager import get_db_manager
 
-# Global database connection
-_artifact_db = None
+# Database name for artifacts
+ARTIFACTS_DB = "artifacts.db"
+
+# Schema for artifacts database
+ARTIFACTS_SCHEMA = """
+-- File operations table - stores Write and Edit operations for file reconstruction
+CREATE TABLE IF NOT EXISTS file_operations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT NOT NULL,
+    operation_type TEXT NOT NULL,
+    file_path TEXT NOT NULL,
+    content TEXT,
+    old_string TEXT,
+    new_string TEXT,
+    replace_all INTEGER DEFAULT 0,
+    sequence_num INTEGER,
+    timestamp TEXT,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
+
+-- General artifacts table
+CREATE TABLE IF NOT EXISTS artifacts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT NOT NULL,
+    artifact_type TEXT NOT NULL,
+    content TEXT NOT NULL,
+    content_hash TEXT NOT NULL,
+    language TEXT,
+    title TEXT,
+    line_count INTEGER,
+    char_count INTEGER,
+    role TEXT,
+    message_index INTEGER,
+    timestamp TEXT,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(session_id, content_hash)
+);
+
+-- Indexes
+CREATE INDEX IF NOT EXISTS idx_file_ops_session ON file_operations(session_id);
+CREATE INDEX IF NOT EXISTS idx_file_ops_path ON file_operations(file_path);
+CREATE INDEX IF NOT EXISTS idx_artifacts_session ON artifacts(session_id);
+
+-- Full-text search for artifacts
+CREATE VIRTUAL TABLE IF NOT EXISTS artifacts_fts USING fts5(
+    content, title, content='artifacts', content_rowid='id'
+);
+"""
 
 
 def init_artifact_db():
     """Initialize the SQLite database for artifact storage."""
-    global _artifact_db
-    import sqlite3
-
-    db_path = get_artifact_db_path()
-    _artifact_db = sqlite3.connect(str(db_path), check_same_thread=False)
-    _artifact_db.row_factory = sqlite3.Row
-
-    cursor = _artifact_db.cursor()
-
-    # File operations table - stores Write and Edit operations for file reconstruction
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS file_operations (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            session_id TEXT NOT NULL,
-            operation_type TEXT NOT NULL,
-            file_path TEXT NOT NULL,
-            content TEXT,
-            old_string TEXT,
-            new_string TEXT,
-            replace_all INTEGER DEFAULT 0,
-            sequence_num INTEGER,
-            timestamp TEXT,
-            created_at TEXT DEFAULT CURRENT_TIMESTAMP
-        )
-    ''')
-
-    # General artifacts table
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS artifacts (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            session_id TEXT NOT NULL,
-            artifact_type TEXT NOT NULL,
-            content TEXT NOT NULL,
-            content_hash TEXT NOT NULL,
-            language TEXT,
-            title TEXT,
-            line_count INTEGER,
-            char_count INTEGER,
-            role TEXT,
-            message_index INTEGER,
-            timestamp TEXT,
-            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-            UNIQUE(session_id, content_hash)
-        )
-    ''')
-
-    # Indexes
-    cursor.execute('CREATE INDEX IF NOT EXISTS idx_file_ops_session ON file_operations(session_id)')
-    cursor.execute('CREATE INDEX IF NOT EXISTS idx_file_ops_path ON file_operations(file_path)')
-    cursor.execute('CREATE INDEX IF NOT EXISTS idx_artifacts_session ON artifacts(session_id)')
-
-    # Full-text search for artifacts
-    cursor.execute('''
-        CREATE VIRTUAL TABLE IF NOT EXISTS artifacts_fts USING fts5(
-            content, title, content='artifacts', content_rowid='id'
-        )
-    ''')
-
-    _artifact_db.commit()
+    db = get_db_manager()
+    db.init_schema(ARTIFACTS_DB, ARTIFACTS_SCHEMA)
     log("Artifact database initialized")
-    return _artifact_db
-
-
-def get_artifact_db():
-    """Get the artifact database connection, initializing if needed."""
-    global _artifact_db
-    if _artifact_db is None:
-        init_artifact_db()
-    return _artifact_db
 
 
 def store_file_operation(session_id: str, op_type: str, file_path: str,
@@ -104,20 +86,17 @@ def store_file_operation(session_id: str, op_type: str, file_path: str,
         sequence_num: Order of operation within session
         timestamp: When the operation occurred
     """
-    db = get_artifact_db()
-    cursor = db.cursor()
-
-    cursor.execute('''
-        INSERT INTO file_operations (
+    db = get_db_manager()
+    db.execute_write(
+        ARTIFACTS_DB,
+        '''INSERT INTO file_operations (
             session_id, operation_type, file_path, content,
             old_string, new_string, replace_all, sequence_num, timestamp
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    ''', (
-        session_id, op_type, file_path, content,
-        old_string, new_string, 1 if replace_all else 0,
-        sequence_num, timestamp
-    ))
-    db.commit()
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+        (session_id, op_type, file_path, content,
+         old_string, new_string, 1 if replace_all else 0,
+         sequence_num, timestamp)
+    )
 
 
 def get_file_operations(file_path: str = None, session_id: str = None) -> list:
@@ -130,8 +109,7 @@ def get_file_operations(file_path: str = None, session_id: str = None) -> list:
 
     Returns list of operations in sequence order.
     """
-    db = get_artifact_db()
-    cursor = db.cursor()
+    db = get_db_manager()
 
     sql = 'SELECT * FROM file_operations WHERE 1=1'
     params = []
@@ -146,8 +124,8 @@ def get_file_operations(file_path: str = None, session_id: str = None) -> list:
 
     sql += ' ORDER BY session_id, sequence_num'
 
-    cursor.execute(sql, params)
-    return [dict(row) for row in cursor.fetchall()]
+    rows = db.execute_read(ARTIFACTS_DB, sql, tuple(params))
+    return [dict(row) for row in rows]
 
 
 def reconstruct_file(file_path: str) -> str:
@@ -158,33 +136,33 @@ def reconstruct_file(file_path: str) -> str:
 
     Returns the reconstructed file content, or None if not found.
     """
-    db = get_artifact_db()
-    cursor = db.cursor()
+    db = get_db_manager()
 
     # Find the most recent Write operation for this file
-    cursor.execute('''
-        SELECT * FROM file_operations
-        WHERE file_path = ? AND operation_type = 'write'
-        ORDER BY created_at DESC LIMIT 1
-    ''', (file_path,))
+    write_op = db.execute_read_one(
+        ARTIFACTS_DB,
+        '''SELECT * FROM file_operations
+           WHERE file_path = ? AND operation_type = 'write'
+           ORDER BY created_at DESC LIMIT 1''',
+        (file_path,)
+    )
 
-    write_op = cursor.fetchone()
     if not write_op:
         return None
 
     content = write_op['content']
-    write_time = write_op['created_at']
-
-    # Get all Edit operations after or at the same time as this Write
-    # Use >= to catch edits in the same second, filter by sequence_num > 0 or id > write_id
     write_id = write_op['id']
-    cursor.execute('''
-        SELECT * FROM file_operations
-        WHERE file_path = ? AND operation_type = 'edit' AND id > ?
-        ORDER BY id, sequence_num
-    ''', (file_path, write_id))
 
-    for edit in cursor.fetchall():
+    # Get all Edit operations after this Write
+    edits = db.execute_read(
+        ARTIFACTS_DB,
+        '''SELECT * FROM file_operations
+           WHERE file_path = ? AND operation_type = 'edit' AND id > ?
+           ORDER BY id, sequence_num''',
+        (file_path, write_id)
+    )
+
+    for edit in edits:
         old = edit['old_string']
         new = edit['new_string']
         replace_all = edit['replace_all']
@@ -272,26 +250,25 @@ def extract_file_operations_from_messages(messages: list, session_id: str) -> in
 
 def get_artifact_stats() -> dict:
     """Get statistics about stored artifacts."""
-    db = get_artifact_db()
-    cursor = db.cursor()
+    db = get_db_manager()
 
     stats = {'total': 0, 'by_type': {}, 'by_language': {}, 'file_operations': 0}
 
     # Count artifacts
-    cursor.execute('SELECT COUNT(*) FROM artifacts')
-    stats['total'] = cursor.fetchone()[0]
+    row = db.execute_read_one(ARTIFACTS_DB, 'SELECT COUNT(*) as cnt FROM artifacts')
+    stats['total'] = row['cnt'] if row else 0
 
-    cursor.execute('SELECT artifact_type, COUNT(*) FROM artifacts GROUP BY artifact_type')
-    for row in cursor.fetchall():
-        stats['by_type'][row[0]] = row[1]
+    rows = db.execute_read(ARTIFACTS_DB, 'SELECT artifact_type, COUNT(*) as cnt FROM artifacts GROUP BY artifact_type')
+    for row in rows:
+        stats['by_type'][row['artifact_type']] = row['cnt']
 
-    cursor.execute('SELECT language, COUNT(*) FROM artifacts WHERE language IS NOT NULL GROUP BY language')
-    for row in cursor.fetchall():
-        stats['by_language'][row[0]] = row[1]
+    rows = db.execute_read(ARTIFACTS_DB, 'SELECT language, COUNT(*) as cnt FROM artifacts WHERE language IS NOT NULL GROUP BY language')
+    for row in rows:
+        stats['by_language'][row['language']] = row['cnt']
 
     # Count file operations
-    cursor.execute('SELECT COUNT(*) FROM file_operations')
-    stats['file_operations'] = cursor.fetchone()[0]
+    row = db.execute_read_one(ARTIFACTS_DB, 'SELECT COUNT(*) as cnt FROM file_operations')
+    stats['file_operations'] = row['cnt'] if row else 0
 
     return stats
 
@@ -308,8 +285,7 @@ def get_journey_stats() -> dict:
     """
     from pathlib import Path
 
-    db = get_artifact_db()
-    cursor = db.cursor()
+    db = get_db_manager()
 
     stats = {
         'files_created': 0,
@@ -323,43 +299,42 @@ def get_journey_stats() -> dict:
 
     try:
         # Count Write operations (new file creations)
-        cursor.execute("SELECT COUNT(*) FROM file_operations WHERE operation_type = 'write'")
-        stats['files_created'] = cursor.fetchone()[0]
+        row = db.execute_read_one(ARTIFACTS_DB, "SELECT COUNT(*) as cnt FROM file_operations WHERE operation_type = 'write'")
+        stats['files_created'] = row['cnt'] if row else 0
 
         # Count Edit operations (modifications)
-        cursor.execute("SELECT COUNT(*) FROM file_operations WHERE operation_type = 'edit'")
-        stats['total_edits'] = cursor.fetchone()[0]
+        row = db.execute_read_one(ARTIFACTS_DB, "SELECT COUNT(*) as cnt FROM file_operations WHERE operation_type = 'edit'")
+        stats['total_edits'] = row['cnt'] if row else 0
 
         # Count unique files touched
-        cursor.execute("SELECT COUNT(DISTINCT file_path) FROM file_operations")
-        stats['unique_files'] = cursor.fetchone()[0]
+        row = db.execute_read_one(ARTIFACTS_DB, "SELECT COUNT(DISTINCT file_path) as cnt FROM file_operations")
+        stats['unique_files'] = row['cnt'] if row else 0
 
         # Count files that were modified (have edit operations)
-        cursor.execute("""
-            SELECT COUNT(DISTINCT file_path) FROM file_operations
+        row = db.execute_read_one(ARTIFACTS_DB, """
+            SELECT COUNT(DISTINCT file_path) as cnt FROM file_operations
             WHERE operation_type = 'edit'
         """)
-        stats['files_modified'] = cursor.fetchone()[0]
+        stats['files_modified'] = row['cnt'] if row else 0
 
         # Estimate lines written from Write operations (content length / avg line length ~40)
-        cursor.execute("""
-            SELECT SUM(LENGTH(content)) FROM file_operations
+        row = db.execute_read_one(ARTIFACTS_DB, """
+            SELECT SUM(LENGTH(content)) as total FROM file_operations
             WHERE operation_type = 'write' AND content IS NOT NULL
         """)
-        total_chars = cursor.fetchone()[0] or 0
+        total_chars = row['total'] if row and row['total'] else 0
         stats['lines_written'] = total_chars // 40  # Rough estimate
 
         # Also count lines from edit new_string additions
-        cursor.execute("""
-            SELECT SUM(LENGTH(new_string)) FROM file_operations
+        row = db.execute_read_one(ARTIFACTS_DB, """
+            SELECT SUM(LENGTH(new_string)) as total FROM file_operations
             WHERE operation_type = 'edit' AND new_string IS NOT NULL
         """)
-        edit_chars = cursor.fetchone()[0] or 0
+        edit_chars = row['total'] if row and row['total'] else 0
         stats['lines_written'] += edit_chars // 40
 
         # Most active files (by total operations)
-        # Fetch more than needed since we'll filter out non-existent files
-        cursor.execute("""
+        rows = db.execute_read(ARTIFACTS_DB, """
             SELECT file_path, COUNT(*) as ops,
                    SUM(CASE WHEN operation_type = 'write' THEN 1 ELSE 0 END) as writes,
                    SUM(CASE WHEN operation_type = 'edit' THEN 1 ELSE 0 END) as edits
@@ -368,8 +343,8 @@ def get_journey_stats() -> dict:
             ORDER BY ops DESC
             LIMIT 25
         """)
-        for row in cursor.fetchall():
-            full_path = row[0]
+        for row in rows:
+            full_path = row['file_path']
             # Skip files that no longer exist (stale references from refactored code)
             if not Path(full_path).exists():
                 continue
@@ -378,21 +353,21 @@ def get_journey_stats() -> dict:
             stats['most_active_files'].append({
                 'file': filename,
                 'full_path': full_path,
-                'total_ops': row[1],
-                'writes': row[2],
-                'edits': row[3]
+                'total_ops': row['ops'],
+                'writes': row['writes'],
+                'edits': row['edits']
             })
             if len(stats['most_active_files']) >= 10:
                 break
 
         # Recently touched files (last 5 unique files that still exist)
-        cursor.execute("""
+        rows = db.execute_read(ARTIFACTS_DB, """
             SELECT DISTINCT file_path FROM file_operations
             ORDER BY created_at DESC
             LIMIT 15
         """)
-        for row in cursor.fetchall():
-            full_path = row[0]
+        for row in rows:
+            full_path = row['file_path']
             # Skip files that no longer exist
             if not Path(full_path).exists():
                 continue
@@ -417,8 +392,7 @@ def _escape_fts_term(term: str) -> str:
 
 def search_artifacts_for_query(query: str, limit: int = 10) -> list:
     """Search artifacts using full-text search."""
-    db = get_artifact_db()
-    cursor = db.cursor()
+    db = get_db_manager()
 
     # Extract search terms using centralized function (alphanumeric, 3+ chars)
     terms = extract_query_terms(query, max_terms=5)
@@ -430,15 +404,17 @@ def search_artifacts_for_query(query: str, limit: int = 10) -> list:
     fts_query = ' OR '.join(escaped_terms)
 
     try:
-        cursor.execute('''
-            SELECT a.* FROM artifacts a
-            JOIN artifacts_fts fts ON a.id = fts.rowid
-            WHERE artifacts_fts MATCH ?
-            ORDER BY rank LIMIT ?
-        ''', (fts_query, limit))
+        rows = db.execute_read(
+            ARTIFACTS_DB,
+            '''SELECT a.* FROM artifacts a
+               JOIN artifacts_fts fts ON a.id = fts.rowid
+               WHERE artifacts_fts MATCH ?
+               ORDER BY rank LIMIT ?''',
+            (fts_query, limit)
+        )
 
         results = []
-        for row in cursor.fetchall():
+        for row in rows:
             results.append({
                 'session_id': row['session_id'],
                 'artifact_type': row['artifact_type'],
@@ -473,38 +449,43 @@ def store_artifact(session_id: str, artifact_type: str, content: str,
     """
     import hashlib
 
-    db = get_artifact_db()
-    cursor = db.cursor()
+    db = get_db_manager()
 
     # Create content hash for deduplication
     content_hash = hashlib.sha256(content.encode('utf-8')).hexdigest()[:32]
 
-    try:
-        cursor.execute('''
-            INSERT INTO artifacts (
+    def insert_with_fts(cursor):
+        try:
+            cursor.execute('''
+                INSERT INTO artifacts (
+                    session_id, artifact_type, content, content_hash,
+                    language, title, line_count, char_count,
+                    role, message_index, timestamp
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (
                 session_id, artifact_type, content, content_hash,
-                language, title, line_count, char_count,
+                language, title, content.count('\n') + 1, len(content),
                 role, message_index, timestamp
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ''', (
-            session_id, artifact_type, content, content_hash,
-            language, title, content.count('\n') + 1, len(content),
-            role, message_index, timestamp
-        ))
-        db.commit()
+            ))
 
-        # Update FTS index
-        cursor.execute('''
-            INSERT INTO artifacts_fts (rowid, content, title)
-            VALUES (?, ?, ?)
-        ''', (cursor.lastrowid, content, title or ''))
-        db.commit()
+            rowid = cursor.lastrowid
 
-        return True
-    except Exception as e:
-        # Likely duplicate (UNIQUE constraint)
-        if 'UNIQUE' not in str(e):
-            log(f"Error storing artifact: {e}")
+            # Update FTS index
+            cursor.execute('''
+                INSERT INTO artifacts_fts (rowid, content, title)
+                VALUES (?, ?, ?)
+            ''', (rowid, content, title or ''))
+
+            return True
+        except Exception as e:
+            # Likely duplicate (UNIQUE constraint)
+            if 'UNIQUE' not in str(e):
+                log(f"Error storing artifact: {e}")
+            return False
+
+    try:
+        return db.execute_write_func(ARTIFACTS_DB, insert_with_fts)
+    except Exception:
         return False
 
 
