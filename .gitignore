@@ -19,6 +19,12 @@ eggs/
 *.egg-info/
 *.egg
 
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+
 # IDE
 .vscode/
 .idea/
