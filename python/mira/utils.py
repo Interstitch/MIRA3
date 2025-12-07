@@ -1,0 +1,151 @@
+"""
+MIRA3 Utility Functions
+
+Core utilities for paths, logging, and common operations.
+"""
+
+import sys
+import os
+import json
+import subprocess
+from pathlib import Path
+from datetime import datetime
+from typing import Optional
+
+
+def get_mira_path() -> Path:
+    """Get the .mira storage directory path."""
+    return Path.cwd() / ".mira"
+
+
+def get_venv_path() -> Path:
+    """Get the virtualenv path."""
+    return get_mira_path() / ".venv"
+
+
+def get_venv_python() -> str:
+    """Get the Python executable inside the virtualenv."""
+    venv = get_venv_path()
+    if sys.platform == "win32":
+        return str(venv / "Scripts" / "python.exe")
+    return str(venv / "bin" / "python")
+
+
+def get_venv_pip() -> str:
+    """Get the pip executable inside the virtualenv."""
+    venv = get_venv_path()
+    if sys.platform == "win32":
+        return str(venv / "Scripts" / "pip.exe")
+    return str(venv / "bin" / "pip")
+
+
+def get_models_path() -> Path:
+    """Get the models cache directory."""
+    return get_mira_path() / "models"
+
+
+def get_artifact_db_path() -> Path:
+    """Get the path to the artifacts SQLite database."""
+    return get_mira_path() / "artifacts.db"
+
+
+def log(message: str):
+    """Log a message to stderr (visible to Node.js)."""
+    print(f"[MIRA Backend] {message}", file=sys.stderr, flush=True)
+
+
+def configure_model_cache():
+    """Configure environment variables to cache models in .mira/models/."""
+    models_path = get_models_path()
+    models_path.mkdir(parents=True, exist_ok=True)
+
+    # Set environment variables for Hugging Face / sentence-transformers
+    os.environ["TRANSFORMERS_CACHE"] = str(models_path)
+    os.environ["HF_HOME"] = str(models_path)
+    os.environ["SENTENCE_TRANSFORMERS_HOME"] = str(models_path)
+
+
+def parse_timestamp(ts: str) -> Optional[datetime]:
+    """Parse ISO timestamp string to datetime object."""
+    if not ts:
+        return None
+    try:
+        # Handle ISO format: "2025-12-07T04:45:36.800Z"
+        ts = ts.rstrip('Z')
+        return datetime.fromisoformat(ts)
+    except (ValueError, TypeError):
+        return None
+
+
+def extract_text_content(message: dict) -> str:
+    """Extract text content from a message object."""
+    if not isinstance(message, dict):
+        return ""
+
+    content = message.get('content', '')
+
+    if isinstance(content, str):
+        return content
+
+    if isinstance(content, list):
+        texts = []
+        for item in content:
+            if isinstance(item, dict) and item.get('type') == 'text':
+                texts.append(item.get('text', ''))
+            elif isinstance(item, str):
+                texts.append(item)
+        return '\n'.join(texts)
+
+    return ""
+
+
+# Cached custodian name
+_custodian_cache: Optional[str] = None
+
+
+def get_custodian() -> str:
+    """Try to discover the user's name (cached)."""
+    global _custodian_cache
+    if _custodian_cache is not None:
+        return _custodian_cache
+
+    # Try git config
+    try:
+        result = subprocess.run(
+            ["git", "config", "user.name"],
+            capture_output=True,
+            text=True,
+            timeout=5
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            _custodian_cache = result.stdout.strip()
+            return _custodian_cache
+    except (subprocess.SubprocessError, OSError, TimeoutError):
+        pass
+
+    # Try environment
+    for var in ["USER", "USERNAME", "LOGNAME"]:
+        if var in os.environ:
+            _custodian_cache = os.environ[var]
+            return _custodian_cache
+
+    _custodian_cache = "Unknown"
+    return _custodian_cache
+
+
+import re
+
+# Pre-compiled pattern for extracting query terms (alphanumeric, 3+ chars)
+_QUERY_TERM_PATTERN = re.compile(r'\b[a-zA-Z0-9]{3,}\b')
+
+
+def extract_query_terms(query: str, max_terms: int = 10) -> list:
+    """
+    Extract search terms from a query string.
+
+    Returns lowercase alphanumeric terms with 3+ characters.
+    """
+    if not query:
+        return []
+    terms = _QUERY_TERM_PATTERN.findall(query.lower())
+    return terms[:max_terms]
