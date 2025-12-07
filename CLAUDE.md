@@ -60,6 +60,7 @@ npx tsx test/integration.ts
 | `python/mira/embedding.py` | MiraEmbeddingFunction for ChromaDB |
 | `python/mira/custodian.py` | Custodian learning and profile management |
 | `python/mira/insights.py` | Error pattern recognition and decision journal |
+| `python/mira/concepts.py` | Codebase concept extraction and tracking |
 
 ### Communication Flow
 
@@ -79,6 +80,7 @@ The Node.js layer is intentionally thin. All storage, search, and ingestion logi
 ├── artifacts.db     # SQLite database for structured content (code, lists, tables, etc.)
 ├── custodian.db     # SQLite database for learned user preferences and patterns
 ├── insights.db      # SQLite database for error patterns and architectural decisions
+├── concepts.db      # SQLite database for learned codebase concepts
 ├── archives/        # Conversation copies
 ├── metadata/        # Extracted session metadata (JSON)
 └── models/          # Cached sentence-transformers model
@@ -177,3 +179,34 @@ MIRA extracts architectural and design decisions from conversations via `mira_de
 - Understand why past choices were made
 - Maintain consistency across sessions
 - Onboard to project decisions quickly
+
+## Codebase Concept Tracking
+
+MIRA extracts and tracks key concepts about the codebase from conversation analysis, providing this context via `mira_init`:
+
+**What MIRA Captures:**
+- **Components**: Major architectural pieces (e.g., "Python backend", "MCP server")
+- **Module purposes**: What each file does (learned from discussion)
+- **Technology roles**: How technologies are used (e.g., "ChromaDB for vector search")
+- **Integration patterns**: How components communicate (e.g., "JSON-RPC over stdio")
+- **Design patterns**: Architectural approaches (e.g., "two-layer architecture")
+- **User-provided facts**: Explicit statements about the codebase
+- **User-provided rules**: Conventions and requirements
+
+**Extraction Approach:**
+- Pattern-based extraction from conversation content
+- Higher confidence for assistant explanations
+- Known technology detection with boosted confidence
+- Frequency tracking for repeated mentions
+- Case-normalized deduplication
+
+**Storage:**
+- Concepts stored in `concepts.db` (SQLite)
+- Scoped by project path
+- Confidence scores based on frequency and corroboration
+
+**How It Helps:**
+- New Claude sessions immediately understand codebase architecture
+- Know which files are central/frequently discussed
+- Understand how components relate without re-exploration
+- Respect user-stated conventions and rules

@@ -214,6 +214,19 @@ def _learn_preferences(cursor, user_messages: list, session_id: str, now: str):
         (PREF_COMMUNICATION, r"(?:be |keep it |make it |i (?:want|prefer|like) )\s*(concise|brief|detailed|verbose|short)", 0.7),
         (PREF_COMMUNICATION, r"(no emojis?|without emojis?|don't use emojis?)", 0.9),
         (PREF_COMMUNICATION, r"(show (?:me )?code first|code before explanation)", 0.8),
+        # More interaction preferences - but NOT generic approval words
+        (PREF_COMMUNICATION, r"(?:don't |never )(ask (?:me )?questions?|prompt me)", 0.8),
+        # NOTE: Removed "proceed/continue/go ahead" - these are approval words, not actual preferences
+        # (PREF_COMMUNICATION, r"(?:just |please )(do it|proceed|continue|go ahead)", 0.6),
+        (PREF_COMMUNICATION, r"(explain (?:as you go|while you work|your (?:thinking|reasoning)))", 0.7),
+        (PREF_COMMUNICATION, r"(step by step|one step at a time)", 0.6),
+        (PREF_COMMUNICATION, r"(commit (?:frequently|often|as you go)|small commits)", 0.7),
+        (PREF_COMMUNICATION, r"(don't commit|no commits?|i'll commit)", 0.8),
+        (PREF_COMMUNICATION, r"(run tests? (?:first|before|after))", 0.7),
+        (PREF_COMMUNICATION, r"(show (?:me )?(?:the )?diff|what (?:did you )?change)", 0.6),
+        # Real preferences about proceeding without questions
+        (PREF_COMMUNICATION, r"(proceed without asking|don't ask.{0,10}just do)", 0.8),
+        (PREF_COMMUNICATION, r"(work autonomously|be autonomous|less hand-?holding)", 0.7),
     ]
 
     for msg in user_messages:
@@ -330,21 +343,49 @@ def _learn_rules(cursor, messages: list, session_id: str, now: str):
 def _learn_danger_zones(cursor, messages: list, session_id: str, now: str):
     """Learn about files/modules that caused issues."""
 
-    # Patterns indicating problems
+    # Patterns indicating problems - require actual file paths
+    # File paths must have: letters/underscores, possibly slashes, and a file extension
+    file_path_pattern = r'[a-zA-Z_][a-zA-Z0-9_/\-]*\.[a-zA-Z]{1,4}'
+
     problem_patterns = [
-        r"(?:error|issue|bug|problem|broke|breaking|failed)\s+(?:in|with|at)\s+([^\s.!?\n]+\.[a-z]+)",
-        r"([^\s.!?\n]+\.[a-z]+)\s+(?:is broken|has issues|keeps failing|caused|causing)",
-        r"(?:careful with|watch out for|tricky|problematic)\s+([^\s.!?\n]+)",
+        # "error in src/foo.ts"
+        rf"(?:error|issue|bug|problem|broke|breaking|failed)\s+(?:in|with|at)\s+`?({file_path_pattern})`?",
+        # "src/foo.ts is broken"
+        rf"`?({file_path_pattern})`?\s+(?:is broken|has issues|keeps failing|caused|causing)",
+        # "careful with src/foo.ts"
+        rf"(?:careful with|watch out for|be cautious with)\s+`?({file_path_pattern})`?",
+    ]
+
+    # Skip patterns - these indicate the text is documentation or discussion, not actual issues
+    skip_patterns = [
+        r'danger.?zones',  # Meta-discussion about danger zones feature
+        r'problematic\s+files\)',  # Documentation text
+        r'example',
+        r'documentation',
     ]
 
     for msg in messages:
         content = msg.get('content', '')
 
+        # Skip if content looks like documentation/meta-discussion
+        if any(re.search(p, content, re.IGNORECASE) for p in skip_patterns):
+            continue
+
         for pattern in problem_patterns:
             matches = re.findall(pattern, content, re.IGNORECASE)
             for match in matches:
-                path_pattern = match.strip()
-                if len(path_pattern) < 3 or len(path_pattern) > 100:
+                path_pattern = match.strip().strip('`')
+
+                # Validate it looks like a real file path
+                if len(path_pattern) < 5 or len(path_pattern) > 100:
+                    continue
+
+                # Must contain a file extension (not just end with .something)
+                if not re.search(r'\.(ts|js|py|tsx|jsx|json|md|yaml|yml|go|rs|java|c|cpp|h)$', path_pattern):
+                    continue
+
+                # Skip common false positives
+                if path_pattern.lower() in ['hnsw', 'files)', 'files),']:
                     continue
 
                 # Extract context around the match
@@ -467,6 +508,13 @@ def get_full_custodian_profile() -> dict:
                 profile['name'] = value
 
         # Get preferences by category
+        # Filter out generic approval words that aren't actual preferences
+        generic_approval_words = {
+            'proceed', 'continue', 'yes', 'ok', 'okay', 'sure', 'thanks', 'thank',
+            'good', 'great', 'nice', 'perfect', 'go', 'ahead', 'do', 'it', 'please',
+            'looks', 'lgtm', 'ship', 'go ahead', 'do it', 'looks good'
+        }
+
         cursor.execute("""
             SELECT category, preference, frequency, confidence
             FROM preferences
@@ -474,6 +522,10 @@ def get_full_custodian_profile() -> dict:
             ORDER BY category, frequency DESC
         """)
         for category, pref, freq, conf in cursor.fetchall():
+            # Skip generic approval words
+            if pref.lower().strip() in generic_approval_words:
+                continue
+
             if category not in profile['preferences']:
                 profile['preferences'][category] = []
             profile['preferences'][category].append({

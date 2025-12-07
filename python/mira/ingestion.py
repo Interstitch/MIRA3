@@ -15,6 +15,7 @@ from .metadata import extract_metadata, build_document_content
 from .artifacts import extract_file_operations_from_messages, extract_artifacts_from_messages
 from .custodian import extract_custodian_learnings
 from .insights import extract_insights_from_conversation
+from .concepts import extract_concepts_from_conversation
 
 
 def ingest_conversation(file_info: dict, collection, mira_path: Path = None) -> bool:
@@ -112,6 +113,20 @@ def ingest_conversation(file_info: dict, collection, mira_path: Path = None) -> 
             log(f"  Extracted {insights['errors_found']} errors, {insights['decisions_found']} decisions")
     except Exception as e:
         log(f"  Failed to extract insights: {e}")
+
+    # Extract codebase concepts from this conversation
+    try:
+        # Derive project path from file_info
+        project_path = file_info.get('project_path', '')
+        if project_path:
+            # Convert encoded path to readable format
+            project_path = '/' + project_path.replace('-', '/')
+
+        concepts = extract_concepts_from_conversation(conversation, session_id, project_path)
+        if concepts['concepts_found'] > 0:
+            log(f"  Extracted {concepts['concepts_found']} codebase concepts")
+    except Exception as e:
+        log(f"  Failed to extract concepts: {e}")
 
     # Build document content for ChromaDB
     doc_content = build_document_content(conversation, metadata)

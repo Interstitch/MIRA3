@@ -296,6 +296,101 @@ def get_artifact_stats() -> dict:
     return stats
 
 
+def get_journey_stats() -> dict:
+    """
+    Get journey statistics from file operations.
+
+    Returns metrics about files created, edited, lines written, etc.
+    This helps a fresh Claude understand the development effort and trajectory.
+    """
+    db = get_artifact_db()
+    cursor = db.cursor()
+
+    stats = {
+        'files_created': 0,
+        'files_modified': 0,
+        'total_edits': 0,
+        'unique_files': 0,
+        'lines_written': 0,
+        'most_active_files': [],
+        'recent_files': [],
+    }
+
+    try:
+        # Count Write operations (new file creations)
+        cursor.execute("SELECT COUNT(*) FROM file_operations WHERE operation_type = 'write'")
+        stats['files_created'] = cursor.fetchone()[0]
+
+        # Count Edit operations (modifications)
+        cursor.execute("SELECT COUNT(*) FROM file_operations WHERE operation_type = 'edit'")
+        stats['total_edits'] = cursor.fetchone()[0]
+
+        # Count unique files touched
+        cursor.execute("SELECT COUNT(DISTINCT file_path) FROM file_operations")
+        stats['unique_files'] = cursor.fetchone()[0]
+
+        # Count files that were modified (have edit operations)
+        cursor.execute("""
+            SELECT COUNT(DISTINCT file_path) FROM file_operations
+            WHERE operation_type = 'edit'
+        """)
+        stats['files_modified'] = cursor.fetchone()[0]
+
+        # Estimate lines written from Write operations (content length / avg line length ~40)
+        cursor.execute("""
+            SELECT SUM(LENGTH(content)) FROM file_operations
+            WHERE operation_type = 'write' AND content IS NOT NULL
+        """)
+        total_chars = cursor.fetchone()[0] or 0
+        stats['lines_written'] = total_chars // 40  # Rough estimate
+
+        # Also count lines from edit new_string additions
+        cursor.execute("""
+            SELECT SUM(LENGTH(new_string)) FROM file_operations
+            WHERE operation_type = 'edit' AND new_string IS NOT NULL
+        """)
+        edit_chars = cursor.fetchone()[0] or 0
+        stats['lines_written'] += edit_chars // 40
+
+        # Most active files (by total operations)
+        cursor.execute("""
+            SELECT file_path, COUNT(*) as ops,
+                   SUM(CASE WHEN operation_type = 'write' THEN 1 ELSE 0 END) as writes,
+                   SUM(CASE WHEN operation_type = 'edit' THEN 1 ELSE 0 END) as edits
+            FROM file_operations
+            GROUP BY file_path
+            ORDER BY ops DESC
+            LIMIT 10
+        """)
+        for row in cursor.fetchall():
+            # Extract just the filename for readability
+            full_path = row[0]
+            filename = full_path.split('/')[-1] if '/' in full_path else full_path
+            stats['most_active_files'].append({
+                'file': filename,
+                'full_path': full_path,
+                'total_ops': row[1],
+                'writes': row[2],
+                'edits': row[3]
+            })
+
+        # Recently touched files (last 5 unique files)
+        cursor.execute("""
+            SELECT DISTINCT file_path FROM file_operations
+            ORDER BY created_at DESC
+            LIMIT 5
+        """)
+        for row in cursor.fetchall():
+            full_path = row[0]
+            filename = full_path.split('/')[-1] if '/' in full_path else full_path
+            stats['recent_files'].append(filename)
+
+    except Exception as e:
+        log(f"Error getting journey stats: {e}")
+
+    return stats
+
+
 def _escape_fts_term(term: str) -> str:
     """Escape special FTS5 characters in a search term."""
     # FTS5 special characters that need escaping: " - * ( ) : ^
