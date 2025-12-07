@@ -108,13 +108,14 @@ class ConceptExtractor:
     ]
 
     # File purpose patterns
+    # Note: longer extensions (tsx, json) must come before shorter ones (ts, js)
     FILE_PURPOSE_PATTERNS = [
         # "handlers.py - RPC request handlers"
-        (r"(\w+\.(?:py|ts|js|tsx|jsx|go|rs|java|rb))\s*[-:–]\s*([^.!?\n]{10,120})", 0.75),
+        (r"(\w+\.(?:py|tsx|ts|jsonl|json|jsx|js|go|rs|java|rb))\s*[-:–]\s*([^.!?\n]{10,120})", 0.75),
         # "handlers.py handles/contains/implements X"
-        (r"(\w+\.(?:py|ts|js|tsx|jsx|go|rs|java|rb))\s+(?:contains?|implements?|defines?|handles?|provides?)\s+([^.!?\n]{10,100})", 0.7),
+        (r"(\w+\.(?:py|tsx|ts|jsonl|json|jsx|js|go|rs|java|rb))\s+(?:contains?|implements?|defines?|handles?|provides?)\s+([^.!?\n]{10,100})", 0.7),
         # "The X file does Y"
-        (r"(?:The\s+)?(\w+\.(?:py|ts|js|tsx|jsx))\s+file\s+(?:does|handles?|contains?)\s+([^.!?\n]{10,100})", 0.7),
+        (r"(?:The\s+)?(\w+\.(?:py|tsx|ts|jsx|js))\s+file\s+(?:does|handles?|contains?)\s+([^.!?\n]{10,100})", 0.7),
     ]
 
     # Technology role patterns - require known tech or very specific patterns
@@ -225,7 +226,8 @@ class ConceptExtractor:
 
     def _track_file_mentions(self, content: str):
         """Track which files are mentioned in conversation."""
-        file_pattern = r'(\w+\.(?:py|ts|js|tsx|jsx|go|rs|java|rb|json|yaml|yml|md|sql))'
+        # Note: json/jsonl must come before js, tsx before ts to match longer extensions first
+        file_pattern = r'(\w+\.(?:py|tsx|ts|jsonl|json|jsx|js|go|rs|java|rb|yaml|yml|md|sql))'
         for match in re.finditer(file_pattern, content):
             filename = match.group(1)
             self._file_mentions[filename] += 1
@@ -699,6 +701,55 @@ class ConceptStore:
 
         return is_new
 
+    def _is_valid_purpose(self, purpose: str) -> bool:
+        """
+        Validate that a purpose string is meaningful, not a conversation fragment.
+
+        Filters out:
+        - Incomplete sentences / fragments
+        - Code snippets or technical fragments
+        - Tool output / debug messages
+        """
+        if not purpose or len(purpose.strip()) < 10:
+            return False
+
+        purpose_lower = purpose.lower()
+
+        # Fragments that indicate conversation noise, not real purposes
+        garbage_indicators = [
+            # Code/technical fragments
+            'return type', 'redundant code', 'import ', 'def ', 'class ',
+            '():', '()', '{}', '[]', '===', '!==', '=>',
+            # Incomplete sentences
+            ' and ', ' or ', ' the ', ' that ', ' which ',
+            # Debug/tool output
+            'sanitized', 'exception', 'error:', 'warning:',
+            'todo:', 'fixme:', 'hack:',
+            # Process narration
+            'let me', "i'll", 'now we', 'checking', 'looking at',
+            # Status messages
+            'has been', 'was changed', 'is now', 'updated to',
+        ]
+
+        for indicator in garbage_indicators:
+            if indicator in purpose_lower:
+                return False
+
+        # Must end with valid punctuation or be a noun phrase
+        # Allow phrases like "User authentication module" without punctuation
+        valid_endings = '.!?)'
+        if not purpose.rstrip()[-1] in valid_endings:
+            # If no punctuation, must look like a noun phrase (capitalized, reasonable length)
+            words = purpose.split()
+            if len(words) < 2 or len(words) > 15:
+                return False
+
+        # Check for coherent structure - avoid fragments like "type and redundant code:"
+        if purpose.rstrip().endswith(':'):
+            return False
+
+        return True
+
     def get_concepts_for_init(self, min_confidence: float = 0.6) -> Dict:
         """
         Get codebase concepts for mira_init response.
@@ -782,21 +833,31 @@ class ConceptStore:
                     'confidence': round(conf, 2)
                 })
 
-            # Get key modules
+            # Get key modules - filter out invalid purposes
             cursor.execute("""
                 SELECT name, description, confidence
                 FROM codebase_concepts
                 WHERE project_path = ? AND concept_type = ? AND confidence >= ?
                 ORDER BY confidence DESC, frequency DESC
-                LIMIT 15
+                LIMIT 25
             """, (self.project_path, CONCEPT_MODULE, min_confidence))
 
             for name, desc, conf in cursor.fetchall():
-                result['key_modules'].append({
-                    'file': name,
-                    'purpose': desc,
-                    'confidence': round(conf, 2)
-                })
+                # Only include modules with valid, meaningful purposes
+                if self._is_valid_purpose(desc):
+                    result['key_modules'].append({
+                        'file': name,
+                        'purpose': desc,
+                        'confidence': round(conf, 2)
+                    })
+                elif conf >= 0.9:
+                    # High confidence but invalid purpose - include with generic description
+                    result['key_modules'].append({
+                        'file': name,
+                        'purpose': f"Frequently discussed file ({name})",
+                        'confidence': round(conf, 2)
+                    })
+                # Skip low-confidence modules with garbage purposes
 
             # Get patterns
             cursor.execute("""

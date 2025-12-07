@@ -99,7 +99,18 @@ def handle_init(params: dict, collection) -> dict:
 
     # Merge with legacy profile stats
     legacy_profile = get_custodian_profile()
-    custodian_profile['tech_stack'] = legacy_profile.get('tech_stack', [])
+    # Combine tech stack: CLAUDE.md technologies + learned from conversations
+    claude_md_tech = project_overview.get('key_technologies', [])
+    learned_tech = legacy_profile.get('tech_stack', [])
+    # CLAUDE.md tech first (authoritative), then learned tech (supplemental)
+    seen_tech = set()
+    combined_tech = []
+    for tech in claude_md_tech + learned_tech:
+        tech_lower = tech.lower()
+        if tech_lower not in seen_tech:
+            combined_tech.append(tech)
+            seen_tech.add(tech_lower)
+    custodian_profile['tech_stack'] = combined_tech[:10]
     custodian_profile['active_projects'] = legacy_profile.get('active_projects', [])
     custodian_profile['common_tools'] = legacy_profile.get('common_tools', [])
     custodian_profile['total_sessions'] = legacy_profile.get('total_sessions', 0)
@@ -124,20 +135,12 @@ def handle_init(params: dict, collection) -> dict:
     # Get codebase knowledge learned from conversations
     codebase_knowledge = get_codebase_knowledge(project_path)
 
-    # Merge technologies from CLAUDE.md into codebase_knowledge
-    claude_md_techs = set(project_overview.get('key_technologies', []))
-    existing_tech_names = {t.get('name', '').lower() for t in codebase_knowledge.get('technologies', [])}
-
-    for tech in claude_md_techs:
-        if tech.lower() not in existing_tech_names:
-            codebase_knowledge['technologies'].append({
-                'name': tech,
-                'role': 'Documented in CLAUDE.md',
-                'confidence': 0.95,
-                'source': 'CLAUDE.md'
-            })
+    # NOTE: Don't merge technologies from CLAUDE.md into codebase_knowledge
+    # They're already in project_overview.key_technologies - no need to duplicate
+    # codebase_knowledge.technologies should only contain LEARNED tech roles
 
     # Merge key_files from CLAUDE.md into codebase_knowledge.key_modules
+    # Also ensures consistent full_path for all modules
     claude_md_files = project_overview.get('key_files', {})
     existing_module_names = {m.get('file', '').lower() for m in codebase_knowledge.get('key_modules', [])}
 
@@ -146,7 +149,7 @@ def handle_init(params: dict, collection) -> dict:
         if short_name.lower() not in existing_module_names:
             codebase_knowledge['key_modules'].append({
                 'file': short_name,
-                'full_path': filename,
+                'full_path': filename if '/' in filename else None,
                 'purpose': purpose,
                 'confidence': 0.95,
                 'source': 'CLAUDE.md'
@@ -154,31 +157,31 @@ def handle_init(params: dict, collection) -> dict:
         else:
             for mod in codebase_knowledge['key_modules']:
                 if mod.get('file', '').lower() == short_name.lower():
+                    # Update purpose if it was just "Frequently discussed"
                     if 'Frequently discussed' in mod.get('purpose', ''):
                         mod['purpose'] = purpose
                         mod['source'] = 'CLAUDE.md'
+                    # Always add full_path from CLAUDE.md if available
+                    if '/' in filename and not mod.get('full_path'):
+                        mod['full_path'] = filename
                     break
 
-    # Add architecture_details as components if not already present
-    arch_details = project_overview.get('architecture_details', [])
-    if arch_details and not codebase_knowledge.get('components'):
-        codebase_knowledge['components'] = []
-        for detail in arch_details:
-            codebase_knowledge['components'].append({
-                'name': detail.get('name', ''),
-                'purpose': detail.get('description', ''),
-                'details': detail.get('details', []),
-                'confidence': 0.95,
-                'source': 'CLAUDE.md'
-            })
+    # NOTE: key_modules may contain "Frequently discussed file" entries from
+    # concept extraction. These are kept as they indicate important files even
+    # when we couldn't extract a semantic purpose.
 
+    # NOTE: Keep empty arrays in codebase_knowledge - they serve as schema
+    # indicators showing what MIRA *could* track, even if currently empty
+
+    # NOTE: Architecture details are in project_overview.architecture_details
+    # Do NOT duplicate them into codebase_knowledge.components
+    # codebase_knowledge should only contain LEARNED knowledge, not CLAUDE.md echoes
+
+    # Only set architecture_summary if we have architecture details and no summary yet
+    arch_details = project_overview.get('architecture_details', [])
     if arch_details and not codebase_knowledge.get('architecture_summary'):
         component_names = [d.get('name', '') for d in arch_details[:3]]
         codebase_knowledge['architecture_summary'] = f"Key components: {', '.join(component_names)}"
-
-    # Get concept stats
-    concept_store = ConceptStore(project_path)
-    concept_stats = concept_store.get_stats()
 
     # === BUILD TIERED OUTPUT ===
 
@@ -186,60 +189,248 @@ def handle_init(params: dict, collection) -> dict:
     alerts = _get_actionable_alerts(mira_path, project_path, custodian_profile)
 
     # TIER 2: Core context (essential for immediate work)
-    # Simplified custodian - just the essentials
-    custodian_core = {
+    # Custodian - all essential info in one place (no separate "full" version)
+    custodian_data = {
         'name': custodian_profile.get('name', 'Unknown'),
         'summary': custodian_profile.get('summary', ''),
         'interaction_tips': custodian_profile.get('interaction_tips', [])[:5],
+        'tech_stack': custodian_profile.get('tech_stack', [])[:10],
     }
 
-    # Simplified journey - just the highlights
-    journey_core = {
+    # Add development lifecycle if detected (this is key behavioral context)
+    dev_lifecycle = custodian_profile.get('development_lifecycle')
+    if dev_lifecycle:
+        confidence_pct = int(dev_lifecycle.get('confidence', 0) * 100)
+        custodian_data['development_lifecycle'] = f"{dev_lifecycle.get('sequence')} ({confidence_pct}% confidence)"
+
+    # Only include danger_zones if non-empty
+    danger_zones = custodian_profile.get('danger_zones', [])
+    if danger_zones:
+        custodian_data['danger_zones'] = danger_zones
+
+    # Journey - simplified view with just file names and operation counts
+    most_active_raw = journey_stats.get('most_active_files', [])[:5]
+    # Simplify to just filename: ops_count for brevity
+    hot_files = {f.get('file'): f.get('total_ops', 0) for f in most_active_raw}
+    journey_data = {
         'total_edits': journey_stats.get('total_edits', 0),
-        'unique_files': journey_stats.get('unique_files', 0),
-        'hot_files': [f['file'] for f in journey_stats.get('most_active_files', [])[:5]],
-        'recent_files': journey_stats.get('recent_files', [])[:5],
+        'hot_files': hot_files,  # {filename: ops_count}
     }
 
-    # Recent sessions - just summaries
-    recent_sessions_core = []
+    # Recent sessions - just summaries (milestones removed - redundant extraction from same data)
+    recent_sessions = []
     for proj in recent.get("projects", []):
         for sess in proj.get('sessions', [])[:3]:
-            recent_sessions_core.append({
-                'summary': sess.get('summary', '')[:100],
+            recent_sessions.append({
+                'summary': (sess.get('summary', '')[:100] + '...') if len(sess.get('summary', '')) > 100 else sess.get('summary', ''),
                 'timestamp': sess.get('timestamp', '')[:10],  # Just date
             })
 
     # TIER 3: Detailed context (for deep-dive when needed)
-    details = {
-        'project': project_overview,
-        'codebase_knowledge': codebase_knowledge,
-        'custodian_full': custodian_profile,
-        'journey_full': journey_stats,
-        'artifacts': _get_simplified_artifact_stats(artifact_stats),
-        'concept_stats': concept_stats,
-    }
+    # Project info - only non-CLAUDE.md data (description/commands already in CLAUDE.md)
+    # Only include if we have meaningful learned knowledge
+
+    # Filter codebase_knowledge to remove empty arrays and CLAUDE.md duplicates
+    filtered_knowledge = _filter_codebase_knowledge(codebase_knowledge)
+
+    # Only include details if there's meaningful learned knowledge
+    # (architecture_summary alone doesn't count - it comes from CLAUDE.md)
+    has_meaningful_knowledge = any([
+        filtered_knowledge.get('key_modules'),
+        filtered_knowledge.get('integrations'),
+        filtered_knowledge.get('patterns'),
+        filtered_knowledge.get('facts'),
+        filtered_knowledge.get('rules'),
+    ])
+
+    details = {}
+    if has_meaningful_knowledge:
+        details['codebase_knowledge'] = filtered_knowledge
+
+    # Only include artifact stats if significant
+    artifact_total = artifact_stats.get('total', 0)
+    if artifact_total > 50:
+        details['artifacts'] = _get_simplified_artifact_stats(artifact_stats)
+
+    # Check if storage is concerning (>500MB data or >1GB total)
+    data_bytes = storage_stats.get('data_bytes', 0)
+    models_bytes = storage_stats.get('models_bytes', 0)
+    total_bytes = data_bytes + models_bytes
+
+    if data_bytes > 500 * 1024 * 1024:  # >500MB data
+        alerts.append({
+            'type': 'storage_warning',
+            'priority': 'medium',
+            'message': f"MIRA data storage is large: {storage_stats['data']}",
+            'suggestion': 'Consider pruning old archives with mira_status',
+        })
+    elif total_bytes > 1024 * 1024 * 1024:  # >1GB total
+        alerts.append({
+            'type': 'storage_info',
+            'priority': 'low',
+            'message': f"MIRA total storage: {storage_stats['data']} data + {storage_stats['models']} models",
+        })
+
+    # Build guidance for Claude on how to use this context
+    guidance = _build_claude_guidance(custodian_data, alerts, work_context)
 
     return {
         # Top-level status
         "message": "MIRA3 initialized",
         "indexed_conversations": count,
 
+        # GUIDANCE: How Claude should use this context
+        "guidance": guidance,
+
         # TIER 1: Alerts - check these first
         "alerts": alerts,
 
-        # TIER 2: Core context
+        # TIER 2: Core context (no duplication - single source of truth)
         "core": {
-            "custodian": custodian_core,
-            "recent_sessions": recent_sessions_core[:5],
+            "custodian": custodian_data,
+            "recent_sessions": recent_sessions[:5],
             "current_work": work_context,
-            "journey": journey_core,
-            "storage": storage_stats,
+            "journey": journey_data,
         },
 
-        # TIER 3: Details - available when needed
+        # TIER 3: Details - only learned knowledge not in CLAUDE.md
         "details": details,
     }
+
+
+def _build_claude_guidance(custodian: dict, alerts: list, work_context: dict) -> dict:
+    """
+    Build actionable guidance for Claude on how to use the MIRA context.
+
+    This tells a future Claude session exactly what to DO with the information,
+    not just what the information IS.
+    """
+    guidance = {
+        "how_to_use_this": "This context is from past sessions. Use it to personalize your approach.",
+        "actions": []
+    }
+
+    # User identity guidance
+    name = custodian.get('name')
+    if name and name != 'Unknown':
+        guidance["actions"].append(f"Address user as {name} naturally (don't announce you know their name)")
+
+    # Development lifecycle guidance
+    lifecycle = custodian.get('development_lifecycle')
+    if lifecycle:
+        guidance["actions"].append(
+            f"Follow user's dev workflow: {lifecycle}. "
+            "When implementing features, structure your work in this order unless they specify otherwise."
+        )
+
+    # Interaction tips - convert to actions
+    tips = custodian.get('interaction_tips', [])
+    for tip in tips:
+        tip_lower = tip.lower()
+        if 'iterative' in tip_lower:
+            guidance["actions"].append("Make incremental changes rather than large rewrites")
+        elif 'planning' in tip_lower:
+            guidance["actions"].append("Outline your approach before writing code")
+        elif 'concise' in tip_lower:
+            guidance["actions"].append("Keep responses brief - avoid over-explaining")
+        elif 'detailed' in tip_lower:
+            guidance["actions"].append("Provide thorough explanations with your code")
+
+    # Alert-based guidance
+    high_priority_alerts = [a for a in alerts if a.get('priority') == 'high']
+    if high_priority_alerts:
+        for alert in high_priority_alerts[:2]:
+            if alert.get('type') == 'git_uncommitted':
+                modified = alert.get('modified', [])
+                if modified:
+                    guidance["actions"].append(
+                        f"User has uncommitted changes in: {', '.join(modified[:3])}. "
+                        "Acknowledge this context if relevant to their request."
+                    )
+            elif alert.get('type') == 'danger_zone':
+                guidance["actions"].append(
+                    f"CAUTION: {alert.get('message')}. Proceed carefully and confirm changes."
+                )
+
+    # Current work context guidance
+    active_topics = work_context.get('active_topics', [])
+    if active_topics:
+        guidance["actions"].append(
+            f"Recent work context: '{active_topics[0][:60]}...'. "
+            "Reference this if the user's request seems related."
+        )
+
+    # Danger zones guidance
+    danger_zones = custodian.get('danger_zones', [])
+    if danger_zones:
+        paths = [dz.get('path', '') for dz in danger_zones[:2]]
+        guidance["actions"].append(
+            f"Files that caused past issues: {', '.join(paths)}. "
+            "Be extra careful when modifying these."
+        )
+
+    # Deduplicate and limit actions
+    seen = set()
+    unique_actions = []
+    for action in guidance["actions"]:
+        key = action[:50].lower()
+        if key not in seen:
+            seen.add(key)
+            unique_actions.append(action)
+    guidance["actions"] = unique_actions[:8]  # Max 8 actions
+
+    return guidance
+
+
+def _filter_codebase_knowledge(knowledge: dict) -> dict:
+    """
+    Filter codebase_knowledge to remove:
+    1. Empty arrays (no value)
+    2. CLAUDE.md-sourced entries (already in context)
+    3. Redundant/low-value entries
+    """
+    filtered = {}
+
+    # Architecture summary - keep if present
+    if knowledge.get('architecture_summary'):
+        filtered['architecture_summary'] = knowledge['architecture_summary']
+
+    # Key modules - only keep LEARNED modules (not from CLAUDE.md)
+    learned_modules = [
+        m for m in knowledge.get('key_modules', [])
+        if m.get('source') != 'CLAUDE.md' and 'Frequently discussed' not in m.get('purpose', '')
+    ]
+    if learned_modules:
+        filtered['key_modules'] = learned_modules
+
+    # Integrations - keep if non-empty
+    integrations = knowledge.get('integrations', [])
+    if integrations:
+        filtered['integrations'] = integrations
+
+    # Patterns - keep if non-empty
+    patterns = knowledge.get('patterns', [])
+    if patterns:
+        filtered['patterns'] = patterns
+
+    # Facts - keep if non-empty
+    facts = knowledge.get('facts', [])
+    if facts:
+        filtered['facts'] = facts
+
+    # Rules - keep if non-empty
+    rules = knowledge.get('rules', [])
+    if rules:
+        filtered['rules'] = rules
+
+    # Hot files - keep if non-empty (these are learned from conversation frequency)
+    hot_files = knowledge.get('hot_files', [])
+    if hot_files:
+        filtered['hot_files'] = hot_files
+
+    # Skip: components, technologies (these duplicate CLAUDE.md content)
+
+    return filtered
 
 
 def _get_actionable_alerts(mira_path: Path, project_path: str, custodian_profile: dict) -> list:
@@ -263,9 +454,16 @@ def _get_actionable_alerts(mira_path: Path, project_path: str, custodian_profile
         )
         if result.returncode == 0 and result.stdout.strip():
             lines = result.stdout.strip().split('\n')
-            modified = [l[3:] for l in lines if l.startswith(' M') or l.startswith('M ')]
-            added = [l[3:] for l in lines if l.startswith('A ') or l.startswith('??')]
-            deleted = [l[3:] for l in lines if l.startswith(' D') or l.startswith('D ')]
+            # Git porcelain format: XY filename (X=index, Y=worktree)
+            # Extract filename by skipping first 3 chars (XY + space)
+            # But handle edge case where there might be extra/fewer spaces
+            def extract_path(line):
+                # Skip the 2-char status prefix, then strip any leading space
+                return line[2:].lstrip() if len(line) > 2 else line
+
+            modified = [extract_path(l) for l in lines if l[1:2] == 'M' or l[0:1] == 'M']
+            added = [extract_path(l) for l in lines if l.startswith('A ') or l.startswith('??')]
+            deleted = [extract_path(l) for l in lines if l[1:2] == 'D' or l[0:1] == 'D']
 
             if modified or added or deleted:
                 alert = {
@@ -363,10 +561,12 @@ def _get_simplified_storage_stats(mira_path: Path) -> dict:
 
     models_size = get_dir_size(mira_path / 'models')
 
+    # Return stats with raw bytes for threshold checks
     return {
         'data': format_size(data_size),
+        'data_bytes': data_size,
         'models': format_size(models_size),
-        'note': 'venv excluded from stats',
+        'models_bytes': models_size,
     }
 
 
@@ -404,26 +604,61 @@ def _get_project_overview(mira_path: Path) -> dict:
         "key_technologies": [],
     }
 
-    if not claude_md.exists():
-        # Try README.md as fallback
-        readme = project_root / "README.md"
-        if readme.exists():
-            try:
-                content = readme.read_text()[:2000]
-                # Extract first paragraph as description
-                lines = content.split('\n')
+    # Core technology patterns - these are the actual project technologies
+    # Only extract from CLAUDE.md (authoritative) - README often has comparisons/examples
+    core_tech_patterns = {
+        # Databases
+        r'ChromaDB': 'ChromaDB',
+        r'SQLite': 'SQLite',
+        # Languages/Runtimes
+        r'TypeScript': 'TypeScript',
+        r'Python': 'Python',
+        r'Node\.js': 'Node.js',
+        # ML/AI
+        r'all-MiniLM-L6-v2': 'all-MiniLM-L6-v2',
+        r'sentence-transformers?': 'sentence-transformers',
+        # Protocols/Standards
+        r'MCP': 'MCP',
+        r'JSON-RPC': 'JSON-RPC',
+        # Tools/Libraries
+        r'watchdog': 'watchdog',
+        r'vitest': 'vitest',
+    }
+
+    import re
+
+    def extract_tech_from_content(content: str, patterns: dict) -> set:
+        """Extract technologies mentioned in content."""
+        found = set()
+        for pattern, display_name in patterns.items():
+            if re.search(pattern, content, re.IGNORECASE):
+                found.add(display_name)
+        return found
+
+    found_tech = set()
+
+    # README.md - only use for description fallback, not tech extraction
+    # (README often contains comparisons, examples, and alternatives that aren't actual project tech)
+    readme = project_root / "README.md"
+    if readme.exists():
+        try:
+            readme_content = readme.read_text()
+            # Use README description as fallback
+            if not overview["description"]:
+                lines = readme_content.split('\n')
                 for line in lines:
                     line = line.strip()
                     if line and not line.startswith('#') and not line.startswith('```'):
                         overview["description"] = line[:200]
                         break
-            except Exception:
-                pass
+        except Exception:
+            pass
+
+    if not claude_md.exists():
         return overview
 
     try:
         content = claude_md.read_text()
-        import re
 
         # Extract project overview section
         overview_match = re.search(
@@ -513,18 +748,8 @@ def _get_project_overview(mira_path: Path) -> dict:
                     if cmd_text:
                         overview["commands"][cmd_text] = comment
 
-        # Extract technologies from content
-        tech_patterns = [
-            r'ChromaDB', r'all-MiniLM-L6-v2', r'sentence-transformers',
-            r'TypeScript', r'Python', r'Node\.js', r'MCP', r'watchdog',
-            r'SQLite', r'JSON-RPC'
-        ]
-        found_tech = set()
-        for pattern in tech_patterns:
-            if re.search(pattern, content, re.IGNORECASE):
-                # Normalize the name
-                tech_name = pattern.replace(r'\.', '.').replace('\\', '')
-                found_tech.add(tech_name)
+        # Extract technologies from CLAUDE.md only (authoritative source)
+        found_tech.update(extract_tech_from_content(content, core_tech_patterns))
         overview["key_technologies"] = sorted(found_tech)
 
     except Exception as e:
@@ -577,6 +802,16 @@ def _extract_milestones(projects: list) -> list:
                     if milestone.lower().startswith(tuple(skip_phrases)):
                         continue
 
+                    # Skip code fragments and file references
+                    code_indicators = ['.py', '.ts', '.js', '.json', '```', 'def ', 'function ',
+                                       'class ', 'import ', 'from ', '()', '{}', '[]', '"', "'"]
+                    if any(ind in milestone for ind in code_indicators):
+                        continue
+
+                    # Skip fragments that look like mid-sentence extractions
+                    if milestone[0].islower():
+                        continue
+
                     # Deduplicate
                     key = milestone.lower()[:50]
                     if key in seen:
@@ -619,15 +854,10 @@ def _build_enriched_custodian_summary(profile: dict) -> str:
 
     # Use "a" or "an" based on whether activity starts with vowel
     article = "an" if activity[0] in 'aeiou' else "a"
-    sentences.append(f"{name} is {article} {activity} user with {total_sessions} sessions and {total_messages} messages.")
+    sentences.append(f"{name} is {article} {activity} user with {total_sessions} sessions.")
 
-    # Tech focus
-    tech_stack = profile.get('tech_stack', [])
-    if tech_stack:
-        if len(tech_stack) >= 3:
-            sentences.append(f"Works primarily with {', '.join(tech_stack[:3])}.")
-        elif len(tech_stack) >= 1:
-            sentences.append(f"Works with {', '.join(tech_stack)}.")
+    # NOTE: Tech stack is shown separately in custodian_data['tech_stack']
+    # Don't duplicate it in the summary
 
     # Key preferences (communication style)
     # Filter out generic approval words that aren't actual preferences
@@ -680,6 +910,15 @@ def _build_interaction_tips(profile: dict) -> list:
     specific custodian based on their observed communication patterns and rules.
     """
     tips = []
+
+    # Development lifecycle (most important behavioral insight)
+    dev_lifecycle = profile.get('development_lifecycle')
+    if dev_lifecycle:
+        sequence = dev_lifecycle.get('sequence', '')
+        confidence = dev_lifecycle.get('confidence', 0)
+        if sequence and confidence >= 0.5:
+            confidence_pct = int(confidence * 100)
+            tips.append(f"Development cycle: {sequence} ({confidence_pct}% confident)")
 
     # Communication preferences
     preferences = profile.get('preferences', {})
@@ -871,75 +1110,87 @@ def get_custodian_profile() -> dict:
 
     profile['total_messages'] = total_messages
 
-    # Filter tech stack - remove generic/common words
-    tech_filter = {
-        # Common words
-        'the', 'and', 'for', 'with', 'this', 'that', 'from', 'have', 'been',
-        'code', 'file', 'files', 'data', 'line', 'text', 'string', 'list',
-        # Action words
-        'fix', 'add', 'remove', 'update', 'change', 'make', 'get', 'set',
-        'create', 'delete', 'run', 'check', 'test', 'use', 'using', 'uses',
-        # Context words
-        'search', 'function', 'method', 'class', 'module', 'command',
-        'error', 'issue', 'problem', 'solution', 'result', 'output',
-        # Descriptors
-        'new', 'old', 'first', 'last', 'current', 'previous', 'next',
-        'extraction', 'inaccuracies', 'implement', 'implementation',
-        # More generic words from actual output
-        'please', 'gets', 'deep', 'dive', 'model', 'include', 'index',
-        'idf', 'should', 'would', 'need', 'want', 'will', 'can', 'may',
-        'information', 'ensure', 'analyze', 'just', 'also', 'specific',
-        'look', 'want', 'work', 'about', 'into', 'here', 'there',
-        'indexing', 'technologies', 'perform', 'before', 'after', 'server',
-        'being', 'since', 'conversation', 'conversations', 'messages',
-        'summary', 'keywords', 'embedding', 'embeddings', 'vector', 'vectors',
-        'phase', 'stdin', 'inside', 'best', 'source', 'more', 'over', 'under',
-        'only', 'same', 'each', 'other', 'well', 'done', 'good', 'like',
-        'write', 'read', 'call', 'find', 'show', 'type', 'name', 'path',
-        # AI/assistant related (not actual tech)
-        'claude', 'assistant', 'user', 'message', 'response', 'tool',
-        # Deprecated/removed tech should be removed from keywords at source
-        'faiss',
-        # More generic words found in actual output
-        'where', 'pythonpath', 'these', 'those', 'which', 'what', 'when',
-        'optional', 'structure', 'historian', 'such', 'very', 'some',
-        'pattern', 'patterns', 'content', 'based', 'using', 'since',
-        'both', 'also', 'even', 'still', 'then', 'than', 'have', 'been',
-        'were', 'does', 'done', 'make', 'made', 'takes', 'took', 'given',
-        # Additional garbage words found in recent output
-        'understand', 'again', 'readme', 'confidence', 'codebase', 'concepts',
-        'integration', 'component', 'session', 'sessions', 'project', 'projects',
-        'init', 'status', 'recent', 'knowledge', 'custodian', 'learn', 'learned',
-        'extract', 'handler', 'handlers', 'backend', 'frontend', 'layer',
-        # More noise from latest output
-        'todo', 'explicit', 'ultrathink', 'failed', 'imports', 'indexed',
-        'datetime', 'ingestion', 'architecture', 'technology', 'think',
-        'analyze', 'analysis', 'perspective', 'fresh', 'remaining', 'issues',
-        'milestones', 'journey', 'stats', 'improve', 'improvement', 'improvements',
-        'filter', 'filtering', 'generic', 'approval', 'words', 'preferences',
-        'active', 'topics', 'staleness', 'completed', 'items',
+    # Use allowlist approach - only recognize actual technology names
+    # This is more reliable than trying to blocklist all possible noise words
+    known_technologies = {
+        # Databases
+        'chromadb', 'postgresql', 'postgres', 'mysql', 'mongodb', 'redis',
+        'sqlite', 'elasticsearch', 'dynamodb', 'cassandra', 'neo4j',
+        # Languages
+        'python', 'typescript', 'javascript', 'rust', 'golang', 'java',
+        'ruby', 'swift', 'kotlin', 'scala', 'haskell', 'elixir',
+        # Frameworks - Backend
+        'fastapi', 'django', 'flask', 'express', 'nestjs', 'rails',
+        'spring', 'actix', 'axum', 'gin', 'echo', 'fiber',
+        # Frameworks - Frontend
+        'react', 'vue', 'angular', 'svelte', 'nextjs', 'nuxt', 'remix',
+        'solidjs', 'preact', 'astro', 'gatsby',
+        # ML/AI
+        'pytorch', 'tensorflow', 'keras', 'scikit-learn', 'sklearn',
+        'transformers', 'langchain', 'openai', 'anthropic', 'huggingface',
+        'sentence-transformers', 'minilm', 'pinecone', 'weaviate',
+        # Tools
+        'docker', 'kubernetes', 'terraform', 'ansible', 'jenkins',
+        'github', 'gitlab', 'circleci', 'webpack', 'vite', 'esbuild',
+        'pnpm', 'yarn', 'npm', 'poetry', 'pipenv', 'conda',
+        # Protocols/Standards
+        'graphql', 'grpc', 'rest', 'websocket', 'mqtt', 'kafka',
+        'rabbitmq', 'zeromq', 'nats', 'mcp',
+        # Testing
+        'pytest', 'jest', 'vitest', 'mocha', 'cypress', 'playwright',
+        # Other common tech
+        'nginx', 'apache', 'caddy', 'traefik', 'haproxy',
+        'aws', 'gcp', 'azure', 'vercel', 'netlify', 'heroku',
+        'linux', 'macos', 'windows', 'ubuntu', 'debian',
+        'git', 'vim', 'neovim', 'emacs', 'vscode',
+        'watchdog', 'celery', 'dramatiq', 'rq',
     }
-    # Only include terms that look like technology names
-    # Filter out: common words, verbs ending in 'ing', function names (contain _), too short
-    def is_valid_tech(tech: str) -> bool:
-        if tech in tech_filter:
-            return False
-        if len(tech) < 4:
-            return False
-        if tech.endswith('ing'):
-            return False
-        # Filter out function/variable names (contain underscore)
-        if '_' in tech:
-            return False
-        # Filter out camelCase words (likely variable/function names)
-        if any(c.isupper() for c in tech[1:]):
-            return False
-        return True
 
-    profile['tech_stack'] = [
-        tech for tech, count in tech_counter.most_common(50)
-        if is_valid_tech(tech)
-    ][:10]
+    # Map file extensions to technology names (keywords extract extensions)
+    extension_to_tech = {
+        'py': 'Python',
+        'ts': 'TypeScript',
+        'tsx': 'TypeScript',
+        'js': 'JavaScript',
+        'jsx': 'JavaScript',
+        'rs': 'Rust',
+        'go': 'Go',
+        'java': 'Java',
+        'rb': 'Ruby',
+        'swift': 'Swift',
+        'kt': 'Kotlin',
+        'scala': 'Scala',
+        'ex': 'Elixir',
+        'exs': 'Elixir',
+        'hs': 'Haskell',
+        'vue': 'Vue',
+        'svelte': 'Svelte',
+    }
+
+    # Build tech stack from both direct matches and extension mappings
+    tech_stack = []
+    seen = set()
+
+    for tech, count in tech_counter.most_common(50):
+        tech_lower = tech.lower()
+
+        # Direct match against known technologies
+        if tech_lower in known_technologies:
+            if tech_lower not in seen:
+                tech_stack.append(tech_lower)
+                seen.add(tech_lower)
+
+        # Map file extensions to technology names
+        elif tech_lower in extension_to_tech:
+            mapped = extension_to_tech[tech_lower]
+            if mapped.lower() not in seen:
+                tech_stack.append(mapped)
+                seen.add(mapped.lower())
+
+        if len(tech_stack) >= 10:
+            break
+
+    profile['tech_stack'] = tech_stack
 
     profile['active_projects'] = [
         {'path': _format_project_path(proj), 'sessions': count}
@@ -1189,10 +1440,13 @@ def get_current_work_context() -> dict:
                 if not _is_duplicate_task(task, context['recent_tasks']):
                     context['recent_tasks'].append(task)
 
-            todos = meta.get('todo_topics', [])
-            for todo in todos[:3]:
-                if todo not in context['active_topics']:
-                    context['active_topics'].append(todo)
+            # Use session SUMMARY as active topic, not granular todo items
+            # Summaries capture the high-level work theme ("MIRA Init Optimization")
+            # while todo_topics are implementation details ("Fix full_path")
+            summary = meta.get('summary', '')
+            if summary and len(summary) >= 10:
+                if not _is_duplicate_task(summary, context['active_topics']):
+                    context['active_topics'].append(summary)
 
             facts = meta.get('key_facts', [])
             for fact in facts[:2]:

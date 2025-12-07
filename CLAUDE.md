@@ -2,6 +2,31 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## IMPORTANT: Session Initialization
+
+**At the start of every session, run `mira_init` to get personalized context.**
+
+```
+mira_init with project_path set to the current working directory
+```
+
+The `mira_init` tool returns:
+- **`guidance.actions`**: Specific instructions on how to work with this user - FOLLOW THESE
+- **`alerts`**: Issues requiring immediate attention (uncommitted changes, danger zones)
+- **`core.custodian`**: User profile including name, preferred development workflow, and interaction style
+- **`core.current_work`**: Recent tasks and active topics for continuity
+
+**Why this matters:** MIRA learns from past sessions. The guidance tells you:
+- The user's name (address them naturally)
+- Their development cycle (e.g., "Plan → Write Tests → Implement → Commit")
+- Work style preferences (incremental vs big changes, concise vs detailed responses)
+- Files that have caused issues before (proceed carefully)
+- Current work context (connect to what they were doing)
+
+**Run `mira_init` again** if the session runs long or context seems stale.
+
+---
+
 ## Project Overview
 
 MIRA3 (Memory Information Retriever and Archiver) is an MCP server that monitors, archives, and provides semantic search over Claude Code conversation history. It uses ChromaDB for vector embeddings with the all-MiniLM-L6-v2 model.
@@ -123,21 +148,30 @@ MIRA learns about the user (custodian) from conversation patterns and provides t
 
 **What MIRA Learns:**
 - **Identity**: User's name from self-introductions
+- **Development lifecycle**: The user's preferred workflow sequence (e.g., "Plan → Write Tests → Implement → Commit")
 - **Preferences**: Coding style, tools (pnpm vs npm), frameworks, communication style
 - **Rules**: Explicit always/never/avoid patterns from conversations
 - **Danger zones**: Files or modules that have caused repeated issues
-- **Work patterns**: Development workflow, testing preferences, planning style
+- **Work patterns**: Iterative vs big-bang changes, planning preference
+
+**Development Lifecycle Detection:**
+- Analyzes the order in which users mention planning, testing, implementing, and committing
+- Tracks confidence based on consistency across sessions
+- Recent sessions weighted more heavily (habits can change)
+- Outputs like "Plan → Write Tests → Implement (85% confidence)"
 
 **Storage:**
 - Learned data stored in `custodian.db` (SQLite)
 - Frequency tracking increases confidence over time
+- Recency weighting: last 7 days = 2x, last 30 days = 1.5x
 - Source sessions tracked for provenance
 
 **How It Helps:**
 - Claude knows your name without re-introduction
+- Claude follows your preferred development workflow
 - Claude respects your stated preferences
 - Claude warns when touching files that caused past issues
-- Claude adapts to your workflow patterns
+- Claude adapts as your workflow evolves over time
 
 ## Error Pattern Recognition
 

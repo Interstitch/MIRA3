@@ -302,7 +302,12 @@ def get_journey_stats() -> dict:
 
     Returns metrics about files created, edited, lines written, etc.
     This helps a fresh Claude understand the development effort and trajectory.
+
+    Note: Filters out files that no longer exist on disk (stale references
+    from refactored code).
     """
+    from pathlib import Path
+
     db = get_artifact_db()
     cursor = db.cursor()
 
@@ -353,6 +358,7 @@ def get_journey_stats() -> dict:
         stats['lines_written'] += edit_chars // 40
 
         # Most active files (by total operations)
+        # Fetch more than needed since we'll filter out non-existent files
         cursor.execute("""
             SELECT file_path, COUNT(*) as ops,
                    SUM(CASE WHEN operation_type = 'write' THEN 1 ELSE 0 END) as writes,
@@ -360,11 +366,14 @@ def get_journey_stats() -> dict:
             FROM file_operations
             GROUP BY file_path
             ORDER BY ops DESC
-            LIMIT 10
+            LIMIT 25
         """)
         for row in cursor.fetchall():
-            # Extract just the filename for readability
             full_path = row[0]
+            # Skip files that no longer exist (stale references from refactored code)
+            if not Path(full_path).exists():
+                continue
+            # Extract just the filename for readability
             filename = full_path.split('/')[-1] if '/' in full_path else full_path
             stats['most_active_files'].append({
                 'file': filename,
@@ -373,17 +382,24 @@ def get_journey_stats() -> dict:
                 'writes': row[2],
                 'edits': row[3]
             })
+            if len(stats['most_active_files']) >= 10:
+                break
 
-        # Recently touched files (last 5 unique files)
+        # Recently touched files (last 5 unique files that still exist)
         cursor.execute("""
             SELECT DISTINCT file_path FROM file_operations
             ORDER BY created_at DESC
-            LIMIT 5
+            LIMIT 15
         """)
         for row in cursor.fetchall():
             full_path = row[0]
+            # Skip files that no longer exist
+            if not Path(full_path).exists():
+                continue
             filename = full_path.split('/')[-1] if '/' in full_path else full_path
             stats['recent_files'].append(filename)
+            if len(stats['recent_files']) >= 5:
+                break
 
     except Exception as e:
         log(f"Error getting journey stats: {e}")

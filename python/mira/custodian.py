@@ -28,6 +28,28 @@ PREF_WORKFLOW = "workflow"
 PREF_COMMUNICATION = "communication"
 PREF_TESTING = "testing"
 
+# Development lifecycle signals - keywords that indicate each phase
+LIFECYCLE_SIGNALS = {
+    'plan': ['plan', 'design', 'architect', 'approach', 'outline', 'strategy', 'think through', 'let me think'],
+    'test_first': ['write test', 'test first', 'tdd', 'test case', 'failing test', 'red green', 'spec first'],
+    'implement': ['implement', 'build it', 'code it', 'develop', 'write the code', 'let\'s build', 'create the'],
+    'test_after': ['run test', 'verify', 'check if', 'make sure', 'validate', 'confirm it works', 'test it'],
+    'document': ['document', 'readme', 'add comment', 'explain', 'docstring', 'write up', 'update docs'],
+    'review': ['review', 'refactor', 'clean up', 'polish', 'improve', 'optimize'],
+    'commit': ['commit', 'push', 'pr', 'pull request', 'merge', 'ship it'],
+}
+
+# Human-readable phase names for output
+LIFECYCLE_PHASE_NAMES = {
+    'plan': 'Plan',
+    'test_first': 'Write Tests',
+    'implement': 'Implement',
+    'test_after': 'Test',
+    'document': 'Document',
+    'review': 'Review',
+    'commit': 'Commit',
+}
+
 
 def get_custodian_db_path() -> Path:
     """Get the path to the custodian database."""
@@ -421,6 +443,81 @@ def _learn_danger_zones(cursor, messages: list, session_id: str, now: str):
                     """, (path_pattern, context[:200], now, json.dumps([session_id])))
 
 
+def _detect_lifecycle_sequence(messages: list) -> tuple[Optional[str], float]:
+    """
+    Analyze conversation flow to detect the user's development lifecycle.
+
+    Returns a tuple of (lifecycle_string, confidence) where lifecycle_string
+    is like "Plan → Implement → Test" based on the order phases appear.
+
+    Focus on the EARLY phases (what does the user do first?) as these are
+    the most indicative of their preferred workflow style.
+    """
+    user_messages = [m for m in messages if m.get('role') == 'user']
+
+    if len(user_messages) < 3:
+        return None, 0.0
+
+    # Track when each phase first appears (by message index)
+    first_occurrence = {}
+    phase_counts = Counter()
+
+    for idx, msg in enumerate(user_messages):
+        content = msg.get('content', '').lower()
+
+        for phase, keywords in LIFECYCLE_SIGNALS.items():
+            # Check if any keyword appears in this message
+            if any(kw in content for kw in keywords):
+                phase_counts[phase] += 1
+                if phase not in first_occurrence:
+                    first_occurrence[phase] = idx
+
+    # Need at least 2 distinct phases to form a lifecycle
+    if len(first_occurrence) < 2:
+        return None, 0.0
+
+    # Build sequence from ordering of first occurrences
+    ordered_phases = sorted(first_occurrence.items(), key=lambda x: x[1])
+
+    # Build the lifecycle sequence (up to 4 phases)
+    # Include commit if it appears early (indicates frequent committer)
+    # Skip 'review' and 'document' as they're less actionable
+    lifecycle_phases = []
+    for phase, idx in ordered_phases:
+        if phase in ('review', 'document'):
+            continue
+        # Include commit only if it appears in first half of conversation
+        # (indicates "commit as you go" style vs "commit at end")
+        if phase == 'commit':
+            midpoint = len(user_messages) // 2
+            if idx > midpoint:
+                continue  # Late commit - not distinctive
+        lifecycle_phases.append(phase)
+        if len(lifecycle_phases) >= 4:
+            break
+
+    if len(lifecycle_phases) < 2:
+        return None, 0.0
+
+    # Convert to human-readable names
+    lifecycle_str = ' → '.join(LIFECYCLE_PHASE_NAMES.get(p, p.title()) for p in lifecycle_phases)
+
+    # Calculate confidence based on:
+    # - Number of core phases detected (plan, implement, test, commit)
+    # - Whether plan appears first (strong signal of intentional workflow)
+    core_phases = {'plan', 'implement', 'test_first', 'test_after', 'commit'}
+    core_detected = sum(1 for p in lifecycle_phases if p in core_phases)
+
+    plan_first_bonus = 0.2 if (lifecycle_phases and lifecycle_phases[0] == 'plan') else 0.0
+    test_first_bonus = 0.15 if 'test_first' in lifecycle_phases else 0.0
+    commit_bonus = 0.1 if 'commit' in lifecycle_phases else 0.0  # Bonus for explicit commit pattern
+
+    base_confidence = min(core_detected / 4.0, 1.0) * 0.55
+    confidence = base_confidence + plan_first_bonus + test_first_bonus + commit_bonus
+
+    return lifecycle_str, round(min(confidence, 1.0), 2)
+
+
 def _learn_work_patterns(cursor, messages: list, session_id: str, now: str):
     """Learn work patterns from conversation flow."""
 
@@ -451,24 +548,36 @@ def _learn_work_patterns(cursor, messages: list, session_id: str, now: str):
     if any(word in first_msg for word in ['fix', 'change', 'update', 'add', 'remove', 'implement']):
         patterns_found.append(('workflow', 'Starts with direct action requests'))
 
+    # Detect development lifecycle sequence
+    lifecycle, lifecycle_confidence = _detect_lifecycle_sequence(messages)
+    if lifecycle and lifecycle_confidence >= 0.3:
+        patterns_found.append(('lifecycle', lifecycle))
+
     for pattern_type, description in patterns_found:
         cursor.execute("""
-            SELECT id, frequency FROM work_patterns
+            SELECT id, frequency, confidence FROM work_patterns
             WHERE pattern_type = ? AND pattern_description = ?
         """, (pattern_type, description))
 
         row = cursor.fetchone()
         if row:
+            # For lifecycle patterns, update confidence based on new detection
+            new_confidence = row[2]
+            if pattern_type == 'lifecycle':
+                # Blend existing confidence with new detection
+                new_confidence = min(1.0, (row[2] + lifecycle_confidence) / 2 + 0.05)
+
             cursor.execute("""
-                UPDATE work_patterns SET frequency = ?, last_seen = ?
+                UPDATE work_patterns SET frequency = ?, last_seen = ?, confidence = ?
                 WHERE id = ?
-            """, (row[1] + 1, now, row[0]))
+            """, (row[1] + 1, now, new_confidence, row[0]))
         else:
+            initial_confidence = lifecycle_confidence if pattern_type == 'lifecycle' else 0.5
             cursor.execute("""
                 INSERT INTO work_patterns
-                (pattern_type, pattern_description, first_seen, last_seen)
-                VALUES (?, ?, ?, ?)
-            """, (pattern_type, description, now, now))
+                (pattern_type, pattern_description, confidence, first_seen, last_seen)
+                VALUES (?, ?, ?, ?, ?)
+            """, (pattern_type, description, initial_confidence, now, now))
 
 
 def get_full_custodian_profile() -> dict:
@@ -490,6 +599,7 @@ def get_full_custodian_profile() -> dict:
         },
         'danger_zones': [],
         'work_patterns': [],
+        'development_lifecycle': None,  # Most common lifecycle sequence
         'summary': '',
     }
 
@@ -565,11 +675,11 @@ def get_full_custodian_profile() -> dict:
                 'last_issue': last
             })
 
-        # Get work patterns
+        # Get work patterns (non-lifecycle)
         cursor.execute("""
             SELECT pattern_description, frequency, confidence
             FROM work_patterns
-            WHERE frequency >= 2
+            WHERE frequency >= 2 AND pattern_type = 'workflow'
             ORDER BY frequency DESC
             LIMIT 10
         """)
@@ -579,6 +689,32 @@ def get_full_custodian_profile() -> dict:
                 'frequency': freq,
                 'confidence': conf
             })
+
+        # Get the most common development lifecycle
+        # Weight by frequency, confidence, AND recency
+        # Recency bonus: patterns seen in last 7 days get 2x weight, last 30 days get 1.5x
+        # This allows the lifecycle to evolve as user habits change
+        cursor.execute("""
+            SELECT pattern_description, frequency, confidence, last_seen,
+                   (frequency * confidence *
+                    CASE
+                        WHEN julianday('now') - julianday(last_seen) <= 7 THEN 2.0
+                        WHEN julianday('now') - julianday(last_seen) <= 30 THEN 1.5
+                        ELSE 1.0
+                    END
+                   ) as score
+            FROM work_patterns
+            WHERE pattern_type = 'lifecycle' AND confidence >= 0.5
+            ORDER BY score DESC
+            LIMIT 1
+        """)
+        lifecycle_row = cursor.fetchone()
+        if lifecycle_row:
+            profile['development_lifecycle'] = {
+                'sequence': lifecycle_row[0],
+                'frequency': lifecycle_row[1],
+                'confidence': lifecycle_row[2]
+            }
 
         conn.close()
 
