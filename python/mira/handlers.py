@@ -16,6 +16,18 @@ from .custodian import get_full_custodian_profile, get_danger_zones_for_files
 from .insights import search_error_solutions, search_decisions, get_error_stats, get_decision_stats
 
 
+def _format_project_path(encoded_path: str) -> str:
+    """Convert encoded project path to readable format."""
+    if not encoded_path:
+        return "unknown"
+    # Convert -workspaces-MIRA3 to /workspaces/MIRA3
+    readable = encoded_path.replace('-', '/')
+    # Handle leading slash
+    if not readable.startswith('/'):
+        readable = '/' + readable
+    return readable
+
+
 def handle_recent(params: dict) -> dict:
     """Get recent conversation sessions."""
     limit = params.get("limit", 10)
@@ -28,10 +40,11 @@ def handle_recent(params: dict) -> dict:
         for meta_file in sorted(metadata_path.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)[:limit]:
             try:
                 meta = json.loads(meta_file.read_text())
+                raw_path = meta.get("project_path", "")
                 sessions.append({
                     "session_id": meta_file.stem,
                     "summary": meta.get("summary", ""),
-                    "project_path": meta.get("project_path", ""),
+                    "project_path": _format_project_path(raw_path),
                     "timestamp": meta.get("extracted_at", "")
                 })
             except (json.JSONDecodeError, IOError, OSError):
@@ -87,6 +100,9 @@ def handle_init(params: dict, collection) -> dict:
     custodian_profile['total_sessions'] = legacy_profile.get('total_sessions', 0)
     custodian_profile['total_messages'] = legacy_profile.get('total_messages', 0)
 
+    # Build a richer summary now that we have all the data
+    custodian_profile['summary'] = _build_enriched_custodian_summary(custodian_profile)
+
     # Get current work context
     work_context = get_current_work_context()
 
@@ -99,6 +115,41 @@ def handle_init(params: dict, collection) -> dict:
         "artifacts": artifact_stats,
         "current_work": work_context
     }
+
+
+def _build_enriched_custodian_summary(profile: dict) -> str:
+    """Build an enriched summary using all available custodian data."""
+    parts = []
+
+    name = profile.get('name', 'Unknown')
+    total_sessions = profile.get('total_sessions', 0)
+    total_messages = profile.get('total_messages', 0)
+
+    # Name with session count
+    if total_sessions > 0:
+        parts.append(f"{name} ({total_sessions} sessions, {total_messages} messages)")
+    else:
+        parts.append(name)
+
+    # Tech stack (top 3)
+    tech_stack = profile.get('tech_stack', [])
+    if tech_stack:
+        parts.append(f"Tech: {', '.join(tech_stack[:3])}")
+
+    # Top tools (top 2)
+    common_tools = profile.get('common_tools', [])
+    if common_tools:
+        top_tools = [t['tool'] for t in common_tools[:2]]
+        parts.append(f"Uses: {', '.join(top_tools)}")
+
+    # Rules if any
+    rules = profile.get('rules', {})
+    if rules.get('never'):
+        parts.append(f"Never: {rules['never'][0].get('rule', '')[:40]}")
+    if rules.get('always'):
+        parts.append(f"Always: {rules['always'][0].get('rule', '')[:40]}")
+
+    return ' | '.join(parts) if parts else "No profile data yet"
 
 
 def calculate_storage_stats(mira_path: Path) -> dict:
@@ -261,6 +312,16 @@ def get_custodian_profile() -> dict:
         'phase', 'stdin', 'inside', 'best', 'source', 'more', 'over', 'under',
         'only', 'same', 'each', 'other', 'well', 'done', 'good', 'like',
         'write', 'read', 'call', 'find', 'show', 'type', 'name', 'path',
+        # AI/assistant related (not actual tech)
+        'claude', 'assistant', 'user', 'message', 'response', 'tool',
+        # Deprecated/removed tech should be removed from keywords at source
+        'faiss',
+        # More generic words found in actual output
+        'where', 'pythonpath', 'these', 'those', 'which', 'what', 'when',
+        'optional', 'structure', 'historian', 'such', 'very', 'some',
+        'pattern', 'patterns', 'content', 'based', 'using', 'since',
+        'both', 'also', 'even', 'still', 'then', 'than', 'have', 'been',
+        'were', 'does', 'done', 'make', 'made', 'takes', 'took', 'given',
     }
     # Only include terms that look like technology names (usually lowercase, no common verbs)
     profile['tech_stack'] = [
@@ -269,7 +330,7 @@ def get_custodian_profile() -> dict:
     ][:10]
 
     profile['active_projects'] = [
-        {'path': proj, 'sessions': count}
+        {'path': _format_project_path(proj), 'sessions': count}
         for proj, count in project_counter.most_common(5)
     ]
 
@@ -279,6 +340,24 @@ def get_custodian_profile() -> dict:
     ]
 
     return profile
+
+
+def _normalize_task(task: str) -> str:
+    """Normalize a task string for deduplication."""
+    # Normalize whitespace and truncate for comparison
+    normalized = ' '.join(task.split())[:100].lower()
+    return normalized
+
+
+def _is_duplicate_task(new_task: str, existing_tasks: list) -> bool:
+    """Check if a task is a duplicate of an existing one."""
+    new_norm = _normalize_task(new_task)
+    for existing in existing_tasks:
+        existing_norm = _normalize_task(existing)
+        # Check for high similarity (one is prefix of the other, or very similar)
+        if new_norm.startswith(existing_norm[:50]) or existing_norm.startswith(new_norm[:50]):
+            return True
+    return False
 
 
 def get_current_work_context() -> dict:
@@ -307,8 +386,9 @@ def get_current_work_context() -> dict:
 
             task = meta.get('task_description', '')
             # Skip command messages and empty tasks
-            if task and task not in context['recent_tasks']:
-                if not task.startswith('<command-') and not task.startswith('/'):
+            if task and not task.startswith('<command-') and not task.startswith('/'):
+                # Check for duplicates (similar task descriptions)
+                if not _is_duplicate_task(task, context['recent_tasks']):
                     context['recent_tasks'].append(task)
 
             todos = meta.get('todo_topics', [])
