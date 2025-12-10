@@ -81,13 +81,31 @@ class ServerConfig:
 
 
 def get_config_path() -> Path:
-    """Get the path to server.json configuration file."""
+    """
+    Get the path to server.json configuration file.
+
+    Search order:
+    1. MIRA_CONFIG_PATH environment variable (explicit override)
+    2. <workspace>/.mira/server.json (project-local config)
+    3. ~/.mira/server.json (user-global config)
+
+    Project-local config allows different projects to use different
+    central storage configurations, or for the same config to be
+    shared in the workspace .mira directory.
+    """
     # Check environment override first
     env_path = os.environ.get("MIRA_CONFIG_PATH")
     if env_path:
         return Path(env_path)
 
-    # Default location: ~/.mira/server.json
+    # Check for project-local config in workspace .mira directory
+    # This is set by get_mira_path() based on current working directory
+    from .utils import get_mira_path
+    workspace_config = get_mira_path() / "server.json"
+    if workspace_config.exists():
+        return workspace_config
+
+    # Fallback to user-global config: ~/.mira/server.json
     return Path.home() / ".mira" / "server.json"
 
 
@@ -124,7 +142,11 @@ def load_config() -> ServerConfig:
     """
     Load MIRA server configuration.
 
-    Looks for ~/.mira/server.json (or MIRA_CONFIG_PATH env var).
+    Search order:
+    1. MIRA_CONFIG_PATH environment variable
+    2. <workspace>/.mira/server.json (project-local)
+    3. ~/.mira/server.json (user-global)
+
     If not found, returns config with central disabled (local-only mode).
 
     Environment variable overrides:
