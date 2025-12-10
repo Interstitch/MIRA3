@@ -1702,6 +1702,268 @@ sqlalchemy.exc.IntegrityError: duplicate key value
         assert result['indexed'] >= 0
 
 
+class TestLocalStore:
+    """Test local SQLite storage module."""
+
+    @classmethod
+    def setup_class(cls):
+        # Reset db_manager to ensure fresh state
+        shutdown_db_manager()
+        cls.mira_path = Path(tempfile.mkdtemp())
+        os.environ['MIRA_PATH'] = str(cls.mira_path)
+        # Initialize local store
+        from mira import local_store
+        local_store._initialized = False  # Reset initialization flag
+        local_store.init_local_db()
+
+    @classmethod
+    def teardown_class(cls):
+        shutdown_db_manager()
+        if cls.mira_path.exists():
+            shutil.rmtree(cls.mira_path, ignore_errors=True)
+        if 'MIRA_PATH' in os.environ:
+            del os.environ['MIRA_PATH']
+
+    def test_local_store_init(self):
+        """Test local store database initialization."""
+        from mira.local_store import LOCAL_DB
+        from mira.db_manager import get_db_manager
+
+        db = get_db_manager()
+
+        # Verify tables exist
+        tables = db.execute_read(LOCAL_DB,
+            "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name", ())
+        table_names = [t['name'] for t in tables]
+        assert 'projects' in table_names
+        assert 'sessions' in table_names
+        assert 'archives' in table_names
+        assert 'custodian' in table_names
+
+    def test_local_project_operations(self):
+        """Test get_or_create_project in local store."""
+        from mira.local_store import get_or_create_project
+
+        # Create project
+        project_id = get_or_create_project('/workspaces/test', slug='test')
+        assert project_id > 0
+
+        # Get same project
+        project_id2 = get_or_create_project('/workspaces/test')
+        assert project_id2 == project_id
+
+        # Create project with git remote
+        project_id3 = get_or_create_project(
+            '/other/path', git_remote='git@github.com:user/repo.git'
+        )
+        assert project_id3 > 0
+        assert project_id3 != project_id
+
+    def test_local_session_operations(self):
+        """Test session upsert and retrieval in local store."""
+        from mira.local_store import get_or_create_project, upsert_session, get_recent_sessions
+
+        project_id = get_or_create_project('/workspaces/test2')
+
+        # Create session
+        session_id = upsert_session(
+            project_id=project_id,
+            session_id='test-session-123',
+            summary='Test session summary',
+            keywords=['test', 'local'],
+            task_description='Testing local storage',
+            message_count=5,
+        )
+        assert session_id > 0
+
+        # Get recent sessions
+        sessions = get_recent_sessions(project_id=project_id, limit=10)
+        assert len(sessions) >= 1
+        assert any(s['session_id'] == 'test-session-123' for s in sessions)
+
+    def test_local_archive_operations(self):
+        """Test archive storage in local store."""
+        from mira.local_store import (
+            get_or_create_project, upsert_session, upsert_archive, get_archive
+        )
+
+        project_id = get_or_create_project('/workspaces/test3')
+        session_db_id = upsert_session(
+            project_id=project_id,
+            session_id='archive-test-session',
+            summary='Archive test',
+        )
+
+        # Store archive
+        content = '{"type":"user","message":{"content":"test"}}\n'
+        archive_id = upsert_archive(
+            session_db_id=session_db_id,
+            content=content,
+            content_hash='abc123',
+        )
+        assert archive_id > 0
+
+        # Retrieve archive
+        retrieved = get_archive('archive-test-session')
+        assert retrieved == content
+
+    def test_local_fts_search(self):
+        """Test full-text search in local store."""
+        from mira.local_store import (
+            get_or_create_project, upsert_session, search_sessions_fts
+        )
+
+        project_id = get_or_create_project('/workspaces/fts-test')
+        upsert_session(
+            project_id=project_id,
+            session_id='fts-session-1',
+            summary='Discussion about Python and Flask web development',
+            keywords=['python', 'flask', 'web'],
+        )
+        upsert_session(
+            project_id=project_id,
+            session_id='fts-session-2',
+            summary='Debugging JavaScript React components',
+            keywords=['javascript', 'react'],
+        )
+
+        # Search for Python
+        results = search_sessions_fts('python', project_id=project_id)
+        assert len(results) >= 1
+        assert any(s['session_id'] == 'fts-session-1' for s in results)
+
+        # Search for React
+        results = search_sessions_fts('react', project_id=project_id)
+        assert len(results) >= 1
+        assert any(s['session_id'] == 'fts-session-2' for s in results)
+
+    def test_local_custodian_operations(self):
+        """Test custodian preferences in local store."""
+        from mira.local_store import upsert_custodian, get_custodian_all
+
+        upsert_custodian(
+            key='preference:editor',
+            value='vscode',
+            category='preference',
+            confidence=0.8,
+            source_session='test-session',
+        )
+
+        prefs = get_custodian_all()
+        assert len(prefs) >= 1
+        editor_pref = next((p for p in prefs if p['key'] == 'preference:editor'), None)
+        assert editor_pref is not None
+        assert editor_pref['value'] == 'vscode'
+
+
+class TestStorageFallback:
+    """Test storage abstraction layer fallback behavior."""
+
+    @classmethod
+    def setup_class(cls):
+        # Reset db_manager and storage to ensure fresh state
+        shutdown_db_manager()
+        from mira.storage import reset_storage
+        from mira import local_store
+        reset_storage()
+        local_store._initialized = False
+
+        cls.mira_path = Path(tempfile.mkdtemp())
+        os.environ['MIRA_PATH'] = str(cls.mira_path)
+        # Ensure no server.json exists (forces local mode)
+        server_json = cls.mira_path / 'server.json'
+        if server_json.exists():
+            server_json.unlink()
+
+    @classmethod
+    def teardown_class(cls):
+        from mira.storage import reset_storage
+        reset_storage()
+        shutdown_db_manager()
+        if cls.mira_path.exists():
+            shutil.rmtree(cls.mira_path, ignore_errors=True)
+        if 'MIRA_PATH' in os.environ:
+            del os.environ['MIRA_PATH']
+
+    def test_storage_mode_without_config(self):
+        """Test that storage falls back to local when no config exists."""
+        from mira.storage import Storage, reset_storage
+
+        reset_storage()
+        storage = Storage()
+
+        # Should not be using central (no config)
+        assert storage.using_central == False
+
+        mode = storage.get_storage_mode()
+        assert mode['mode'] == 'local'
+        assert 'limitations' in mode
+        assert len(mode['limitations']) > 0
+
+    def test_storage_local_fallback_operations(self):
+        """Test that storage operations work in local mode."""
+        from mira.storage import Storage, reset_storage
+
+        reset_storage()
+        storage = Storage()
+
+        # Project operations should work locally
+        project_id = storage.get_or_create_project('/test/project')
+        assert project_id is not None
+
+        # Session operations should work locally
+        session_id = storage.upsert_session(
+            project_path='/test/project',
+            session_id='local-test-session',
+            summary='Testing local fallback',
+            keywords=['test'],
+        )
+        assert session_id is not None
+
+        # Recent sessions should work
+        sessions = storage.get_recent_sessions(limit=5)
+        assert isinstance(sessions, list)
+
+        # FTS search should work
+        results = storage.search_sessions_fts('test')
+        assert isinstance(results, list)
+
+    def test_vector_operations_skip_in_local_mode(self):
+        """Test that vector operations don't crash in local mode."""
+        from mira.storage import Storage, reset_storage
+
+        reset_storage()
+        storage = Storage()
+
+        # Vector search should return empty list, not raise
+        results = storage.vector_search([0.1] * 384)
+        assert results == []
+
+        # Vector upsert should return None, not raise
+        result = storage.vector_upsert(
+            vector=[0.1] * 384,
+            content='test',
+            session_id='test',
+            project_path='/test',
+        )
+        assert result is None
+
+        # Batch upsert should return 0, not raise
+        result = storage.vector_batch_upsert([])
+        assert result == 0
+
+    def test_storage_health_check_local_mode(self):
+        """Test health check in local mode."""
+        from mira.storage import Storage, reset_storage
+
+        reset_storage()
+        storage = Storage()
+
+        health = storage.health_check()
+        assert health['mode'] == 'local'
+        assert health['using_central'] == False
+
+
 def run_tests():
     """Run all tests and report results."""
     import traceback
@@ -1722,6 +1984,8 @@ def run_tests():
         TestInsights,
         TestBootstrap,
         TestUserExperienceScenarios,
+        TestLocalStore,
+        TestStorageFallback,
     ]
 
     total = 0
