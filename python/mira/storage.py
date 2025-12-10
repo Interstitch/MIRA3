@@ -299,6 +299,28 @@ class Storage:
             log.error(f"Local upsert_session failed: {e}")
             return None
 
+    def session_exists_in_central(self, session_id: str) -> bool:
+        """
+        Check if a session exists in central storage.
+
+        Used to detect local sessions that need to be synced to central.
+        Returns False if not using central storage.
+        """
+        if not self._init_central() or not self._postgres:
+            return False
+
+        try:
+            with self._postgres._get_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT 1 FROM sessions WHERE session_id = %s LIMIT 1",
+                        (session_id,)
+                    )
+                    return cur.fetchone() is not None
+        except Exception as e:
+            log.error(f"session_exists_in_central check failed: {e}")
+            return False
+
     def get_recent_sessions(
         self,
         project_path: Optional[str] = None,

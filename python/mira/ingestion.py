@@ -62,12 +62,23 @@ def ingest_conversation(file_info: dict, collection, mira_path: Path = None, sto
 
     # Check if already ingested (by checking metadata file)
     meta_file = metadata_path / f"{session_id}.json"
+    needs_central_sync = False
+
     if meta_file.exists():
         # Check if source file was modified
         try:
             existing_meta = json.loads(meta_file.read_text())
             if existing_meta.get('last_modified') == file_info.get('last_modified'):
-                return False  # Already up to date
+                # File hasn't changed - but check if we need to sync to central
+                if storage.using_central:
+                    # Check if session exists in central storage
+                    if not storage.session_exists_in_central(session_id):
+                        needs_central_sync = True
+                        log(f"[{session_id[:12]}] Local session not in central, will sync")
+                    else:
+                        return False  # Already in central, skip
+                else:
+                    return False  # Local only mode, already processed
         except (json.JSONDecodeError, IOError, OSError):
             pass
 

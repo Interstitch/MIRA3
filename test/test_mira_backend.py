@@ -1963,6 +1963,114 @@ class TestStorageFallback:
         assert health['mode'] == 'local'
         assert health['using_central'] == False
 
+    def test_session_exists_in_central_local_mode(self):
+        """Test session_exists_in_central returns False in local mode."""
+        from mira.storage import Storage, reset_storage
+
+        reset_storage()
+        storage = Storage()
+
+        # In local mode, should always return False (no central storage)
+        assert storage.session_exists_in_central('any-session-id') == False
+
+
+class TestLocalToCentralSync:
+    """Test sync detection from local to central storage."""
+
+    @classmethod
+    def setup_class(cls):
+        shutdown_db_manager()
+        from mira.storage import reset_storage
+        from mira import local_store
+        reset_storage()
+        local_store._initialized = False
+
+        cls.mira_path = Path(tempfile.mkdtemp())
+        os.environ['MIRA_PATH'] = str(cls.mira_path)
+
+        # Create metadata directory
+        (cls.mira_path / 'metadata').mkdir(parents=True, exist_ok=True)
+
+    @classmethod
+    def teardown_class(cls):
+        from mira.storage import reset_storage
+        reset_storage()
+        shutdown_db_manager()
+        if cls.mira_path.exists():
+            shutil.rmtree(cls.mira_path, ignore_errors=True)
+        if 'MIRA_PATH' in os.environ:
+            del os.environ['MIRA_PATH']
+
+    def test_sync_detection_skips_unchanged_in_local_mode(self):
+        """Test that unchanged local sessions are skipped in local mode."""
+        from mira.storage import Storage, reset_storage
+        from mira.ingestion import ingest_conversation
+
+        reset_storage()
+        storage = Storage()
+
+        # Create a test conversation file
+        test_session_id = 'sync-test-session-001'
+        test_file = self.mira_path / 'test_conversation.jsonl'
+        test_file.write_text(json.dumps({
+            'type': 'user',
+            'message': {'role': 'user', 'content': 'Test message'}
+        }) + '\n')
+
+        # Create metadata file to simulate already-ingested session
+        meta_file = self.mira_path / 'metadata' / f'{test_session_id}.json'
+        meta_file.write_text(json.dumps({
+            'last_modified': '2025-01-01T00:00:00',
+            'summary': 'Test session'
+        }))
+
+        # Ingest should skip (already processed, local mode)
+        file_info = {
+            'session_id': test_session_id,
+            'file_path': str(test_file),
+            'project_path': '/test/project',
+            'last_modified': '2025-01-01T00:00:00'  # Same as metadata
+        }
+
+        result = ingest_conversation(file_info, None, self.mira_path, storage)
+        assert result == False  # Should be skipped
+
+    def test_sync_detection_processes_modified_file(self):
+        """Test that modified files are re-ingested."""
+        from mira.storage import Storage, reset_storage
+        from mira.ingestion import ingest_conversation
+
+        reset_storage()
+        storage = Storage()
+
+        test_session_id = 'sync-test-session-002'
+        test_file = self.mira_path / 'test_conversation2.jsonl'
+        test_file.write_text(json.dumps({
+            'type': 'user',
+            'message': {'role': 'user', 'content': 'Test message for sync'}
+        }) + '\n' + json.dumps({
+            'type': 'assistant',
+            'message': {'role': 'assistant', 'content': 'Response message'}
+        }) + '\n')
+
+        # Create OLD metadata file
+        meta_file = self.mira_path / 'metadata' / f'{test_session_id}.json'
+        meta_file.write_text(json.dumps({
+            'last_modified': '2025-01-01T00:00:00',
+            'summary': 'Old session'
+        }))
+
+        # Ingest with NEWER modification time
+        file_info = {
+            'session_id': test_session_id,
+            'file_path': str(test_file),
+            'project_path': '/test/project',
+            'last_modified': '2025-01-02T00:00:00'  # Newer than metadata
+        }
+
+        result = ingest_conversation(file_info, None, self.mira_path, storage)
+        assert result == True  # Should be ingested (file modified)
+
 
 def run_tests():
     """Run all tests and report results."""
@@ -1986,6 +2094,7 @@ def run_tests():
         TestUserExperienceScenarios,
         TestLocalStore,
         TestStorageFallback,
+        TestLocalToCentralSync,
     ]
 
     total = 0
