@@ -2,7 +2,7 @@
 MIRA3 Main Entry Point
 
 Initializes all components and runs the main JSON-RPC loop.
-Uses remote Qdrant + Postgres for all storage (no local ChromaDB).
+Supports both central storage (Qdrant + Postgres) and local fallback (SQLite).
 """
 
 import sys
@@ -18,6 +18,7 @@ from .embedding import get_embedding_function
 from .handlers import handle_rpc_request
 from .watcher import run_file_watcher
 from .ingestion import run_full_ingestion
+from .migrations import ensure_schema_current, check_migrations_needed
 
 
 def send_notification(method: str, params: dict):
@@ -38,26 +39,25 @@ def run_backend():
     for path in [archives_path, metadata_path]:
         path.mkdir(parents=True, exist_ok=True)
 
-    # Load configuration
-    config = get_config()
-    if not config.central_enabled:
-        log("ERROR: Central storage not configured!")
-        log("MIRA requires ~/.mira/server.json with central storage settings.")
-        log("See docs/CENTRAL_SETUP.md for setup instructions.")
-        sys.exit(1)
+    # Run schema migrations before anything else
+    log("Checking database schema...")
+    try:
+        ensure_schema_current()
+    except Exception as e:
+        log(f"Schema migration warning: {e}")
 
-    # Initialize storage (connects to remote Qdrant + Postgres)
-    log("Connecting to central storage...")
+    # Load configuration and initialize storage
+    config = get_config()
+    log("Initializing storage...")
     storage = get_storage()
 
-    if not storage.using_central:
-        log("ERROR: Could not connect to central storage!")
-        log("Check that Tailscale is running and server is reachable.")
-        sys.exit(1)
-
-    # Health check
+    # Health check and mode reporting
     health = storage.health_check()
-    log(f"Storage connected: Qdrant={health['qdrant_healthy']}, Postgres={health['postgres_healthy']}")
+    if storage.using_central:
+        log(f"Storage: CENTRAL (Qdrant={health['qdrant_healthy']}, Postgres={health['postgres_healthy']})")
+    else:
+        log("Storage: LOCAL (SQLite with FTS - keyword search only)")
+        log("To enable semantic search, configure ~/.mira/server.json")
 
     # Initialize embedding function (local - generates vectors to send to Qdrant)
     log("Initializing embedding model...")

@@ -3,7 +3,7 @@ MIRA3 File Watcher Module
 
 Watches for new/modified conversations and triggers ingestion.
 
-Uses central Qdrant + Postgres storage exclusively.
+Uses central Qdrant + Postgres if available, falls back to local SQLite.
 """
 
 import threading
@@ -15,6 +15,10 @@ from .utils import log
 from .constants import WATCHER_DEBOUNCE_SECONDS
 from .ingestion import ingest_conversation
 
+# TTL for pending files - entries older than this are cleaned up
+# This prevents memory leaks if files are queued but never processed
+PENDING_FILE_TTL_SECONDS = 3600  # 1 hour
+
 
 class ConversationWatcher:
     """
@@ -24,6 +28,7 @@ class ConversationWatcher:
     - Debounces rapid file changes (waits for file to stabilize)
     - Handles both new files and modifications
     - Thread-safe queuing
+    - TTL cleanup to prevent memory leaks from long-running sessions
     """
 
     def __init__(self, collection, mira_path: Path, storage=None):
@@ -41,6 +46,8 @@ class ConversationWatcher:
         self.lock = threading.Lock()
         self.running = False
         self.debounce_thread = None
+        self.last_cleanup = time.time()
+        self.cleanup_interval = 300  # Run cleanup every 5 minutes
 
     def queue_file(self, file_path: str):
         """Queue a file for ingestion after debounce period."""
@@ -56,14 +63,37 @@ class ConversationWatcher:
             current_time = time.time()
 
             with self.lock:
+                # Process files that have stabilized (debounce complete)
                 for file_path, queued_time in list(self.pending_files.items()):
                     # If file hasn't been modified in DEBOUNCE seconds, process it
                     if current_time - queued_time >= WATCHER_DEBOUNCE_SECONDS:
                         files_to_process.append(file_path)
                         del self.pending_files[file_path]
 
+                # Periodic TTL cleanup to prevent memory leaks
+                if current_time - self.last_cleanup >= self.cleanup_interval:
+                    self._cleanup_stale_entries(current_time)
+                    self.last_cleanup = current_time
+
             for file_path in files_to_process:
                 self._process_file(file_path)
+
+    def _cleanup_stale_entries(self, current_time: float):
+        """
+        Remove entries older than TTL from pending_files.
+
+        Called periodically to prevent unbounded memory growth.
+        Must be called while holding self.lock.
+        """
+        stale_count = 0
+        for file_path, queued_time in list(self.pending_files.items()):
+            age = current_time - queued_time
+            if age > PENDING_FILE_TTL_SECONDS:
+                del self.pending_files[file_path]
+                stale_count += 1
+
+        if stale_count > 0:
+            log(f"Watcher cleanup: removed {stale_count} stale entries")
 
     def _process_file(self, file_path: str):
         """Process a single file for ingestion."""
@@ -108,6 +138,15 @@ class ConversationWatcher:
         self.running = False
         if self.debounce_thread:
             self.debounce_thread.join(timeout=2)
+
+    def get_stats(self) -> dict:
+        """Get watcher statistics for monitoring."""
+        with self.lock:
+            return {
+                "pending_count": len(self.pending_files),
+                "running": self.running,
+                "last_cleanup": self.last_cleanup,
+            }
 
 
 def run_file_watcher(collection, mira_path: Path = None, storage=None):

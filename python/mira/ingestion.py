@@ -23,6 +23,7 @@ from .artifacts import extract_file_operations_from_messages, extract_artifacts_
 from .custodian import extract_custodian_learnings
 from .insights import extract_insights_from_conversation
 from .concepts import extract_concepts_from_conversation
+from .audit import audit_log
 
 
 def ingest_conversation(file_info: dict, collection, mira_path: Path = None, storage=None) -> bool:
@@ -242,9 +243,29 @@ def ingest_conversation(file_info: dict, collection, mira_path: Path = None, sto
                 log(f"[{short_id}] Vector indexing failed: {e}")
 
         log(f"[{short_id}] Ingestion complete ({storage_mode} mode)")
+
+        # Audit log successful ingestion
+        audit_log(
+            action="ingest",
+            resource_type="session",
+            resource_id=session_id,
+            parameters={"project_path": project_path_normalized, "message_count": msg_count},
+            result_summary={"storage_mode": storage_mode, "db_session_id": db_session_id},
+            status="success",
+        )
         return True
     except Exception as e:
         log(f"[{short_id}] Ingestion failed: {e}")
+
+        # Audit log failed ingestion
+        audit_log(
+            action="ingest",
+            resource_type="session",
+            resource_id=session_id,
+            parameters={"project_path": project_path_normalized},
+            status="failure",
+            error_message=str(e),
+        )
         return False
 
 

@@ -2,6 +2,7 @@
 MIRA3 RPC Request Handlers Module
 
 Handles JSON-RPC requests from the Node.js MCP server.
+All handlers are audit-logged for tracking and debugging.
 """
 
 import json
@@ -15,6 +16,7 @@ from .artifacts import get_artifact_stats, get_journey_stats
 from .custodian import get_full_custodian_profile, get_danger_zones_for_files
 from .insights import search_error_solutions, search_decisions, get_error_stats, get_decision_stats
 from .concepts import get_codebase_knowledge, ConceptStore
+from .audit import AuditContext, audit_log, get_recent_audit_logs, get_audit_stats
 
 
 def _format_project_path(encoded_path: str) -> str:
@@ -1425,6 +1427,13 @@ def handle_status(collection, storage=None) -> dict:
     if storage:
         health = storage.health_check()
 
+    # Get audit stats
+    audit_stats = {}
+    try:
+        audit_stats = get_audit_stats(days=7)
+    except Exception:
+        pass
+
     return {
         "total_files": total_files,
         "archived": archived,
@@ -1434,7 +1443,8 @@ def handle_status(collection, storage=None) -> dict:
         "last_sync": datetime.now().isoformat(),
         "errors": error_stats,
         "decisions": decision_stats,
-        "storage_health": health
+        "storage_health": health,
+        "audit": audit_stats
     }
 
 
@@ -1540,6 +1550,8 @@ def handle_rpc_request(request: dict, collection, storage=None) -> dict:
     """
     Handle a JSON-RPC request and return response.
 
+    All requests are audit-logged for tracking and debugging.
+
     Args:
         request: JSON-RPC request dict
         collection: Deprecated - kept for API compatibility, ignored
@@ -1552,30 +1564,54 @@ def handle_rpc_request(request: dict, collection, storage=None) -> dict:
     result = None
     error = None
 
-    try:
-        if method == "search":
-            # search.py's handle_search uses storage for central, ignores collection
-            result = handle_search(params, collection, storage)
-        elif method == "recent":
-            result = handle_recent(params, storage)
-        elif method == "init":
-            result = handle_init(params, collection, storage)
-        elif method == "status":
-            result = handle_status(collection, storage)
-        elif method == "error_lookup":
-            result = handle_error_lookup(params, storage)
-        elif method == "decisions":
-            result = handle_decisions(params, storage)
-        elif method == "shutdown":
-            result = {"status": "shutting_down"}
-        else:
-            error = {"code": -32601, "message": f"Method not found: {method}"}
-    except Exception as e:
-        # Log full error for debugging, return sanitized message
-        log(f"RPC handler error for {method}: {e}")
-        import traceback
-        log(f"Traceback: {traceback.format_exc()}")
-        error = {"code": -32603, "message": "Internal error processing request"}
+    # Determine resource info for audit log
+    resource_type = None
+    resource_id = None
+    if method == "search":
+        resource_type = "search"
+        resource_id = params.get("query", "")[:50] if params.get("query") else None
+    elif method in ("init", "recent", "error_lookup", "decisions"):
+        resource_type = "project"
+        resource_id = params.get("project_path")
+
+    with AuditContext(
+        action=f"rpc:{method}",
+        resource_type=resource_type,
+        resource_id=resource_id,
+        parameters=params,
+    ) as audit:
+        try:
+            if method == "search":
+                # search.py's handle_search uses storage for central, ignores collection
+                result = handle_search(params, collection, storage)
+                audit.set_result(result_count=result.get("total", 0), search_type=result.get("search_type"))
+            elif method == "recent":
+                result = handle_recent(params, storage)
+                audit.set_result(total=result.get("total", 0))
+            elif method == "init":
+                result = handle_init(params, collection, storage)
+                audit.set_result(has_custodian=bool(result.get("core", {}).get("custodian")))
+            elif method == "status":
+                result = handle_status(collection, storage)
+                audit.set_result(indexed=result.get("indexed", 0))
+            elif method == "error_lookup":
+                result = handle_error_lookup(params, storage)
+                audit.set_result(result_count=len(result.get("results", [])))
+            elif method == "decisions":
+                result = handle_decisions(params, storage)
+                audit.set_result(result_count=len(result.get("results", [])))
+            elif method == "shutdown":
+                result = {"status": "shutting_down"}
+            else:
+                error = {"code": -32601, "message": f"Method not found: {method}"}
+                audit.set_failure(f"Unknown method: {method}")
+        except Exception as e:
+            # Log full error for debugging, return sanitized message
+            log(f"RPC handler error for {method}: {e}")
+            import traceback
+            log(f"Traceback: {traceback.format_exc()}")
+            error = {"code": -32603, "message": "Internal error processing request"}
+            audit.set_failure(str(e))
 
     response = {"jsonrpc": "2.0", "id": request_id}
     if error:
