@@ -5,7 +5,7 @@
   "type": "module",
   "main": "dist/cli.js",
   "bin": {
-    "claude-mira3": "./dist/cli.js"
+    "claude-mira3": "dist/cli.js"
   },
   "files": [
     "dist/",
