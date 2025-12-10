@@ -3,8 +3,10 @@ MIRA3 Conversation Ingestion Module
 
 Handles the full pipeline of parsing, extracting, archiving, and indexing conversations.
 
-Uses central Qdrant + Postgres storage exclusively (no local ChromaDB fallback).
-Archives are stored remotely in Postgres for cross-machine access.
+Primary: Central Qdrant + Postgres storage (full semantic search, cross-machine sync)
+Fallback: Local SQLite with FTS (keyword search only, single machine)
+
+Archives are stored in the available storage backend.
 """
 
 import hashlib
@@ -132,15 +134,11 @@ def ingest_conversation(file_info: dict, collection, mira_path: Path = None, sto
     if git_remote:
         log(f"[{short_id}] Git remote: {git_remote}")
 
-    # Index to central storage (required)
-    if not storage or not storage.using_central:
-        log(f"[{short_id}] ERROR: Central storage not available")
-        return False
-
+    # Index to storage (central preferred, local fallback)
     try:
-        # Upsert session to Postgres FIRST (git_remote enables cross-machine project matching)
-        # This returns the postgres session ID needed for artifact foreign keys
-        postgres_session_id = storage.upsert_session(
+        # Upsert session (uses central if available, falls back to local)
+        # This returns the session ID needed for archive and artifact foreign keys
+        db_session_id = storage.upsert_session(
             project_path=project_path_normalized,
             session_id=session_id,
             git_remote=git_remote,
@@ -156,24 +154,30 @@ def ingest_conversation(file_info: dict, collection, mira_path: Path = None, sto
             started_at=metadata.get('started_at'),
             ended_at=metadata.get('last_modified'),
         )
-        log(f"[{short_id}] Session upserted (pg_id={postgres_session_id})")
 
-        # Archive to remote Postgres (full JSONL content)
+        if db_session_id is None:
+            log(f"[{short_id}] ERROR: Failed to create session")
+            return False
+
+        storage_mode = "central" if storage.using_central else "local"
+        log(f"[{short_id}] Session upserted ({storage_mode}, id={db_session_id})")
+
+        # Archive conversation (full JSONL content)
         try:
             archive_id = storage.upsert_archive(
-                postgres_session_id=postgres_session_id,
+                postgres_session_id=db_session_id,
                 content=file_content,
                 content_hash=content_hash,
             )
-            log(f"[{short_id}] Archived to remote (archive_id={archive_id})")
+            log(f"[{short_id}] Archived (archive_id={archive_id})")
         except Exception as e:
-            log(f"[{short_id}] Remote archive failed: {e}")
+            log(f"[{short_id}] Archive failed: {e}")
 
-        # Now extract artifacts with postgres_session_id for proper foreign keys
+        # Extract artifacts with session ID for proper foreign keys
         try:
             artifact_count = extract_artifacts_from_messages(
                 raw_messages, session_id,
-                postgres_session_id=postgres_session_id,
+                postgres_session_id=db_session_id,
                 storage=storage
             )
             if artifact_count > 0:
@@ -195,7 +199,7 @@ def ingest_conversation(file_info: dict, collection, mira_path: Path = None, sto
             insights = extract_insights_from_conversation(
                 conversation, session_id,
                 project_path=project_path_normalized,
-                postgres_session_id=postgres_session_id,
+                postgres_session_id=db_session_id,
                 storage=storage
             )
             err_count = insights.get('errors_found', 0)
@@ -205,36 +209,42 @@ def ingest_conversation(file_info: dict, collection, mira_path: Path = None, sto
         except Exception as e:
             log(f"[{short_id}] Insights failed: {e}")
 
-        # Extract codebase concepts from this conversation
-        try:
-            concepts = extract_concepts_from_conversation(
-                conversation, session_id,
-                project_path=project_path_normalized,
-                storage=storage
-            )
-            concept_count = concepts.get('concepts_found', 0)
-            if concept_count > 0:
-                log(f"[{short_id}] Concepts: {concept_count}")
-        except Exception as e:
-            log(f"[{short_id}] Concepts failed: {e}")
+        # Extract codebase concepts (central only - requires vector storage)
+        if storage.using_central:
+            try:
+                concepts = extract_concepts_from_conversation(
+                    conversation, session_id,
+                    project_path=project_path_normalized,
+                    storage=storage
+                )
+                concept_count = concepts.get('concepts_found', 0)
+                if concept_count > 0:
+                    log(f"[{short_id}] Concepts: {concept_count}")
+            except Exception as e:
+                log(f"[{short_id}] Concepts failed: {e}")
 
-        # Get embedding for vector search
-        from .embedding import get_embedding_function
-        embed_fn = get_embedding_function()
-        doc_vector = embed_fn([doc_content])[0]
+        # Vector indexing (central only - local uses FTS instead)
+        if storage.using_central:
+            try:
+                from .embedding import get_embedding_function
+                embed_fn = get_embedding_function()
+                doc_vector = embed_fn([doc_content])[0]
 
-        # Upsert to Qdrant
-        storage.vector_upsert(
-            vector=doc_vector,
-            content=doc_content[:2000],  # Truncate for storage efficiency
-            session_id=session_id,
-            project_path=project_path_normalized,
-            chunk_type="session",
-        )
-        log(f"[{short_id}] Indexed to central storage ✓")
+                storage.vector_upsert(
+                    vector=doc_vector,
+                    content=doc_content[:2000],  # Truncate for storage efficiency
+                    session_id=session_id,
+                    project_path=project_path_normalized,
+                    chunk_type="session",
+                )
+                log(f"[{short_id}] Indexed to central storage")
+            except Exception as e:
+                log(f"[{short_id}] Vector indexing failed: {e}")
+
+        log(f"[{short_id}] Ingestion complete ({storage_mode} mode)")
         return True
     except Exception as e:
-        log(f"[{short_id}] Central storage failed: {e}")
+        log(f"[{short_id}] Ingestion failed: {e}")
         return False
 
 
@@ -289,13 +299,13 @@ def run_full_ingestion(collection, mira_path: Path = None, max_workers: int = 4,
     Run full ingestion of all discovered conversations.
 
     Uses thread pool for parallel processing of conversations.
-    Indexes to central Qdrant + Postgres storage.
+    Indexes to central storage if available, falls back to local SQLite.
 
     Args:
         collection: Deprecated - kept for API compatibility, ignored
         mira_path: Path to .mira directory
         max_workers: Number of parallel ingestion threads (default: 4)
-        storage: Storage instance for central Qdrant + Postgres
+        storage: Storage instance
 
     Returns stats dict with counts.
     """
@@ -314,9 +324,8 @@ def run_full_ingestion(collection, mira_path: Path = None, max_workers: int = 4,
             log("ERROR: Storage not available")
             return {'discovered': 0, 'ingested': 0, 'skipped': 0, 'failed': 0}
 
-    if not storage.using_central:
-        log("ERROR: Central storage not available")
-        return {'discovered': 0, 'ingested': 0, 'skipped': 0, 'failed': 0}
+    storage_mode = "central" if storage.using_central else "local"
+    log(f"Running ingestion in {storage_mode} mode")
 
     conversations = discover_conversations()
     log(f"Discovered {len(conversations)} conversation files")

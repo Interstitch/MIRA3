@@ -32,12 +32,12 @@ def _format_project_path(encoded_path: str) -> str:
 def handle_recent(params: dict, storage=None) -> dict:
     """Get recent conversation sessions.
 
-    Tries central Postgres first, falls back to local metadata files.
+    Tries central Postgres first, falls back to local SQLite, then local metadata files.
     """
     limit = params.get("limit", 10)
 
-    # Try central storage first
-    if storage and storage.using_central:
+    # Try storage (central or local SQLite via storage abstraction)
+    if storage:
         try:
             sessions = storage.get_recent_sessions(limit=limit)
             if sessions:
@@ -54,13 +54,14 @@ def handle_recent(params: dict, storage=None) -> dict:
                         "timestamp": str(session.get("started_at", ""))
                     })
 
+                source = "central" if storage.using_central else "local_sqlite"
                 return {
                     "projects": [{"path": k, "sessions": v} for k, v in projects.items()],
                     "total": len(sessions),
-                    "source": "central"
+                    "source": source
                 }
         except Exception as e:
-            log(f"Central recent query failed: {e}")
+            log(f"Storage recent query failed: {e}")
 
     # Fallback to local metadata files
     mira_path = get_mira_path()
@@ -237,10 +238,15 @@ def handle_init(params: dict, collection, storage=None) -> dict:
     else:
         storage_mode = {
             "mode": "local",
-            "description": "Using local SQLite storage only (single-machine)",
+            "description": "Using local SQLite storage (keyword search only, single-machine)",
+            "limitations": [
+                "Keyword search only (no semantic/vector search)",
+                "History stays on this machine only",
+                "Codebase concepts not available",
+            ],
             "setup": {
-                "summary": "To sync across machines, create ~/.mira/server.json with Qdrant + Postgres connection details.",
-                "note": "Central storage is optional. MIRA works fully in local mode."
+                "summary": "To enable semantic search and cross-machine sync, set up central storage.",
+                "note": "Central storage is optional. MIRA works in local mode with keyword search."
             }
         }
 
@@ -264,12 +270,13 @@ def handle_init(params: dict, collection, storage=None) -> dict:
 
     # Add alert if using local storage (for new user awareness)
     if storage_mode.get("mode") == "local":
-        setup_info = storage_mode.get("setup", {})
+        limitations = storage_mode.get("limitations", [])
         alerts.insert(0, {
             "type": "storage_mode",
             "priority": "info",
-            "message": "Running in local-only mode. Conversation history stays on this machine only.",
-            "note": setup_info.get("note", "Central storage is optional."),
+            "message": "Running in local mode (keyword search only, single-machine).",
+            "limitations": limitations,
+            "note": "Set up central storage for semantic search and cross-machine sync.",
         })
 
     # Show indexing progress if not fully caught up

@@ -1,12 +1,15 @@
 """
 MIRA Storage Abstraction Layer
 
-Provides unified interface to central Qdrant + Postgres storage.
+Provides unified interface to storage with automatic fallback:
+- Primary: Central Qdrant + Postgres (full semantic search, cross-machine sync)
+- Fallback: Local SQLite with FTS (keyword search only, single machine)
 
 Design principles:
-- Central storage only (no local fallback)
+- Central storage preferred when available
+- Graceful fallback to local SQLite when central is unavailable
 - Lazy initialization (connect only when needed)
-- Clear error reporting when central is unavailable
+- Clear messaging about current storage mode
 """
 
 import logging
@@ -16,6 +19,9 @@ from typing import Any, Dict, List, Optional
 from .config import get_config, ServerConfig
 
 log = logging.getLogger(__name__)
+
+# Import local store module (always available)
+from . import local_store
 
 # Backends - lazily initialized
 _qdrant_backend = None
@@ -126,9 +132,14 @@ class Storage:
     ) -> List[Dict[str, Any]]:
         """
         Search for similar vectors in Qdrant.
+
+        Vector search is only available with central storage.
+        Use search_sessions_fts for local fallback.
         """
         if not self._init_central() or not self._qdrant:
-            raise StorageError("Central storage not available")
+            # No local fallback for vector search - FTS must be used instead
+            log.warning("Vector search unavailable in local mode, use FTS")
+            return []
 
         try:
             results = self._qdrant.search(
@@ -150,7 +161,7 @@ class Storage:
             ]
         except Exception as e:
             log.error(f"Vector search failed: {e}")
-            raise StorageError(f"Vector search failed: {e}")
+            return []  # Return empty instead of raising
 
     def vector_upsert(
         self,
@@ -165,10 +176,13 @@ class Storage:
         """
         Upsert a vector with payload to Qdrant.
 
-        Returns the point ID.
+        Returns the point ID, or None if central storage unavailable.
+        Local fallback stores metadata only (no vectors).
         """
         if not self._init_central() or not self._qdrant:
-            raise StorageError("Central storage not available")
+            # No local fallback for vector storage - skip silently
+            log.debug("Vector upsert skipped in local mode")
+            return None
 
         try:
             return self._qdrant.upsert(
@@ -182,7 +196,7 @@ class Storage:
             )
         except Exception as e:
             log.error(f"Vector upsert failed: {e}")
-            raise StorageError(f"Vector upsert failed: {e}")
+            return None  # Return None instead of raising
 
     def vector_batch_upsert(
         self,
@@ -191,19 +205,20 @@ class Storage:
         """
         Batch upsert vectors to Qdrant.
 
-        Returns count of points upserted.
+        Returns count of points upserted (0 if central unavailable).
         """
         if not points:
             return 0
 
         if not self._init_central() or not self._qdrant:
-            raise StorageError("Central storage not available")
+            log.debug("Batch vector upsert skipped in local mode")
+            return 0
 
         try:
             return self._qdrant.batch_upsert(points)
         except Exception as e:
             log.error(f"Batch upsert failed: {e}")
-            raise StorageError(f"Batch upsert failed: {e}")
+            return 0
 
     # ==================== Project Operations ====================
 
@@ -214,7 +229,9 @@ class Storage:
         git_remote: Optional[str] = None
     ) -> Optional[int]:
         """
-        Get or create a project in Postgres.
+        Get or create a project.
+
+        Uses central Postgres if available, falls back to local SQLite.
 
         Args:
             path: Filesystem path to the project
@@ -223,14 +240,19 @@ class Storage:
 
         Returns project ID.
         """
-        if not self._init_central() or not self._postgres:
-            raise StorageError("Central storage not available")
+        if self._init_central() and self._postgres:
+            try:
+                return self._postgres.get_or_create_project(path, slug, git_remote)
+            except Exception as e:
+                log.error(f"Central get_or_create_project failed: {e}")
+                # Fall through to local
 
+        # Local fallback
         try:
-            return self._postgres.get_or_create_project(path, slug, git_remote)
+            return local_store.get_or_create_project(path, slug, git_remote)
         except Exception as e:
-            log.error(f"get_or_create_project failed: {e}")
-            raise StorageError(f"Project operation failed: {e}")
+            log.error(f"Local get_or_create_project failed: {e}")
+            return None
 
     # ==================== Session Operations ====================
 
@@ -242,7 +264,9 @@ class Storage:
         **kwargs,
     ) -> Optional[int]:
         """
-        Upsert a session to Postgres.
+        Upsert a session.
+
+        Uses central Postgres if available, falls back to local SQLite.
 
         Args:
             project_path: Filesystem path to the project
@@ -251,40 +275,61 @@ class Storage:
 
         Returns session ID.
         """
-        if not self._init_central() or not self._postgres:
-            raise StorageError("Central storage not available")
+        if self._init_central() and self._postgres:
+            try:
+                project_id = self._postgres.get_or_create_project(project_path, git_remote=git_remote)
+                return self._postgres.upsert_session(
+                    project_id=project_id,
+                    session_id=session_id,
+                    **kwargs,
+                )
+            except Exception as e:
+                log.error(f"Central upsert_session failed: {e}")
+                # Fall through to local
 
+        # Local fallback
         try:
-            project_id = self._postgres.get_or_create_project(project_path, git_remote=git_remote)
-            return self._postgres.upsert_session(
+            project_id = local_store.get_or_create_project(project_path, git_remote=git_remote)
+            return local_store.upsert_session(
                 project_id=project_id,
                 session_id=session_id,
                 **kwargs,
             )
         except Exception as e:
-            log.error(f"upsert_session failed: {e}")
-            raise StorageError(f"Session operation failed: {e}")
+            log.error(f"Local upsert_session failed: {e}")
+            return None
 
     def get_recent_sessions(
         self,
         project_path: Optional[str] = None,
         limit: int = 10,
     ) -> List[Dict[str, Any]]:
-        """Get recent sessions from Postgres."""
-        if not self._init_central() or not self._postgres:
-            raise StorageError("Central storage not available")
+        """Get recent sessions. Uses central if available, falls back to local."""
+        if self._init_central() and self._postgres:
+            try:
+                project_id = None
+                if project_path:
+                    project_id = self._postgres.get_or_create_project(project_path)
+                return self._postgres.get_recent_sessions(
+                    project_id=project_id,
+                    limit=limit,
+                )
+            except Exception as e:
+                log.error(f"Central get_recent_sessions failed: {e}")
+                # Fall through to local
 
+        # Local fallback
         try:
             project_id = None
             if project_path:
-                project_id = self._postgres.get_or_create_project(project_path)
-            return self._postgres.get_recent_sessions(
+                project_id = local_store.get_or_create_project(project_path)
+            return local_store.get_recent_sessions(
                 project_id=project_id,
                 limit=limit,
             )
         except Exception as e:
-            log.error(f"get_recent_sessions failed: {e}")
-            raise StorageError(f"Session query failed: {e}")
+            log.error(f"Local get_recent_sessions failed: {e}")
+            return []
 
     def search_sessions_fts(
         self,
@@ -292,35 +337,52 @@ class Storage:
         project_path: Optional[str] = None,
         limit: int = 10,
     ) -> List[Dict[str, Any]]:
-        """Full-text search on sessions in Postgres."""
-        if not self._init_central() or not self._postgres:
-            raise StorageError("Central storage not available")
+        """Full-text search on sessions. Uses central if available, falls back to local."""
+        if self._init_central() and self._postgres:
+            try:
+                project_id = None
+                if project_path:
+                    project_id = self._postgres.get_or_create_project(project_path)
+                return self._postgres.search_sessions_fts(
+                    query=query,
+                    project_id=project_id,
+                    limit=limit,
+                )
+            except Exception as e:
+                log.error(f"Central search_sessions_fts failed: {e}")
+                # Fall through to local
 
+        # Local fallback
         try:
             project_id = None
             if project_path:
-                project_id = self._postgres.get_or_create_project(project_path)
-            return self._postgres.search_sessions_fts(
+                project_id = local_store.get_or_create_project(project_path)
+            return local_store.search_sessions_fts(
                 query=query,
                 project_id=project_id,
                 limit=limit,
             )
         except Exception as e:
-            log.error(f"search_sessions_fts failed: {e}")
-            raise StorageError(f"FTS query failed: {e}")
+            log.error(f"Local search_sessions_fts failed: {e}")
+            return []
 
     # ==================== Custodian Operations ====================
 
     def get_custodian_all(self) -> List[Dict[str, Any]]:
-        """Get all custodian preferences from Postgres."""
-        if not self._init_central() or not self._postgres:
-            raise StorageError("Central storage not available")
+        """Get all custodian preferences. Uses central if available, falls back to local."""
+        if self._init_central() and self._postgres:
+            try:
+                return self._postgres.get_all_custodian()
+            except Exception as e:
+                log.error(f"Central get_custodian_all failed: {e}")
+                # Fall through to local
 
+        # Local fallback
         try:
-            return self._postgres.get_all_custodian()
+            return local_store.get_custodian_all()
         except Exception as e:
-            log.error(f"get_custodian_all failed: {e}")
-            raise StorageError(f"Custodian query failed: {e}")
+            log.error(f"Local get_custodian_all failed: {e}")
+            return []
 
     def upsert_custodian(
         self,
@@ -330,12 +392,24 @@ class Storage:
         confidence: float = 0.5,
         source_session: Optional[str] = None,
     ):
-        """Upsert a custodian preference to Postgres."""
-        if not self._init_central() or not self._postgres:
-            raise StorageError("Central storage not available")
+        """Upsert a custodian preference. Uses central if available, falls back to local."""
+        if self._init_central() and self._postgres:
+            try:
+                self._postgres.upsert_custodian(
+                    key=key,
+                    value=value,
+                    category=category,
+                    confidence=confidence,
+                    source_session=source_session,
+                )
+                return
+            except Exception as e:
+                log.error(f"Central upsert_custodian failed: {e}")
+                # Fall through to local
 
+        # Local fallback
         try:
-            self._postgres.upsert_custodian(
+            local_store.upsert_custodian(
                 key=key,
                 value=value,
                 category=category,
@@ -343,8 +417,7 @@ class Storage:
                 source_session=source_session,
             )
         except Exception as e:
-            log.error(f"upsert_custodian failed: {e}")
-            raise StorageError(f"Custodian update failed: {e}")
+            log.error(f"Local upsert_custodian failed: {e}")
 
     # ==================== Error Pattern Operations ====================
 
@@ -354,22 +427,34 @@ class Storage:
         project_path: Optional[str] = None,
         limit: int = 5,
     ) -> List[Dict[str, Any]]:
-        """Search error patterns in Postgres."""
-        if not self._init_central() or not self._postgres:
-            raise StorageError("Central storage not available")
+        """Search error patterns. Uses central if available, falls back to local."""
+        if self._init_central() and self._postgres:
+            try:
+                project_id = None
+                if project_path:
+                    project_id = self._postgres.get_or_create_project(project_path)
+                return self._postgres.search_error_patterns(
+                    query=query,
+                    project_id=project_id,
+                    limit=limit,
+                )
+            except Exception as e:
+                log.error(f"Central search_error_patterns failed: {e}")
+                # Fall through to local
 
+        # Local fallback
         try:
             project_id = None
             if project_path:
-                project_id = self._postgres.get_or_create_project(project_path)
-            return self._postgres.search_error_patterns(
+                project_id = local_store.get_or_create_project(project_path)
+            return local_store.search_error_patterns(
                 query=query,
                 project_id=project_id,
                 limit=limit,
             )
         except Exception as e:
-            log.error(f"search_error_patterns failed: {e}")
-            raise StorageError(f"Error search failed: {e}")
+            log.error(f"Local search_error_patterns failed: {e}")
+            return []
 
     # ==================== Decision Operations ====================
 
@@ -380,23 +465,36 @@ class Storage:
         category: Optional[str] = None,
         limit: int = 10,
     ) -> List[Dict[str, Any]]:
-        """Search decisions in Postgres."""
-        if not self._init_central() or not self._postgres:
-            raise StorageError("Central storage not available")
+        """Search decisions. Uses central if available, falls back to local."""
+        if self._init_central() and self._postgres:
+            try:
+                project_id = None
+                if project_path:
+                    project_id = self._postgres.get_or_create_project(project_path)
+                return self._postgres.search_decisions(
+                    query=query,
+                    project_id=project_id,
+                    category=category,
+                    limit=limit,
+                )
+            except Exception as e:
+                log.error(f"Central search_decisions failed: {e}")
+                # Fall through to local
 
+        # Local fallback
         try:
             project_id = None
             if project_path:
-                project_id = self._postgres.get_or_create_project(project_path)
-            return self._postgres.search_decisions(
+                project_id = local_store.get_or_create_project(project_path)
+            return local_store.search_decisions(
                 query=query,
                 project_id=project_id,
                 category=category,
                 limit=limit,
             )
         except Exception as e:
-            log.error(f"search_decisions failed: {e}")
-            raise StorageError(f"Decision search failed: {e}")
+            log.error(f"Local search_decisions failed: {e}")
+            return []
 
     # ==================== Concept Operations ====================
 
@@ -406,20 +504,20 @@ class Storage:
         concept_type: Optional[str] = None,
         min_confidence: float = 0.3,
     ) -> List[Dict[str, Any]]:
-        """Get concepts for a project from Postgres."""
-        if not self._init_central() or not self._postgres:
-            raise StorageError("Central storage not available")
+        """Get concepts for a project. Uses central if available, returns empty if not."""
+        if self._init_central() and self._postgres:
+            try:
+                project_id = self._postgres.get_or_create_project(project_path)
+                return self._postgres.get_concepts(
+                    project_id=project_id,
+                    concept_type=concept_type,
+                    min_confidence=min_confidence,
+                )
+            except Exception as e:
+                log.error(f"Central get_concepts failed: {e}")
 
-        try:
-            project_id = self._postgres.get_or_create_project(project_path)
-            return self._postgres.get_concepts(
-                project_id=project_id,
-                concept_type=concept_type,
-                min_confidence=min_confidence,
-            )
-        except Exception as e:
-            log.error(f"get_concepts failed: {e}")
-            raise StorageError(f"Concept query failed: {e}")
+        # Local fallback - concepts not stored locally yet, return empty
+        return []
 
     # ==================== Archive Operations ====================
 
@@ -430,45 +528,65 @@ class Storage:
         content_hash: str,
     ) -> Optional[int]:
         """
-        Store or update a conversation archive in central storage.
+        Store or update a conversation archive.
+
+        Uses central Postgres if available, falls back to local SQLite.
 
         Args:
-            postgres_session_id: The Postgres session ID (foreign key)
+            postgres_session_id: The session ID (foreign key)
             content: Full JSONL content
             content_hash: SHA256 hash for deduplication
 
         Returns archive ID or None if failed.
         """
-        if not self._init_central() or not self._postgres:
-            raise StorageError("Central storage not available")
+        if self._init_central() and self._postgres:
+            try:
+                return self._postgres.upsert_archive(
+                    session_id=postgres_session_id,
+                    content=content,
+                    content_hash=content_hash,
+                )
+            except Exception as e:
+                log.error(f"Central upsert_archive failed: {e}")
+                # Fall through to local
 
+        # Local fallback
         try:
-            return self._postgres.upsert_archive(
-                session_id=postgres_session_id,
+            return local_store.upsert_archive(
+                session_db_id=postgres_session_id,
                 content=content,
                 content_hash=content_hash,
             )
         except Exception as e:
-            log.error(f"upsert_archive failed: {e}")
-            raise StorageError(f"Archive operation failed: {e}")
+            log.error(f"Local upsert_archive failed: {e}")
+            return None
 
     def get_archive(self, session_uuid: str) -> Optional[str]:
         """
         Get archive content by session UUID.
+
+        Uses central Postgres if available, falls back to local SQLite.
 
         Args:
             session_uuid: The session ID string (filename without .jsonl)
 
         Returns the JSONL content or None if not found.
         """
-        if not self._init_central() or not self._postgres:
-            raise StorageError("Central storage not available")
+        if self._init_central() and self._postgres:
+            try:
+                result = self._postgres.get_archive_by_session_uuid(session_uuid)
+                if result:
+                    return result
+            except Exception as e:
+                log.error(f"Central get_archive failed: {e}")
+                # Fall through to local
 
+        # Local fallback
         try:
-            return self._postgres.get_archive_by_session_uuid(session_uuid)
+            return local_store.get_archive(session_uuid)
         except Exception as e:
-            log.error(f"get_archive failed: {e}")
-            raise StorageError(f"Archive retrieval failed: {e}")
+            log.error(f"Local get_archive failed: {e}")
+            return None
 
     def search_archives_fts(
         self,
@@ -476,32 +594,49 @@ class Storage:
         project_path: Optional[str] = None,
         limit: int = 10,
     ) -> List[Dict[str, Any]]:
-        """Full-text search on archive content."""
-        if not self._init_central() or not self._postgres:
-            raise StorageError("Central storage not available")
+        """Full-text search on archive content. Uses central if available, falls back to local."""
+        if self._init_central() and self._postgres:
+            try:
+                project_id = None
+                if project_path:
+                    project_id = self._postgres.get_or_create_project(project_path)
+                return self._postgres.search_archives_fts(
+                    query=query,
+                    project_id=project_id,
+                    limit=limit,
+                )
+            except Exception as e:
+                log.error(f"Central search_archives_fts failed: {e}")
+                # Fall through to local
 
+        # Local fallback
         try:
             project_id = None
             if project_path:
-                project_id = self._postgres.get_or_create_project(project_path)
-            return self._postgres.search_archives_fts(
+                project_id = local_store.get_or_create_project(project_path)
+            return local_store.search_archives_fts(
                 query=query,
                 project_id=project_id,
                 limit=limit,
             )
         except Exception as e:
-            log.error(f"search_archives_fts failed: {e}")
-            raise StorageError(f"Archive search failed: {e}")
+            log.error(f"Local search_archives_fts failed: {e}")
+            return []
 
     def get_archive_stats(self) -> Dict[str, Any]:
         """Get statistics about stored archives."""
-        if not self._init_central() or not self._postgres:
-            return {"total_archives": 0, "total_bytes": 0, "total_lines": 0, "avg_bytes": 0}
+        if self._init_central() and self._postgres:
+            try:
+                return self._postgres.get_archive_stats()
+            except Exception as e:
+                log.error(f"Central get_archive_stats failed: {e}")
+                # Fall through to local
 
+        # Local fallback
         try:
-            return self._postgres.get_archive_stats()
+            return local_store.get_archive_stats()
         except Exception as e:
-            log.error(f"get_archive_stats failed: {e}")
+            log.error(f"Local get_archive_stats failed: {e}")
             return {"total_archives": 0, "total_bytes": 0, "total_lines": 0, "avg_bytes": 0}
 
     # ==================== Health & Status ====================
@@ -513,6 +648,7 @@ class Storage:
         Returns a dict with:
         - mode: "central" or "local"
         - description: Human-readable description
+        - limitations: What's not available in local mode
         - setup_instructions: How to enable central storage (if in local mode)
         """
         self._init_central()
@@ -525,14 +661,26 @@ class Storage:
                 "postgres_host": self.config.central.postgres.host if self.config.central else None,
             }
         else:
+            # Get local session count
+            try:
+                session_count = local_store.get_session_count()
+            except Exception:
+                session_count = 0
+
             return {
                 "mode": "local",
-                "description": "Using local SQLite storage only (single-machine)",
+                "description": "Using local SQLite storage (keyword search only, single-machine)",
+                "session_count": session_count,
+                "limitations": [
+                    "Keyword search only (no semantic/vector search)",
+                    "History stays on this machine only",
+                    "Codebase concepts not available",
+                ],
                 "setup": {
-                    "summary": "To sync across machines, you need a central server running Qdrant + Postgres accessible via Tailscale VPN.",
+                    "summary": "To enable semantic search and cross-machine sync, set up central storage.",
                     "steps": [
-                        "1. Set up a server with Qdrant (port 6333) and Postgres (port 5432) - can use Docker",
-                        "2. Install Tailscale on both the server and this machine",
+                        "1. Set up a server with Qdrant (port 6333) and Postgres (port 5432) - Docker recommended",
+                        "2. Install Tailscale on both the server and this machine for secure VPN access",
                         "3. Create ~/.mira/server.json with connection details (see template below)",
                         "4. Restart MIRA - it will auto-connect to central storage",
                     ],
@@ -550,7 +698,7 @@ class Storage:
                             }
                         }
                     },
-                    "note": "Central storage is optional. MIRA works fully in local mode."
+                    "note": "Central storage is optional. MIRA works in local mode with keyword search."
                 }
             }
 

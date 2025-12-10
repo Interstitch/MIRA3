@@ -3,8 +3,10 @@ MIRA3 Search Module
 
 Handles semantic search, archive enrichment, and fulltext fallback.
 
-Uses central Qdrant + Postgres storage exclusively.
-Runs vector and FTS searches in parallel for better coverage.
+Primary: Central Qdrant (vector) + Postgres (FTS) for hybrid search
+Fallback: Local SQLite with FTS5 (keyword search only)
+
+In local mode, only FTS search is available (no semantic/vector search).
 """
 
 import json
@@ -19,14 +21,15 @@ from .artifacts import search_artifacts_for_query
 
 def handle_search(params: dict, collection, storage=None) -> dict:
     """
-    Search conversations using semantic search.
+    Search conversations.
 
-    Uses central Qdrant + Postgres storage with parallel vector and FTS searches.
+    Central mode: Hybrid vector + FTS search with parallel queries
+    Local mode: FTS-only keyword search
 
     Args:
         params: Search parameters (query, limit, project_path)
         collection: Deprecated - kept for API compatibility, ignored
-        storage: Storage instance for central Qdrant + Postgres
+        storage: Storage instance
 
     Returns:
         Dict with results, total, and optional artifacts
@@ -48,29 +51,57 @@ def handle_search(params: dict, collection, storage=None) -> dict:
             log("ERROR: Storage not available")
             return {"results": [], "total": 0, "error": "Storage not available"}
 
-    # Check central storage is available
-    if not storage.using_central:
-        log("ERROR: Central storage not available")
-        return {"results": [], "total": 0, "error": "Central storage not available"}
+    # Central storage: hybrid vector + FTS search
+    if storage.using_central:
+        try:
+            central_results = _search_central_parallel(
+                storage, query, project_path, limit
+            )
 
+            # Enrich with archive excerpts
+            enriched = enrich_results_from_archives(central_results, query, mira_path, storage)
+            artifact_results = search_artifacts_for_query(query, limit=5)
+
+            return {
+                "results": enriched,
+                "total": len(enriched),
+                "search_type": "central_hybrid",
+                "artifacts": artifact_results if artifact_results else []
+            }
+        except Exception as e:
+            log(f"Central search failed: {e}")
+            # Fall through to local FTS
+
+    # Local fallback: FTS-only search
     try:
-        central_results = _search_central_parallel(
-            storage, query, project_path, limit
-        )
+        fts_results = storage.search_sessions_fts(query, project_path, limit)
 
-        # Enrich with archive excerpts (uses remote archives via storage)
-        enriched = enrich_results_from_archives(central_results, query, mira_path, storage)
+        # Format results for consistency
+        results = []
+        for r in fts_results:
+            results.append({
+                "session_id": r.get("session_id", ""),
+                "summary": r.get("summary", ""),
+                "keywords": r.get("keywords", []) if isinstance(r.get("keywords"), list) else [],
+                "relevance": r.get("rank", 0.5),
+                "timestamp": r.get("started_at", ""),
+                "project_path": r.get("project_path", ""),
+                "search_source": "local_fts"
+            })
+
+        # Try to enrich with archive excerpts
+        enriched = enrich_results_from_archives(results, query, mira_path, storage)
         artifact_results = search_artifacts_for_query(query, limit=5)
 
         return {
             "results": enriched,
             "total": len(enriched),
-            "search_type": "central_hybrid",
+            "search_type": "local_fts",
             "artifacts": artifact_results if artifact_results else []
         }
     except Exception as e:
-        log(f"Search failed: {e}")
-        # Fall back to fulltext archive search (tries remote first)
+        log(f"Local FTS search failed: {e}")
+        # Last resort: fulltext archive search
         fallback_results = fulltext_search_archives(query, limit, mira_path, storage)
         artifact_results = search_artifacts_for_query(query, limit=5)
         return {
