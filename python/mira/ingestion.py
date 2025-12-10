@@ -326,7 +326,7 @@ def discover_conversations(claude_path: Path = None) -> list:
     return conversations
 
 
-def run_full_ingestion(collection, mira_path: Path = None, max_workers: int = 4, storage=None) -> dict:
+def run_full_ingestion(collection, mira_path: Path = None, max_workers: int = 2, storage=None) -> dict:
     """
     Run full ingestion of all discovered conversations.
 
@@ -336,7 +336,7 @@ def run_full_ingestion(collection, mira_path: Path = None, max_workers: int = 4,
     Args:
         collection: Deprecated - kept for API compatibility, ignored
         mira_path: Path to .mira directory
-        max_workers: Number of parallel ingestion threads (default: 4)
+        max_workers: Number of parallel ingestion threads (default: 2 to avoid pool exhaustion)
         storage: Storage instance
 
     Returns stats dict with counts.

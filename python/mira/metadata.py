@@ -544,7 +544,8 @@ def extract_metadata(conversation: dict, file_info: dict) -> dict:
         'git_branch': session_meta.get('git_branch', ''),
         'cwd': session_meta.get('cwd', ''),
         'models_used': session_meta.get('models_used', []),
-        'tools_used': session_meta.get('tools_used', {}),
+        # Convert tools_used from dict (tool->count) to list of tool names
+        'tools_used': list(session_meta.get('tools_used', {}).keys()) if isinstance(session_meta.get('tools_used'), dict) else session_meta.get('tools_used', []),
         'files_touched': files_touched[:50],
         'todo_topics': todo_topics,
     }
