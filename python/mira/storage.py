@@ -703,7 +703,7 @@ class Storage:
             }
 
     def health_check(self) -> Dict[str, Any]:
-        """Check health of central storage."""
+        """Check health of central storage with detailed diagnostics."""
         status = {
             "central_configured": self.config.central_enabled,
             "central_available": False,
@@ -721,8 +721,135 @@ class Storage:
                 status["qdrant_healthy"] = self._qdrant.is_healthy()
             if self._postgres:
                 status["postgres_healthy"] = self._postgres.is_healthy()
+        elif self.config.central_enabled:
+            # Central is configured but not available - add diagnostics
+            status["diagnostics"] = self._get_connectivity_diagnostics()
 
         return status
+
+    def _get_connectivity_diagnostics(self) -> Dict[str, Any]:
+        """Get detailed diagnostics when central storage is unreachable."""
+        import socket
+        import subprocess
+
+        diag = {
+            "issue": "Central storage configured but unreachable",
+            "checks": [],
+            "suggestions": [],
+        }
+
+        if not self.config.central or not self.config.central.qdrant:
+            diag["checks"].append("Config: Missing central configuration")
+            return diag
+
+        qdrant_host = self.config.central.qdrant.host
+        qdrant_port = self.config.central.qdrant.port
+        pg_host = self.config.central.postgres.host
+        pg_port = self.config.central.postgres.port
+
+        # Check if this looks like a Tailscale IP
+        is_tailscale_ip = qdrant_host.startswith("100.")
+
+        # Check Tailscale status if it's a Tailscale IP
+        if is_tailscale_ip:
+            try:
+                result = subprocess.run(
+                    ["tailscale", "status", "--json"],
+                    capture_output=True,
+                    text=True,
+                    timeout=5
+                )
+                if result.returncode == 0:
+                    import json
+                    ts_status = json.loads(result.stdout)
+                    if ts_status.get("BackendState") == "Running":
+                        diag["checks"].append(f"Tailscale: Running")
+                        # Check if the target IP is in peers
+                        peers = ts_status.get("Peer", {})
+                        target_found = False
+                        for peer_id, peer in peers.items():
+                            peer_ips = peer.get("TailscaleIPs", [])
+                            if qdrant_host in peer_ips:
+                                target_found = True
+                                online = peer.get("Online", False)
+                                diag["checks"].append(
+                                    f"Tailscale peer {qdrant_host}: {'online' if online else 'OFFLINE'}"
+                                )
+                                if not online:
+                                    diag["suggestions"].append(
+                                        "The target server appears to be offline in Tailscale"
+                                    )
+                                break
+                        if not target_found:
+                            diag["checks"].append(f"Tailscale peer {qdrant_host}: NOT FOUND in network")
+                            diag["suggestions"].append(
+                                "Target IP not found in Tailscale network. Verify the server is connected to Tailscale."
+                            )
+                    else:
+                        diag["checks"].append(f"Tailscale: Not running (state: {ts_status.get('BackendState')})")
+                        diag["suggestions"].append("Start Tailscale: sudo tailscale up")
+                else:
+                    diag["checks"].append("Tailscale: Not connected or not installed")
+                    diag["suggestions"].append("Install/start Tailscale to connect to central storage")
+            except FileNotFoundError:
+                diag["checks"].append("Tailscale: NOT INSTALLED")
+                diag["suggestions"].append(
+                    "Tailscale is required to reach the central server. "
+                    "Install from https://tailscale.com/download"
+                )
+            except subprocess.TimeoutExpired:
+                diag["checks"].append("Tailscale: Command timed out")
+            except Exception as e:
+                diag["checks"].append(f"Tailscale: Error checking status - {e}")
+
+        # Test TCP connectivity to Qdrant
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(3)
+            result = sock.connect_ex((qdrant_host, qdrant_port))
+            sock.close()
+            if result == 0:
+                diag["checks"].append(f"Qdrant port {qdrant_host}:{qdrant_port}: REACHABLE")
+            else:
+                diag["checks"].append(f"Qdrant port {qdrant_host}:{qdrant_port}: UNREACHABLE (error {result})")
+        except socket.timeout:
+            diag["checks"].append(f"Qdrant port {qdrant_host}:{qdrant_port}: TIMEOUT")
+        except Exception as e:
+            diag["checks"].append(f"Qdrant port {qdrant_host}:{qdrant_port}: ERROR - {e}")
+
+        # Test TCP connectivity to Postgres
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(3)
+            result = sock.connect_ex((pg_host, pg_port))
+            sock.close()
+            if result == 0:
+                diag["checks"].append(f"Postgres port {pg_host}:{pg_port}: REACHABLE")
+            else:
+                diag["checks"].append(f"Postgres port {pg_host}:{pg_port}: UNREACHABLE (error {result})")
+        except socket.timeout:
+            diag["checks"].append(f"Postgres port {pg_host}:{pg_port}: TIMEOUT")
+        except Exception as e:
+            diag["checks"].append(f"Postgres port {pg_host}:{pg_port}: ERROR - {e}")
+
+        # Add general suggestions if no specific ones yet
+        if not diag["suggestions"]:
+            if is_tailscale_ip:
+                diag["suggestions"].append(
+                    "Ensure Tailscale is installed and connected on this machine"
+                )
+                diag["suggestions"].append(
+                    "Verify the central server is running and connected to Tailscale"
+                )
+            else:
+                diag["suggestions"].append(
+                    "Check network connectivity to the central server"
+                )
+                diag["suggestions"].append(
+                    "Verify firewall rules allow connections to Qdrant and Postgres ports"
+                )
+
+        return diag
 
     def close(self):
         """Close all connections."""
