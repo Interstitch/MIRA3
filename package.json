@@ -1,6 +1,6 @@
 {
   "name": "claude-mira3",
-  "version": "0.2.4",
+  "version": "0.2.5",
   "description": "MCP server for Claude Code conversation history with semantic search via ChromaDB",
   "type": "module",
   "main": "dist/cli.js",
