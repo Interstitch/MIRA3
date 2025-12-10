@@ -1,14 +1,18 @@
 """
 MIRA3 Embedding Module
 
-Handles the sentence-transformers embedding model for ChromaDB.
+Handles the sentence-transformers embedding model for Qdrant vector search.
+Uses all-MiniLM-L6-v2 which produces 384-dimensional vectors.
 """
+
+from typing import List, Union
 
 from .utils import log, get_models_path, configure_model_cache
 from .constants import EMBEDDING_MODEL_NAME
 
 # Global embedding model instance
 _embedding_model = None
+_embedding_function = None
 
 
 def get_embedding_model():
@@ -32,53 +36,63 @@ def get_embedding_model():
         log("Embedding model ready.")
         return _embedding_model
     except ImportError:
-        log("WARNING: sentence-transformers not available, using ChromaDB defaults")
-        return None
+        log("ERROR: sentence-transformers not available")
+        raise RuntimeError("sentence-transformers is required for MIRA")
     except Exception as e:
-        log(f"WARNING: Failed to load embedding model: {e}")
-        return None
+        log(f"ERROR: Failed to load embedding model: {e}")
+        raise
+
+
+def get_embedding_function():
+    """Get the global embedding function (singleton)."""
+    global _embedding_function
+    if _embedding_function is None:
+        _embedding_function = MiraEmbeddingFunction()
+    return _embedding_function
 
 
 class MiraEmbeddingFunction:
     """
-    Custom ChromaDB embedding function using all-MiniLM-L6-v2.
+    Embedding function using all-MiniLM-L6-v2.
 
-    Implements the ChromaDB EmbeddingFunction protocol with all required methods.
+    Produces 384-dimensional vectors compatible with Qdrant.
     """
 
     def __init__(self):
         self.model = None
 
-    def name(self) -> str:
-        """Return embedding function name (required by ChromaDB)."""
-        return "mira_minilm"
-
     def _ensure_model(self):
         if self.model is None:
             self.model = get_embedding_model()
 
-    def __call__(self, input: list) -> list:
-        """Embed a list of documents (for adding to collection).
-
-        Note: ChromaDB 0.4.16+ requires parameter name 'input' instead of 'texts'.
+    def __call__(self, texts: Union[str, List[str]]) -> List[List[float]]:
         """
-        return self._embed(input)
+        Embed one or more texts.
 
-    def embed_documents(self, texts: list) -> list:
-        """Embed a list of documents (ChromaDB interface)."""
+        Args:
+            texts: Single string or list of strings to embed
+
+        Returns:
+            List of embedding vectors (384-dimensional)
+        """
+        if isinstance(texts, str):
+            texts = [texts]
         return self._embed(texts)
 
-    def embed_query(self, text: str) -> list:
-        """Embed a single query text (ChromaDB interface)."""
+    def embed_query(self, text: str) -> List[float]:
+        """Embed a single query text."""
         result = self._embed([text])
         return result[0] if result else []
 
-    def _embed(self, texts: list) -> list:
+    def embed_documents(self, texts: List[str]) -> List[List[float]]:
+        """Embed multiple documents."""
+        return self._embed(texts)
+
+    def _embed(self, texts: List[str]) -> List[List[float]]:
         """Internal embedding method."""
         self._ensure_model()
         if self.model is None:
             raise RuntimeError("Embedding model not available")
 
         embeddings = self.model.encode(texts, convert_to_numpy=True, show_progress_bar=False)
-        # Return as list of lists (ChromaDB format)
         return [emb.tolist() for emb in embeddings]

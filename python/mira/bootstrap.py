@@ -82,12 +82,19 @@ def ensure_venv_and_deps() -> bool:
             capture_output=True
         )
 
-        # Install other dependencies
+        # Install all dependencies (Qdrant + Postgres included by default)
         subprocess.run(
             [pip, "install"] + DEPENDENCIES + ["-q"],
             check=True,
             capture_output=True
         )
+
+        # Verify server.json exists (required for remote storage)
+        server_config_path = mira_path / "server.json"
+        if not server_config_path.exists():
+            log("WARNING: ~/.mira/server.json not found!")
+            log("MIRA requires server.json to connect to remote Qdrant + Postgres.")
+            log("See docs/CENTRAL_SETUP.md for configuration instructions.")
 
         # Mark as installed
         config = {"deps_installed": True, "installed_at": datetime.now().isoformat()}

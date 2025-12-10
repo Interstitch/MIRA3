@@ -1,7 +1,7 @@
 """
 MIRA3 Python Backend Package
 
-Modular backend for ChromaDB operations, conversation ingestion, and search.
+Modular backend for central Qdrant + Postgres storage, conversation ingestion, and search.
 """
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"

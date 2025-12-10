@@ -2,6 +2,8 @@
 MIRA3 File Watcher Module
 
 Watches for new/modified conversations and triggers ingestion.
+
+Uses central Qdrant + Postgres storage exclusively.
 """
 
 import threading
@@ -24,8 +26,16 @@ class ConversationWatcher:
     - Thread-safe queuing
     """
 
-    def __init__(self, collection, mira_path: Path):
-        self.collection = collection
+    def __init__(self, collection, mira_path: Path, storage=None):
+        """
+        Initialize watcher.
+
+        Args:
+            collection: Deprecated - kept for API compatibility, ignored
+            mira_path: Path to .mira directory
+            storage: Storage instance for central Qdrant + Postgres
+        """
+        self.storage = storage
         self.mira_path = mira_path
         self.pending_files = {}  # file_path -> timestamp
         self.lock = threading.Lock()
@@ -81,7 +91,8 @@ class ConversationWatcher:
         }
 
         try:
-            if ingest_conversation(file_info, self.collection, self.mira_path):
+            # Pass None for collection (deprecated), use storage
+            if ingest_conversation(file_info, None, self.mira_path, self.storage):
                 log(f"Ingested: {session_id}")
         except Exception as e:
             log(f"Failed to ingest {session_id}: {e}")
@@ -99,8 +110,15 @@ class ConversationWatcher:
             self.debounce_thread.join(timeout=2)
 
 
-def run_file_watcher(collection, mira_path: Path = None):
-    """Background thread that watches for new conversations."""
+def run_file_watcher(collection, mira_path: Path = None, storage=None):
+    """
+    Background thread that watches for new conversations.
+
+    Args:
+        collection: Deprecated - kept for API compatibility, ignored
+        mira_path: Path to .mira directory
+        storage: Storage instance for central Qdrant + Postgres
+    """
     try:
         from watchdog.observers import Observer
         from watchdog.events import FileSystemEventHandler
@@ -118,7 +136,7 @@ def run_file_watcher(collection, mira_path: Path = None):
         return
 
     # Create conversation watcher with debouncing
-    conv_watcher = ConversationWatcher(collection, mira_path)
+    conv_watcher = ConversationWatcher(None, mira_path, storage)
     conv_watcher.start()
 
     class ConversationHandler(FileSystemEventHandler):

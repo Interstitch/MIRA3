@@ -6,7 +6,7 @@ Provides advanced analysis features:
 - Decision journal with reasoning
 - Conversation similarity detection
 
-Uses centralized db_manager for thread-safe writes during parallel ingestion.
+Uses central Postgres for storage with local SQLite fallback.
 """
 
 import json
@@ -167,17 +167,41 @@ def compute_error_signature(error_msg: str) -> str:
     return f"{error_type}:{msg_hash}"
 
 
-def extract_errors_from_conversation(conversation: dict, session_id: str) -> int:
+def extract_errors_from_conversation(
+    conversation: dict,
+    session_id: str,
+    project_path: str = None,
+    storage=None
+) -> int:
     """
     Extract error patterns and solutions from a conversation.
 
     Looks for:
     - Error messages in user messages
     - Solutions in subsequent assistant messages
+
+    Uses central Postgres if available, falls back to local SQLite.
     """
     messages = conversation.get('messages', [])
     if len(messages) < 2:
         return 0
+
+    # Get storage if not provided
+    use_central = False
+    project_id = None
+    if storage is None:
+        try:
+            from .storage import get_storage
+            storage = get_storage()
+        except ImportError:
+            pass
+
+    if storage and storage.using_central and project_path:
+        try:
+            project_id = storage.postgres.get_or_create_project(project_path)
+            use_central = True
+        except Exception as e:
+            log(f"Failed to get project_id for errors: {e}")
 
     db = get_db_manager()
     now = datetime.now().isoformat()
@@ -213,10 +237,8 @@ def extract_errors_from_conversation(conversation: dict, session_id: str) -> int
 
                     signature = compute_error_signature(error_msg)
                     error_type = extract_error_type(error_msg)
-                    normalized = normalize_error_message(error_msg)
 
                     solution_summary = None
-                    solution_details = None
                     if i + 1 < len(messages):
                         next_msg = messages[i + 1]
                         if next_msg.get('role') == 'assistant':
@@ -227,6 +249,24 @@ def extract_errors_from_conversation(conversation: dict, session_id: str) -> int
                                     if isinstance(item, dict) and item.get('type') == 'text'
                                 )
                             solution_summary = _extract_solution_summary(solution_details)
+
+                    # Store in central Postgres
+                    if use_central and project_id:
+                        try:
+                            storage.postgres.upsert_error_pattern(
+                                project_id=project_id,
+                                signature=signature,
+                                error_type=error_type,
+                                error_text=error_msg[:500],
+                                solution=solution_summary,
+                            )
+                            errors_found += 1
+                            continue
+                        except Exception as e:
+                            log(f"Central error storage failed: {e}")
+
+                    # Fallback to local SQLite
+                    normalized = normalize_error_message(error_msg)
 
                     def upsert_error(cursor):
                         cursor.execute("""
@@ -244,22 +284,19 @@ def extract_errors_from_conversation(conversation: dict, session_id: str) -> int
                             cursor.execute("""
                                 UPDATE error_patterns
                                 SET occurrence_count = ?, last_seen = ?, source_sessions = ?,
-                                    solution_summary = COALESCE(?, solution_summary),
-                                    solution_details = COALESCE(?, solution_details)
+                                    solution_summary = COALESCE(?, solution_summary)
                                 WHERE id = ?
                             """, (count + 1, now, json.dumps(sources_list[-10:]),
-                                  solution_summary, solution_details[:2000] if solution_details else None,
-                                  pattern_id))
+                                  solution_summary, pattern_id))
                             return 0
                         else:
                             cursor.execute("""
                                 INSERT INTO error_patterns
                                 (error_signature, error_type, error_message, normalized_message,
-                                 solution_summary, solution_details, first_seen, last_seen, source_sessions)
-                                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                 solution_summary, first_seen, last_seen, source_sessions)
+                                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                             """, (signature, error_type, error_msg[:500], normalized[:500],
-                                  solution_summary, solution_details[:2000] if solution_details else None,
-                                  now, now, json.dumps([session_id])))
+                                  solution_summary, now, now, json.dumps([session_id])))
 
                             cursor.execute("""
                                 INSERT INTO errors_fts(rowid, error_message, solution_summary, file_context)
@@ -303,12 +340,48 @@ def _extract_solution_summary(solution_text: str) -> Optional[str]:
     return None
 
 
-def search_error_solutions(query: str, limit: int = 5) -> List[Dict]:
+def search_error_solutions(query: str, limit: int = 5, project_path: str = None, storage=None) -> List[Dict]:
     """
     Search for past error solutions matching the query.
 
+    Uses central Postgres if available, falls back to local SQLite.
+
     Returns list of matching errors with their solutions.
     """
+    # Try central Postgres first
+    if storage is None:
+        try:
+            from .storage import get_storage
+            storage = get_storage()
+        except ImportError:
+            pass
+
+    if storage and storage.using_central:
+        try:
+            project_id = None
+            if project_path:
+                project_id = storage.postgres.get_or_create_project(project_path)
+            results = storage.postgres.search_error_patterns(query, project_id=project_id, limit=limit)
+            formatted = []
+            for r in results:
+                formatted.append({
+                    'error_type': r.get('error_type'),
+                    'error_message': r.get('error_text'),
+                    'solution_summary': r.get('solution'),
+                    'occurrence_count': r.get('occurrences', 1),
+                    'last_seen': str(r.get('last_seen', '')),
+                    'project_path': r.get('project_path', ''),
+                })
+            return formatted
+        except Exception as e:
+            log(f"Central error search failed: {e}")
+
+    # Fallback to local SQLite
+    return _search_error_solutions_local(query, limit)
+
+
+def _search_error_solutions_local(query: str, limit: int = 5) -> List[Dict]:
+    """Search local SQLite for error solutions."""
     db = get_db_manager()
     results = []
 
@@ -394,7 +467,13 @@ def get_error_stats() -> Dict:
 # DECISION JOURNAL
 # =============================================================================
 
-def extract_decisions_from_conversation(conversation: dict, session_id: str) -> int:
+def extract_decisions_from_conversation(
+    conversation: dict,
+    session_id: str,
+    project_path: str = None,
+    postgres_session_id: int = None,
+    storage=None
+) -> int:
     """
     Extract architectural and design decisions from a conversation.
 
@@ -402,15 +481,35 @@ def extract_decisions_from_conversation(conversation: dict, session_id: str) -> 
     - Explicit decision statements
     - Reasoning patterns
     - Alternative considerations
+
+    Uses central Postgres if available, falls back to local SQLite.
     """
     messages = conversation.get('messages', [])
     if not messages:
         return 0
 
+    # Get storage if not provided
+    use_central = False
+    project_id = None
+    if storage is None:
+        try:
+            from .storage import get_storage
+            storage = get_storage()
+        except ImportError:
+            pass
+
+    if storage and storage.using_central and project_path:
+        try:
+            project_id = storage.postgres.get_or_create_project(project_path)
+            use_central = True
+        except Exception as e:
+            log(f"Failed to get project_id for decisions: {e}")
+
     db = get_db_manager()
     now = datetime.now().isoformat()
 
     decisions_found = 0
+    seen_hashes = set()  # Dedupe within this conversation
 
     decision_patterns = [
         (r"(?:I (?:decided|chose|went with|selected)|We should use|Let's use|The best approach is)\s+([^.!?\n]{10,150}[.!?])", 'explicit'),
@@ -445,6 +544,11 @@ def extract_decisions_from_conversation(conversation: dict, session_id: str) -> 
 
                 decision_hash = hashlib.md5(decision_text[:100].lower().encode()).hexdigest()
 
+                # Skip duplicates within this conversation
+                if decision_hash in seen_hashes:
+                    continue
+                seen_hashes.add(decision_hash)
+
                 context_match = re.search(
                     rf".{{0,100}}{re.escape(decision_text[:30])}.{{0,100}}",
                     combined_text,
@@ -454,6 +558,23 @@ def extract_decisions_from_conversation(conversation: dict, session_id: str) -> 
 
                 category = _categorize_decision(decision_text)
 
+                # Store in central Postgres
+                if use_central and project_id:
+                    try:
+                        storage.postgres.insert_decision(
+                            project_id=project_id,
+                            decision=decision_text[:200],
+                            category=category,
+                            reasoning=context[:500] if context else None,
+                            session_id=postgres_session_id,
+                            confidence=0.5,
+                        )
+                        decisions_found += 1
+                        continue
+                    except Exception as e:
+                        log(f"Central decision storage failed: {e}")
+
+                # Fallback to local SQLite
                 def insert_decision(cursor):
                     cursor.execute("SELECT id FROM decisions WHERE decision_hash = ?", (decision_hash,))
                     if cursor.fetchone():
@@ -500,12 +621,60 @@ def _categorize_decision(decision_text: str) -> str:
     return 'general'
 
 
-def search_decisions(query: str, category: Optional[str] = None, limit: int = 10) -> List[Dict]:
+def search_decisions(
+    query: str,
+    category: Optional[str] = None,
+    limit: int = 10,
+    project_path: str = None,
+    storage=None
+) -> List[Dict]:
     """
     Search for past decisions matching the query.
 
+    Uses central Postgres if available, falls back to local SQLite.
+
     Returns list of matching decisions with context.
     """
+    # Try central Postgres first
+    if storage is None:
+        try:
+            from .storage import get_storage
+            storage = get_storage()
+        except ImportError:
+            pass
+
+    if storage and storage.using_central:
+        try:
+            project_id = None
+            if project_path:
+                project_id = storage.postgres.get_or_create_project(project_path)
+            results = storage.postgres.search_decisions(
+                query=query,
+                project_id=project_id,
+                category=category,
+                limit=limit
+            )
+            formatted = []
+            for r in results:
+                formatted.append({
+                    'decision': r.get('decision'),
+                    'reasoning': r.get('reasoning'),
+                    'category': r.get('category'),
+                    'alternatives': r.get('alternatives', []),
+                    'confidence': r.get('confidence', 0.5),
+                    'created_at': str(r.get('created_at', '')),
+                    'project_path': r.get('project_path', ''),
+                })
+            return formatted
+        except Exception as e:
+            log(f"Central decision search failed: {e}")
+
+    # Fallback to local SQLite
+    return _search_decisions_local(query, category, limit)
+
+
+def _search_decisions_local(query: str, category: Optional[str] = None, limit: int = 10) -> List[Dict]:
+    """Search local SQLite for decisions."""
     db = get_db_manager()
     results = []
 
@@ -578,14 +747,36 @@ def get_decision_stats() -> Dict:
 # COMBINED EXTRACTION (called during ingestion)
 # =============================================================================
 
-def extract_insights_from_conversation(conversation: dict, session_id: str):
+def extract_insights_from_conversation(
+    conversation: dict,
+    session_id: str,
+    project_path: str = None,
+    postgres_session_id: int = None,
+    storage=None
+):
     """
     Extract all insights (errors, decisions) from a conversation.
 
     Called during ingestion.
+
+    Args:
+        conversation: Parsed conversation dict
+        session_id: String session ID
+        project_path: Filesystem path to project (for Postgres storage)
+        postgres_session_id: Postgres session ID (for foreign keys)
+        storage: Storage instance
     """
-    errors = extract_errors_from_conversation(conversation, session_id)
-    decisions = extract_decisions_from_conversation(conversation, session_id)
+    errors = extract_errors_from_conversation(
+        conversation, session_id,
+        project_path=project_path,
+        storage=storage
+    )
+    decisions = extract_decisions_from_conversation(
+        conversation, session_id,
+        project_path=project_path,
+        postgres_session_id=postgres_session_id,
+        storage=storage
+    )
 
     return {
         'errors_found': errors or 0,

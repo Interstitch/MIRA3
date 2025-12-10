@@ -42,3 +42,7 @@ npm-debug.log*
 # Environment
 .env
 .env.local
+
+# Google Cloud SDK (local install)
+gcloud auth/
+google-cloud-sdk/

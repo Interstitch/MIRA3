@@ -2,6 +2,7 @@
 MIRA3 Main Entry Point
 
 Initializes all components and runs the main JSON-RPC loop.
+Uses remote Qdrant + Postgres for all storage (no local ChromaDB).
 """
 
 import sys
@@ -11,16 +12,12 @@ from pathlib import Path
 
 from .utils import log, get_mira_path
 from .bootstrap import ensure_venv_and_deps, reexec_in_venv
-from .db_manager import get_db_manager, shutdown_db_manager
-from .artifacts import init_artifact_db
-from .custodian import init_custodian_db
-from .insights import init_insights_db
-from .concepts import init_concepts_db
-from .embedding import MiraEmbeddingFunction
+from .config import get_config
+from .storage import get_storage, Storage
+from .embedding import get_embedding_function
 from .handlers import handle_rpc_request
 from .watcher import run_file_watcher
 from .ingestion import run_full_ingestion
-from .constants import EMBEDDING_DIMENSIONS
 
 
 def send_notification(method: str, params: dict):
@@ -32,69 +29,47 @@ def send_notification(method: str, params: dict):
 def run_backend():
     """Main backend loop - handles JSON-RPC requests."""
 
-    # Import dependencies (now available in venv)
-    try:
-        import chromadb
-    except ImportError as e:
-        log(f"Failed to import chromadb: {e}")
-        sys.exit(1)
-
     # Initialize storage paths
     mira_path = get_mira_path()
-    chroma_path = mira_path / "chroma"
     archives_path = mira_path / "archives"
     metadata_path = mira_path / "metadata"
 
     # Ensure directories exist
-    for path in [chroma_path, archives_path, metadata_path]:
+    for path in [archives_path, metadata_path]:
         path.mkdir(parents=True, exist_ok=True)
 
-    # Initialize centralized database manager (handles WAL mode and write queue)
-    db_manager = get_db_manager()
-    log("Database manager initialized")
+    # Load configuration
+    config = get_config()
+    if not config.central_enabled:
+        log("ERROR: Central storage not configured!")
+        log("MIRA requires ~/.mira/server.json with central storage settings.")
+        log("See docs/CENTRAL_SETUP.md for setup instructions.")
+        sys.exit(1)
 
-    # Initialize all SQLite databases (through db_manager for thread safety)
-    init_artifact_db()
-    init_custodian_db()
-    init_insights_db()
-    init_concepts_db()
+    # Initialize storage (connects to remote Qdrant + Postgres)
+    log("Connecting to central storage...")
+    storage = get_storage()
 
-    # Initialize embedding function
-    embedding_fn = MiraEmbeddingFunction()
+    if not storage.using_central:
+        log("ERROR: Could not connect to central storage!")
+        log("Check that Tailscale is running and server is reachable.")
+        sys.exit(1)
 
-    # Initialize ChromaDB
-    log("Initializing ChromaDB...")
-    chroma_client = chromadb.PersistentClient(path=str(chroma_path))
+    # Health check
+    health = storage.health_check()
+    log(f"Storage connected: Qdrant={health['qdrant_healthy']}, Postgres={health['postgres_healthy']}")
 
-    # Try to get existing collection, create if not exists
-    try:
-        collection = chroma_client.get_collection(
-            name="conversations",
-            embedding_function=embedding_fn
-        )
-        log(f"ChromaDB ready. Collection has {collection.count()} documents.")
-    except Exception:
-        # Collection doesn't exist, create it with proper metadata
-        log("Creating new ChromaDB collection...")
-        collection = chroma_client.create_collection(
-            name="conversations",
-            metadata={
-                "description": "MIRA3 conversation embeddings",
-                "embedding_model": "all-MiniLM-L6-v2",
-                "embedding_dimensions": EMBEDDING_DIMENSIONS,
-                "hnsw:space": "cosine",
-                "hnsw:M": 16,
-                "hnsw:construction_ef": 100,
-                "hnsw:search_ef": 50
-            },
-            embedding_function=embedding_fn
-        )
-        log("ChromaDB collection created.")
+    # Initialize embedding function (local - generates vectors to send to Qdrant)
+    log("Initializing embedding model...")
+    embed_fn = get_embedding_function()
+    # Force model load now
+    embed_fn._ensure_model()
 
     # Run initial ingestion in background
     def initial_ingestion():
         try:
-            stats = run_full_ingestion(collection, mira_path)
+            # Pass storage explicitly (collection param is deprecated/ignored)
+            stats = run_full_ingestion(collection=None, mira_path=mira_path, storage=storage)
             log(f"Initial ingestion: {stats['ingested']} new conversations indexed")
         except Exception as e:
             log(f"Initial ingestion error: {e}")
@@ -106,9 +81,10 @@ def run_backend():
     send_notification("ready", {})
 
     # Start file watcher in background thread
+    # Pass None for collection (deprecated), storage for central Qdrant + Postgres
     watcher_thread = threading.Thread(
         target=run_file_watcher,
-        args=(collection, mira_path),
+        kwargs={"collection": None, "mira_path": mira_path, "storage": storage},
         daemon=True
     )
     watcher_thread.start()
@@ -122,11 +98,12 @@ def run_backend():
         request = None
         try:
             request = json.loads(line)
-            response = handle_rpc_request(request, collection)
+            response = handle_rpc_request(request, None, storage)
             print(json.dumps(response), flush=True)
 
             # Handle shutdown
             if request.get("method") == "shutdown":
+                storage.close()
                 break
 
         except json.JSONDecodeError as e:

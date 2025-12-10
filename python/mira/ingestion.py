@@ -2,12 +2,17 @@
 MIRA3 Conversation Ingestion Module
 
 Handles the full pipeline of parsing, extracting, archiving, and indexing conversations.
+
+Uses central Qdrant + Postgres storage exclusively (no local ChromaDB fallback).
+Archives are stored remotely in Postgres for cross-machine access.
 """
 
+import hashlib
 import json
 import shutil
 from datetime import datetime
 from pathlib import Path
+from typing import List, Dict, Any, Optional
 
 from .utils import log, get_mira_path
 from .parsing import parse_conversation
@@ -18,19 +23,29 @@ from .insights import extract_insights_from_conversation
 from .concepts import extract_concepts_from_conversation
 
 
-def ingest_conversation(file_info: dict, collection, mira_path: Path = None) -> bool:
+def ingest_conversation(file_info: dict, collection, mira_path: Path = None, storage=None) -> bool:
     """
     Ingest a single conversation: parse, extract, archive, index.
 
     Args:
         file_info: Dict with session_id, file_path, project_path, last_modified
-        collection: ChromaDB collection
+        collection: Deprecated - kept for API compatibility, ignored
         mira_path: Path to .mira directory (optional, uses default if not provided)
+        storage: Storage instance for central Qdrant + Postgres
 
     Returns True if successfully ingested, False if skipped or failed.
     """
     if mira_path is None:
         mira_path = get_mira_path()
+
+    # Get storage instance if not provided
+    if storage is None:
+        try:
+            from .storage import get_storage
+            storage = get_storage()
+        except ImportError:
+            log("ERROR: Storage not available")
+            return False
 
     session_id = file_info['session_id']
     file_path = Path(file_info['file_path'])
@@ -70,13 +85,13 @@ def ingest_conversation(file_info: dict, collection, mira_path: Path = None) -> 
     facts_count = len(metadata.get('key_facts', []))
     log(f"[{short_id}] Metadata: {kw_count} keywords, {facts_count} facts")
 
-    # Archive the conversation (copy to .mira/archives/)
-    archive_file = archives_path / f"{session_id}.jsonl"
+    # Read file content for remote archiving
     try:
-        shutil.copy2(file_path, archive_file)
-        log(f"[{short_id}] Archived")
+        file_content = file_path.read_text(encoding='utf-8')
+        content_hash = hashlib.sha256(file_content.encode('utf-8')).hexdigest()
     except Exception as e:
-        log(f"[{short_id}] Archive failed: {e}")
+        log(f"[{short_id}] Failed to read file: {e}")
+        return False
 
     # Save metadata
     meta_file.write_text(json.dumps(metadata, indent=2))
@@ -92,7 +107,7 @@ def ingest_conversation(file_info: dict, collection, mira_path: Path = None) -> 
                 except json.JSONDecodeError:
                     pass
 
-    # Extract and store file operations for reconstruction capability
+    # Extract and store file operations for reconstruction capability (local only)
     try:
         ops_count = extract_file_operations_from_messages(raw_messages, session_id)
         if ops_count > 0:
@@ -100,69 +115,127 @@ def ingest_conversation(file_info: dict, collection, mira_path: Path = None) -> 
     except Exception as e:
         log(f"[{short_id}] File ops failed: {e}")
 
-    # Extract and store artifacts (code blocks, lists, tables, etc.)
-    try:
-        artifact_count = extract_artifacts_from_messages(raw_messages, session_id)
-        if artifact_count > 0:
-            log(f"[{short_id}] Artifacts: {artifact_count}")
-    except Exception as e:
-        log(f"[{short_id}] Artifacts failed: {e}")
-
-    # Learn about the custodian from this conversation
-    try:
-        custodian_result = extract_custodian_learnings(conversation, session_id)
-        learned = custodian_result.get('learned', 0) if isinstance(custodian_result, dict) else 0
-        if learned > 0:
-            log(f"[{short_id}] Custodian: {learned} learnings")
-    except Exception as e:
-        log(f"[{short_id}] Custodian failed: {e}")
-
-    # Extract insights (errors, decisions) from this conversation
-    try:
-        insights = extract_insights_from_conversation(conversation, session_id)
-        err_count = insights.get('errors_found', 0)
-        dec_count = insights.get('decisions_found', 0)
-        if err_count > 0 or dec_count > 0:
-            log(f"[{short_id}] Insights: {err_count} errors, {dec_count} decisions")
-    except Exception as e:
-        log(f"[{short_id}] Insights failed: {e}")
-
-    # Extract codebase concepts from this conversation
-    try:
-        project_path = file_info.get('project_path', '')
-        if project_path:
-            project_path = '/' + project_path.replace('-', '/')
-
-        concepts = extract_concepts_from_conversation(conversation, session_id, project_path)
-        concept_count = concepts.get('concepts_found', 0)
-        if concept_count > 0:
-            log(f"[{short_id}] Concepts: {concept_count}")
-    except Exception as e:
-        log(f"[{short_id}] Concepts failed: {e}")
-
-    # Build document content for ChromaDB
+    # Build document content for vector search
     doc_content = build_document_content(conversation, metadata)
     log(f"[{short_id}] Built doc ({len(doc_content)} chars)")
 
-    # Index to ChromaDB
-    try:
-        collection.upsert(
-            ids=[session_id],
-            documents=[doc_content],
-            metadatas=[{
-                'summary': metadata.get('summary', '')[:500],
-                'keywords': ','.join(metadata.get('keywords', [])),
-                'project_path': metadata.get('project_path', ''),
-                'timestamp': metadata.get('last_modified', ''),
-                'message_count': str(metadata.get('message_count', 0))
-            }]
-        )
-        log(f"[{short_id}] Indexed to ChromaDB ✓")
-    except Exception as e:
-        log(f"[{short_id}] ChromaDB failed: {e}")
+    # Determine project path for central storage
+    project_path_encoded = file_info.get('project_path', '')
+    project_path_normalized = ''
+    if project_path_encoded:
+        # Convert from "-workspaces-MIRA3" to "/workspaces/MIRA3"
+        project_path_normalized = '/' + project_path_encoded.replace('-', '/')
+
+    # Get git remote for cross-machine project identification
+    from .utils import get_git_remote_for_claude_path
+    git_remote = get_git_remote_for_claude_path(project_path_encoded)
+    if git_remote:
+        log(f"[{short_id}] Git remote: {git_remote}")
+
+    # Index to central storage (required)
+    if not storage or not storage.using_central:
+        log(f"[{short_id}] ERROR: Central storage not available")
         return False
 
-    return True
+    try:
+        # Upsert session to Postgres FIRST (git_remote enables cross-machine project matching)
+        # This returns the postgres session ID needed for artifact foreign keys
+        postgres_session_id = storage.upsert_session(
+            project_path=project_path_normalized,
+            session_id=session_id,
+            git_remote=git_remote,
+            summary=metadata.get('summary', ''),
+            keywords=metadata.get('keywords', []),
+            facts=metadata.get('key_facts', []),
+            task_description=metadata.get('task_description', ''),
+            git_branch=metadata.get('git_branch'),
+            models_used=metadata.get('models_used', []),
+            tools_used=metadata.get('tools_used', []),
+            files_touched=metadata.get('files_touched', []),
+            message_count=metadata.get('message_count', 0),
+            started_at=metadata.get('started_at'),
+            ended_at=metadata.get('last_modified'),
+        )
+        log(f"[{short_id}] Session upserted (pg_id={postgres_session_id})")
+
+        # Archive to remote Postgres (full JSONL content)
+        try:
+            archive_id = storage.upsert_archive(
+                postgres_session_id=postgres_session_id,
+                content=file_content,
+                content_hash=content_hash,
+            )
+            log(f"[{short_id}] Archived to remote (archive_id={archive_id})")
+        except Exception as e:
+            log(f"[{short_id}] Remote archive failed: {e}")
+
+        # Now extract artifacts with postgres_session_id for proper foreign keys
+        try:
+            artifact_count = extract_artifacts_from_messages(
+                raw_messages, session_id,
+                postgres_session_id=postgres_session_id,
+                storage=storage
+            )
+            if artifact_count > 0:
+                log(f"[{short_id}] Artifacts: {artifact_count}")
+        except Exception as e:
+            log(f"[{short_id}] Artifacts failed: {e}")
+
+        # Learn about the custodian from this conversation
+        try:
+            custodian_result = extract_custodian_learnings(conversation, session_id)
+            learned = custodian_result.get('learned', 0) if isinstance(custodian_result, dict) else 0
+            if learned > 0:
+                log(f"[{short_id}] Custodian: {learned} learnings")
+        except Exception as e:
+            log(f"[{short_id}] Custodian failed: {e}")
+
+        # Extract insights (errors, decisions) from this conversation
+        try:
+            insights = extract_insights_from_conversation(
+                conversation, session_id,
+                project_path=project_path_normalized,
+                postgres_session_id=postgres_session_id,
+                storage=storage
+            )
+            err_count = insights.get('errors_found', 0)
+            dec_count = insights.get('decisions_found', 0)
+            if err_count > 0 or dec_count > 0:
+                log(f"[{short_id}] Insights: {err_count} errors, {dec_count} decisions")
+        except Exception as e:
+            log(f"[{short_id}] Insights failed: {e}")
+
+        # Extract codebase concepts from this conversation
+        try:
+            concepts = extract_concepts_from_conversation(
+                conversation, session_id,
+                project_path=project_path_normalized,
+                storage=storage
+            )
+            concept_count = concepts.get('concepts_found', 0)
+            if concept_count > 0:
+                log(f"[{short_id}] Concepts: {concept_count}")
+        except Exception as e:
+            log(f"[{short_id}] Concepts failed: {e}")
+
+        # Get embedding for vector search
+        from .embedding import get_embedding_function
+        embed_fn = get_embedding_function()
+        doc_vector = embed_fn([doc_content])[0]
+
+        # Upsert to Qdrant
+        storage.vector_upsert(
+            vector=doc_vector,
+            content=doc_content[:2000],  # Truncate for storage efficiency
+            session_id=session_id,
+            project_path=project_path_normalized,
+            chunk_type="session",
+        )
+        log(f"[{short_id}] Indexed to central storage ✓")
+        return True
+    except Exception as e:
+        log(f"[{short_id}] Central storage failed: {e}")
+        return False
 
 
 def discover_conversations(claude_path: Path = None) -> list:
@@ -211,18 +284,18 @@ def discover_conversations(claude_path: Path = None) -> list:
     return conversations
 
 
-def run_full_ingestion(collection, mira_path: Path = None, max_workers: int = 4) -> dict:
+def run_full_ingestion(collection, mira_path: Path = None, max_workers: int = 4, storage=None) -> dict:
     """
     Run full ingestion of all discovered conversations.
 
     Uses thread pool for parallel processing of conversations.
-    SQLite writes are serialized through db_manager's write queue (WAL mode enabled).
-    ChromaDB handles concurrent writes safely.
+    Indexes to central Qdrant + Postgres storage.
 
     Args:
-        collection: ChromaDB collection
+        collection: Deprecated - kept for API compatibility, ignored
         mira_path: Path to .mira directory
         max_workers: Number of parallel ingestion threads (default: 4)
+        storage: Storage instance for central Qdrant + Postgres
 
     Returns stats dict with counts.
     """
@@ -231,6 +304,19 @@ def run_full_ingestion(collection, mira_path: Path = None, max_workers: int = 4)
 
     if mira_path is None:
         mira_path = get_mira_path()
+
+    # Get storage instance if not provided
+    if storage is None:
+        try:
+            from .storage import get_storage
+            storage = get_storage()
+        except ImportError:
+            log("ERROR: Storage not available")
+            return {'discovered': 0, 'ingested': 0, 'skipped': 0, 'failed': 0}
+
+    if not storage.using_central:
+        log("ERROR: Central storage not available")
+        return {'discovered': 0, 'ingested': 0, 'skipped': 0, 'failed': 0}
 
     conversations = discover_conversations()
     log(f"Discovered {len(conversations)} conversation files")
@@ -248,7 +334,7 @@ def run_full_ingestion(collection, mira_path: Path = None, max_workers: int = 4)
     def ingest_one(file_info):
         """Ingest a single conversation and return result."""
         try:
-            result = ingest_conversation(file_info, collection, mira_path)
+            result = ingest_conversation(file_info, None, mira_path, storage)
             processed_count[0] += 1
             if result:
                 log(f"[{processed_count[0]}/{len(conversations)}] Ingested: {file_info['session_id'][:12]}...")
@@ -259,7 +345,7 @@ def run_full_ingestion(collection, mira_path: Path = None, max_workers: int = 4)
             return ('failed', file_info['session_id'])
 
     # Use thread pool for parallel ingestion
-    # Limit workers to avoid overwhelming ChromaDB/SQLite
+    # Limit workers to avoid overwhelming Postgres
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {executor.submit(ingest_one, fi): fi for fi in conversations}
 

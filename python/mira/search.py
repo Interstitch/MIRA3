@@ -2,46 +2,76 @@
 MIRA3 Search Module
 
 Handles semantic search, archive enrichment, and fulltext fallback.
+
+Uses central Qdrant + Postgres storage exclusively.
+Runs vector and FTS searches in parallel for better coverage.
 """
 
 import json
 import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+from typing import Dict, List, Any, Optional
 
 from .utils import log, get_mira_path, extract_text_content, extract_query_terms
 from .artifacts import search_artifacts_for_query
 
 
-def handle_search(params: dict, collection) -> dict:
-    """Search conversations using ChromaDB semantic search."""
+def handle_search(params: dict, collection, storage=None) -> dict:
+    """
+    Search conversations using semantic search.
+
+    Uses central Qdrant + Postgres storage with parallel vector and FTS searches.
+
+    Args:
+        params: Search parameters (query, limit, project_path)
+        collection: Deprecated - kept for API compatibility, ignored
+        storage: Storage instance for central Qdrant + Postgres
+
+    Returns:
+        Dict with results, total, and optional artifacts
+    """
     query = params.get("query", "")
     limit = params.get("limit", 10)
+    project_path = params.get("project_path")  # Optional: filter to specific project
     mira_path = get_mira_path()
 
     if not query:
         return {"results": [], "total": 0}
 
-    # Check if collection is empty
-    if collection.count() == 0:
-        log(f"Collection is empty, using fulltext fallback for '{query}'")
-        fallback_results = fulltext_search_archives(query, limit, mira_path)
-        artifact_results = search_artifacts_for_query(query, limit=5)
-        return {
-            "results": fallback_results,
-            "total": len(fallback_results),
-            "search_type": "fulltext_fallback",
-            "artifacts": artifact_results if artifact_results else []
-        }
+    # Get storage instance if not provided
+    if storage is None:
+        try:
+            from .storage import get_storage
+            storage = get_storage()
+        except ImportError:
+            log("ERROR: Storage not available")
+            return {"results": [], "total": 0, "error": "Storage not available"}
 
-    # Query ChromaDB
+    # Check central storage is available
+    if not storage.using_central:
+        log("ERROR: Central storage not available")
+        return {"results": [], "total": 0, "error": "Central storage not available"}
+
     try:
-        results = collection.query(
-            query_texts=[query],
-            n_results=min(limit, 100)
+        central_results = _search_central_parallel(
+            storage, query, project_path, limit
         )
+
+        # Enrich with archive excerpts (uses remote archives via storage)
+        enriched = enrich_results_from_archives(central_results, query, mira_path, storage)
+        artifact_results = search_artifacts_for_query(query, limit=5)
+
+        return {
+            "results": enriched,
+            "total": len(enriched),
+            "search_type": "central_hybrid",
+            "artifacts": artifact_results if artifact_results else []
+        }
     except Exception as e:
-        log(f"ChromaDB query error: {e}, falling back to fulltext")
-        fallback_results = fulltext_search_archives(query, limit, mira_path)
+        log(f"Search failed: {e}")
+        # Fall back to fulltext archive search (tries remote first)
+        fallback_results = fulltext_search_archives(query, limit, mira_path, storage)
         artifact_results = search_artifacts_for_query(query, limit=5)
         return {
             "results": fallback_results,
@@ -50,75 +80,151 @@ def handle_search(params: dict, collection) -> dict:
             "artifacts": artifact_results if artifact_results else []
         }
 
-    formatted_results = []
-    if results and results.get("ids") and len(results["ids"]) > 0 and results["ids"][0]:
-        for i, doc_id in enumerate(results["ids"][0]):
-            metadata = results["metadatas"][0][i] if results.get("metadatas") else {}
-            distance = results["distances"][0][i] if results.get("distances") else 0
 
-            formatted_results.append({
-                "session_id": doc_id,
-                "summary": metadata.get("summary", ""),
-                "keywords": metadata.get("keywords", "").split(",") if metadata.get("keywords") else [],
-                "relevance": 1.0 - (distance / 2.0),  # Convert distance to relevance
-                "timestamp": metadata.get("timestamp", "")
+def _search_central_parallel(
+    storage,
+    query: str,
+    project_path: Optional[str],
+    limit: int
+) -> List[Dict[str, Any]]:
+    """
+    Search central storage using parallel vector + FTS queries.
+
+    Merges and deduplicates results from both search types.
+    """
+    from .embedding import get_embedding_function
+
+    # Get query embedding
+    embed_fn = get_embedding_function()
+    query_vector = embed_fn([query])[0]
+
+    vector_results = []
+    fts_results = []
+
+    # Run vector and FTS searches in parallel
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        vector_future = executor.submit(
+            storage.vector_search,
+            query_vector,
+            project_path,
+            limit
+        )
+        fts_future = executor.submit(
+            storage.search_sessions_fts,
+            query,
+            project_path,
+            limit
+        )
+
+        try:
+            vector_results = vector_future.result(timeout=30)
+        except Exception as e:
+            log(f"Vector search failed: {e}")
+
+        try:
+            fts_results = fts_future.result(timeout=30)
+        except Exception as e:
+            log(f"FTS search failed: {e}")
+
+    # Merge and deduplicate results
+    return _merge_search_results(vector_results, fts_results, limit)
+
+
+def _merge_search_results(
+    vector_results: List[Dict[str, Any]],
+    fts_results: List[Dict[str, Any]],
+    limit: int
+) -> List[Dict[str, Any]]:
+    """
+    Merge vector and FTS search results, deduplicating by session_id.
+
+    Vector results are prioritized (semantic match), FTS results fill in gaps.
+    """
+    seen_sessions = set()
+    merged = []
+
+    # Add vector results first (higher priority)
+    for r in vector_results:
+        session_id = r.get("session_id", "")
+        if session_id and session_id not in seen_sessions:
+            seen_sessions.add(session_id)
+            merged.append({
+                "session_id": session_id,
+                "summary": r.get("content", r.get("summary", ""))[:500],
+                "keywords": [],
+                "relevance": r.get("score", 0.5),
+                "timestamp": "",
+                "project_path": r.get("project_path", ""),
+                "search_source": "vector"
             })
 
-    # If semantic search found results, enrich them with archive excerpts
-    if formatted_results:
-        enriched_results = enrich_results_from_archives(formatted_results, query, mira_path)
+    # Add FTS results that weren't in vector results
+    for r in fts_results:
+        session_id = r.get("session_id", "")
+        if session_id and session_id not in seen_sessions:
+            seen_sessions.add(session_id)
+            merged.append({
+                "session_id": session_id,
+                "summary": r.get("summary", ""),
+                "keywords": r.get("keywords", []) if isinstance(r.get("keywords"), list) else [],
+                "relevance": r.get("rank", 0.3),
+                "timestamp": r.get("started_at", ""),
+                "project_path": r.get("project_path", ""),
+                "search_source": "fts"
+            })
 
-        # Also search artifacts for matching structured content
-        artifact_results = search_artifacts_for_query(query, limit=5)
-
-        return {
-            "results": enriched_results,
-            "total": len(enriched_results),
-            "artifacts": artifact_results if artifact_results else []
-        }
-
-    # Fallback: no semantic matches, search archives directly
-    log(f"No semantic matches for '{query}', falling back to fulltext archive search")
-    fallback_results = fulltext_search_archives(query, limit, mira_path)
-
-    artifact_results = search_artifacts_for_query(query, limit=5)
-
-    return {
-        "results": fallback_results,
-        "total": len(fallback_results),
-        "search_type": "fulltext_fallback" if fallback_results else "no_results",
-        "artifacts": artifact_results if artifact_results else []
-    }
+    # Sort by relevance and limit
+    merged.sort(key=lambda x: x.get("relevance", 0), reverse=True)
+    return merged[:limit]
 
 
-def enrich_results_from_archives(results: list, query: str, mira_path: Path) -> list:
+def enrich_results_from_archives(results: list, query: str, mira_path: Path, storage=None) -> list:
     """
     Enrich search results with relevant excerpts from full conversation archives.
 
     This solves the embedding truncation problem: while we can only index ~900 chars
     for semantic search, we can search the FULL conversation archive for specific
     content once we know which conversations are relevant.
+
+    Tries remote archives first, falls back to local if unavailable.
     """
     archives_path = mira_path / "archives"
-    if not archives_path.exists():
-        return results
 
     # Extract meaningful search terms from query
     query_terms = extract_query_terms(query)
     if not query_terms:
         return results
 
+    # Try to get storage if not provided
+    if storage is None:
+        try:
+            from .storage import get_storage
+            storage = get_storage()
+        except ImportError:
+            pass
+
     enriched = []
     for result in results:
         session_id = result.get("session_id", "")
-        archive_file = archives_path / f"{session_id}.jsonl"
-
         excerpts = []
-        if archive_file.exists():
+
+        # Try remote archive first
+        if storage and storage.using_central:
             try:
-                excerpts = search_archive_for_excerpts(archive_file, query_terms, max_excerpts=3)
+                archive_content = storage.get_archive(session_id)
+                if archive_content:
+                    excerpts = search_archive_content_for_excerpts(archive_content, query_terms, max_excerpts=3)
             except Exception as e:
-                log(f"Error searching archive {session_id}: {e}")
+                log(f"Remote archive search failed for {session_id}: {e}")
+
+        # Fall back to local archive if no remote excerpts
+        if not excerpts:
+            archive_file = archives_path / f"{session_id}.jsonl"
+            if archive_file.exists():
+                try:
+                    excerpts = search_archive_for_excerpts(archive_file, query_terms, max_excerpts=3)
+                except Exception as e:
+                    log(f"Error searching local archive {session_id}: {e}")
 
         # Add excerpts to result
         result_copy = result.copy()
@@ -127,6 +233,61 @@ def enrich_results_from_archives(results: list, query: str, mira_path: Path) -> 
         enriched.append(result_copy)
 
     return enriched
+
+
+def search_archive_content_for_excerpts(content: str, query_terms: list, max_excerpts: int = 3) -> list:
+    """
+    Search archive content (string) for excerpts matching query terms.
+    Used for remote archives stored in Postgres.
+    """
+    excerpts = []
+    seen_excerpts = set()
+
+    for line in content.split('\n'):
+        if len(excerpts) >= max_excerpts:
+            break
+
+        line = line.strip()
+        if not line:
+            continue
+
+        try:
+            obj = json.loads(line)
+            msg_type = obj.get('type', '')
+
+            # Only search user and assistant messages
+            if msg_type not in ('user', 'assistant'):
+                continue
+
+            message = obj.get('message', {})
+            msg_content = extract_text_content(message)
+
+            if not msg_content:
+                continue
+
+            content_lower = msg_content.lower()
+
+            # Check if any query terms appear
+            matching_terms = [t for t in query_terms if t in content_lower]
+
+            if matching_terms:
+                excerpt = extract_excerpt_around_terms(msg_content, matching_terms)
+
+                # Avoid duplicates
+                excerpt_key = excerpt[:100].lower()
+                if excerpt_key not in seen_excerpts:
+                    seen_excerpts.add(excerpt_key)
+                    excerpts.append({
+                        "role": msg_type,
+                        "excerpt": excerpt,
+                        "matched_terms": matching_terms,
+                        "timestamp": obj.get("timestamp", "")
+                    })
+
+        except json.JSONDecodeError:
+            continue
+
+    return excerpts
 
 
 def search_archive_for_excerpts(archive_path: Path, query_terms: list, max_excerpts: int = 3) -> list:
@@ -234,21 +395,55 @@ def extract_excerpt_around_terms(content: str, terms: list, context_chars: int =
     return excerpt
 
 
-def fulltext_search_archives(query: str, limit: int, mira_path: Path) -> list:
+def fulltext_search_archives(query: str, limit: int, mira_path: Path, storage=None) -> list:
     """
     Full-text search across all archived conversations.
 
     Used as fallback when semantic search returns no results.
+    Tries remote Postgres FTS first, falls back to local archives.
     """
+    # Extract search terms
+    query_terms = extract_query_terms(query)
+    if not query_terms:
+        return []
+
+    # Try to get storage if not provided
+    if storage is None:
+        try:
+            from .storage import get_storage
+            storage = get_storage()
+        except ImportError:
+            pass
+
+    # Try remote FTS search first
+    if storage and storage.using_central:
+        try:
+            remote_results = storage.search_archives_fts(query, limit=limit)
+            if remote_results:
+                results = []
+                for r in remote_results:
+                    # Parse archive content for excerpts
+                    excerpts = search_archive_content_for_excerpts(
+                        r.get("content", ""), query_terms, max_excerpts=5
+                    )
+                    results.append({
+                        "session_id": r.get("session_id", ""),
+                        "summary": r.get("summary", ""),
+                        "project_path": r.get("project_path", ""),
+                        "excerpts": excerpts,
+                        "relevance": r.get("rank", 0.5),
+                        "has_archive_matches": len(excerpts) > 0,
+                        "search_source": "remote_fts"
+                    })
+                return results
+        except Exception as e:
+            log(f"Remote archive FTS failed: {e}")
+
+    # Fall back to local archive search
     archives_path = mira_path / "archives"
     metadata_path = mira_path / "metadata"
 
     if not archives_path.exists():
-        return []
-
-    # Extract search terms
-    query_terms = extract_query_terms(query)
-    if not query_terms:
         return []
 
     results = []
@@ -281,7 +476,8 @@ def fulltext_search_archives(query: str, limit: int, mira_path: Path) -> list:
                 "relevance": 0.5,
                 "has_archive_matches": True,
                 "timestamp": metadata.get("extracted_at", ""),
-                "message_count": str(metadata.get("message_count", 0))
+                "message_count": str(metadata.get("message_count", 0)),
+                "search_source": "local_fts"
             })
 
         if len(results) >= limit:

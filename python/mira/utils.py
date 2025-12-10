@@ -159,3 +159,111 @@ def extract_query_terms(query: str, max_terms: int = 10) -> list:
         return []
     terms = _QUERY_TERM_PATTERN.findall(query.lower())
     return terms[:max_terms]
+
+
+# Cached git remote lookups
+_git_remote_cache: dict = {}
+
+
+def get_git_remote(project_path: str) -> Optional[str]:
+    """
+    Get the git remote URL for a project path.
+
+    This is the canonical identifier for cross-machine project matching.
+    Returns None if not a git repo or no remote configured.
+
+    The remote URL is normalized to handle SSH vs HTTPS variants:
+    - git@github.com:user/repo.git -> github.com/user/repo
+    - https://github.com/user/repo.git -> github.com/user/repo
+    """
+    # Check cache first
+    if project_path in _git_remote_cache:
+        return _git_remote_cache[project_path]
+
+    result = None
+    try:
+        # Run git remote get-url origin from the project directory
+        proc = subprocess.run(
+            ["git", "remote", "get-url", "origin"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            cwd=project_path
+        )
+        if proc.returncode == 0 and proc.stdout.strip():
+            result = normalize_git_remote(proc.stdout.strip())
+    except (subprocess.SubprocessError, OSError, TimeoutError, FileNotFoundError):
+        pass
+
+    # Cache the result (even None, to avoid repeated lookups)
+    _git_remote_cache[project_path] = result
+    return result
+
+
+def normalize_git_remote(url: str) -> str:
+    """
+    Normalize a git remote URL to a canonical form.
+
+    Converts SSH and HTTPS URLs to a common format:
+    - git@github.com:user/repo.git -> github.com/user/repo
+    - https://github.com/user/repo.git -> github.com/user/repo
+    - ssh://git@github.com/user/repo.git -> github.com/user/repo
+
+    This allows matching the same repo regardless of clone method.
+    """
+    if not url:
+        return url
+
+    # Remove trailing .git
+    if url.endswith('.git'):
+        url = url[:-4]
+
+    # Handle SSH format: git@github.com:user/repo
+    if url.startswith('git@'):
+        # git@github.com:user/repo -> github.com/user/repo
+        url = url[4:]  # Remove git@
+        url = url.replace(':', '/', 1)  # Replace first : with /
+        return url
+
+    # Handle ssh:// format: ssh://git@github.com/user/repo
+    if url.startswith('ssh://'):
+        url = url[6:]  # Remove ssh://
+        if url.startswith('git@'):
+            url = url[4:]  # Remove git@
+        return url
+
+    # Handle HTTPS format: https://github.com/user/repo
+    if url.startswith('https://'):
+        return url[8:]  # Remove https://
+
+    # Handle HTTP format: http://github.com/user/repo
+    if url.startswith('http://'):
+        return url[7:]  # Remove http://
+
+    return url
+
+
+def get_git_remote_for_claude_path(encoded_path: str) -> Optional[str]:
+    """
+    Get git remote for a Claude Code encoded project path.
+
+    Claude stores projects in ~/.claude/projects/{encoded-path}/
+    where encoded-path is like "-workspaces-MIRA3" (dashes replace slashes).
+
+    This function decodes the path and gets the git remote.
+    """
+    if not encoded_path:
+        return None
+
+    # Decode: "-workspaces-MIRA3" -> "/workspaces/MIRA3"
+    # Handle leading dash (represents root /)
+    if encoded_path.startswith('-'):
+        decoded = '/' + encoded_path[1:].replace('-', '/')
+    else:
+        decoded = encoded_path.replace('-', '/')
+
+    # Check if path exists
+    if not os.path.isdir(decoded):
+        return None
+
+    return get_git_remote(decoded)

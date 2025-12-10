@@ -29,10 +29,40 @@ def _format_project_path(encoded_path: str) -> str:
     return readable
 
 
-def handle_recent(params: dict) -> dict:
-    """Get recent conversation sessions."""
+def handle_recent(params: dict, storage=None) -> dict:
+    """Get recent conversation sessions.
+
+    Tries central Postgres first, falls back to local metadata files.
+    """
     limit = params.get("limit", 10)
 
+    # Try central storage first
+    if storage and storage.using_central:
+        try:
+            sessions = storage.get_recent_sessions(limit=limit)
+            if sessions:
+                # Group by project
+                projects = {}
+                for session in sessions:
+                    project = session.get("project_path", "unknown")
+                    if project not in projects:
+                        projects[project] = []
+                    projects[project].append({
+                        "session_id": session.get("session_id", ""),
+                        "summary": session.get("summary", ""),
+                        "project_path": project,
+                        "timestamp": str(session.get("started_at", ""))
+                    })
+
+                return {
+                    "projects": [{"path": k, "sessions": v} for k, v in projects.items()],
+                    "total": len(sessions),
+                    "source": "central"
+                }
+        except Exception as e:
+            log(f"Central recent query failed: {e}")
+
+    # Fallback to local metadata files
     mira_path = get_mira_path()
     metadata_path = mira_path / "metadata"
 
@@ -61,11 +91,12 @@ def handle_recent(params: dict) -> dict:
 
     return {
         "projects": [{"path": k, "sessions": v} for k, v in projects.items()],
-        "total": len(sessions)
+        "total": len(sessions),
+        "source": "local"
     }
 
 
-def handle_init(params: dict, collection) -> dict:
+def handle_init(params: dict, collection, storage=None) -> dict:
     """
     Get comprehensive initialization context for the current session.
 
@@ -75,12 +106,26 @@ def handle_init(params: dict, collection) -> dict:
     - TIER 3 (details): Deeper context when needed
 
     The output is organized to prioritize actionable information first.
+
+    Args:
+        params: Request parameters (project_path)
+        collection: Deprecated - kept for API compatibility, ignored
+        storage: Storage instance for central Qdrant + Postgres
     """
     project_path = params.get("project_path", "")
     mira_path = get_mira_path()
 
-    # Get collection stats
-    count = collection.count()
+    # Get indexed count from central storage
+    count = 0
+    if storage and storage.using_central and storage.postgres:
+        try:
+            # Count sessions in postgres
+            with storage.postgres._get_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT COUNT(*) FROM sessions")
+                    count = cur.fetchone()[0]
+        except Exception:
+            pass
 
     # Get artifact stats
     artifact_stats = get_artifact_stats()
@@ -501,9 +546,8 @@ def _get_simplified_storage_stats(mira_path: Path) -> dict:
                         pass
         return total
 
-    # Only calculate essential sizes
+    # Only calculate essential sizes (chroma no longer used)
     data_size = (
-        get_dir_size(mira_path / 'chroma') +
         get_dir_size(mira_path / 'archives') +
         get_dir_size(mira_path / 'metadata')
     )
@@ -689,7 +733,6 @@ def calculate_storage_stats(mira_path: Path) -> dict:
 
     components = {
         'venv': get_dir_size(mira_path / '.venv'),
-        'chroma': get_dir_size(mira_path / 'chroma'),
         'archives': get_dir_size(mira_path / 'archives'),
         'metadata': get_dir_size(mira_path / 'metadata'),
         'models': get_dir_size(mira_path / 'models'),
@@ -747,7 +790,6 @@ def calculate_storage_stats(mira_path: Path) -> dict:
         'ratio_percent': round(ratio, 1),
         'components': {
             'venv': format_size(components['venv']),
-            'chroma': format_size(components['chroma']),
             'archives': format_size(components['archives']),
             'metadata': format_size(components['metadata']),
             'models': format_size(components['models']),
@@ -1305,8 +1347,14 @@ def get_current_work_context() -> dict:
     return context
 
 
-def handle_status(collection) -> dict:
-    """Get system status and statistics."""
+def handle_status(collection, storage=None) -> dict:
+    """
+    Get system status and statistics.
+
+    Args:
+        collection: Deprecated - kept for API compatibility, ignored
+        storage: Storage instance for central Qdrant + Postgres
+    """
     mira_path = get_mira_path()
     claude_path = Path.home() / ".claude" / "projects"
 
@@ -1319,12 +1367,25 @@ def handle_status(collection) -> dict:
     archives_path = mira_path / "archives"
     archived = sum(1 for _ in archives_path.glob("*.jsonl")) if archives_path.exists() else 0
 
-    # Count indexed
-    indexed = collection.count()
+    # Count indexed from central storage
+    indexed = 0
+    if storage and storage.using_central and storage.postgres:
+        try:
+            with storage.postgres._get_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT COUNT(*) FROM sessions")
+                    indexed = cur.fetchone()[0]
+        except Exception:
+            pass
 
     # Get insights stats
     error_stats = get_error_stats()
     decision_stats = get_decision_stats()
+
+    # Get health check info
+    health = {}
+    if storage:
+        health = storage.health_check()
 
     return {
         "total_files": total_files,
@@ -1334,13 +1395,18 @@ def handle_status(collection) -> dict:
         "storage_path": str(mira_path),
         "last_sync": datetime.now().isoformat(),
         "errors": error_stats,
-        "decisions": decision_stats
+        "decisions": decision_stats,
+        "storage_health": health
     }
 
 
-def handle_error_lookup(params: dict) -> dict:
+def handle_error_lookup(params: dict, storage=None) -> dict:
     """
     Search for past error solutions.
+
+    Args:
+        params: Request parameters (query, limit)
+        storage: Storage instance for central Qdrant + Postgres
 
     Params:
         query: Error message or description to search for
@@ -1354,18 +1420,38 @@ def handle_error_lookup(params: dict) -> dict:
     if not query:
         return {"results": [], "total": 0}
 
+    # Try central storage first
+    if storage and storage.using_central:
+        try:
+            results = storage.search_error_patterns(query, limit=limit)
+            if results:
+                return {
+                    "results": results,
+                    "total": len(results),
+                    "query": query,
+                    "source": "central"
+                }
+        except Exception:
+            pass
+
+    # Fall back to local search
     results = search_error_solutions(query, limit=limit)
 
     return {
         "results": results,
         "total": len(results),
-        "query": query
+        "query": query,
+        "source": "local"
     }
 
 
-def handle_decisions(params: dict) -> dict:
+def handle_decisions(params: dict, storage=None) -> dict:
     """
     Search for past architectural/design decisions.
+
+    Args:
+        params: Request parameters (query, category, limit)
+        storage: Storage instance for central Qdrant + Postgres
 
     Params:
         query: Search query
@@ -1378,8 +1464,27 @@ def handle_decisions(params: dict) -> dict:
     category = params.get("category")
     limit = params.get("limit", 10)
 
+    # Try central storage first
+    if storage and storage.using_central:
+        try:
+            results = storage.search_decisions(
+                query=query or "",
+                category=category,
+                limit=limit
+            )
+            if results:
+                return {
+                    "results": results,
+                    "total": len(results),
+                    "query": query,
+                    "category": category,
+                    "source": "central"
+                }
+        except Exception:
+            pass
+
+    # Fall back to local search
     if not query:
-        # Return recent decisions if no query
         results = search_decisions("", category=category, limit=limit)
     else:
         results = search_decisions(query, category=category, limit=limit)
@@ -1388,12 +1493,20 @@ def handle_decisions(params: dict) -> dict:
         "results": results,
         "total": len(results),
         "query": query,
-        "category": category
+        "category": category,
+        "source": "local"
     }
 
 
-def handle_rpc_request(request: dict, collection) -> dict:
-    """Handle a JSON-RPC request and return response."""
+def handle_rpc_request(request: dict, collection, storage=None) -> dict:
+    """
+    Handle a JSON-RPC request and return response.
+
+    Args:
+        request: JSON-RPC request dict
+        collection: Deprecated - kept for API compatibility, ignored
+        storage: Storage instance for central Qdrant + Postgres
+    """
     method = request.get("method", "")
     params = request.get("params", {})
     request_id = request.get("id")
@@ -1403,17 +1516,18 @@ def handle_rpc_request(request: dict, collection) -> dict:
 
     try:
         if method == "search":
-            result = handle_search(params, collection)
+            # search.py's handle_search uses storage for central, ignores collection
+            result = handle_search(params, collection, storage)
         elif method == "recent":
-            result = handle_recent(params)
+            result = handle_recent(params, storage)
         elif method == "init":
-            result = handle_init(params, collection)
+            result = handle_init(params, collection, storage)
         elif method == "status":
-            result = handle_status(collection)
+            result = handle_status(collection, storage)
         elif method == "error_lookup":
-            result = handle_error_lookup(params)
+            result = handle_error_lookup(params, storage)
         elif method == "decisions":
-            result = handle_decisions(params)
+            result = handle_decisions(params, storage)
         elif method == "shutdown":
             result = {"status": "shutting_down"}
         else:
@@ -1421,6 +1535,8 @@ def handle_rpc_request(request: dict, collection) -> dict:
     except Exception as e:
         # Log full error for debugging, return sanitized message
         log(f"RPC handler error for {method}: {e}")
+        import traceback
+        log(f"Traceback: {traceback.format_exc()}")
         error = {"code": -32603, "message": "Internal error processing request"}
 
     response = {"jsonrpc": "2.0", "id": request_id}

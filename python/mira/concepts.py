@@ -9,7 +9,7 @@ Extracts and tracks key concepts about the codebase from conversation analysis:
 - Design patterns and conventions
 - User-provided facts and rules about the codebase
 
-Uses centralized db_manager for thread-safe writes during parallel ingestion.
+Uses central Postgres for storage with local SQLite fallback.
 """
 
 import json
@@ -528,11 +528,31 @@ class ConceptStore:
     """
     Persistent storage for codebase concepts.
 
-    Uses centralized db_manager for thread-safe writes.
+    Uses central Postgres for storage with local SQLite fallback.
     """
 
-    def __init__(self, project_path: str = ""):
+    def __init__(self, project_path: str = "", storage=None):
         self.project_path = project_path
+        self._storage = storage
+        self._project_id = None
+        self._use_central = False
+        self._init_storage()
+
+    def _init_storage(self):
+        """Initialize storage backend."""
+        if self._storage is None:
+            try:
+                from .storage import get_storage
+                self._storage = get_storage()
+            except ImportError:
+                pass
+
+        if self._storage and self._storage.using_central and self.project_path:
+            try:
+                self._project_id = self._storage.postgres.get_or_create_project(self.project_path)
+                self._use_central = True
+            except Exception as e:
+                log(f"Failed to get project_id for concepts: {e}")
 
     def upsert(self, concept: Dict) -> bool:
         """
@@ -541,6 +561,32 @@ class ConceptStore:
         If concept exists, updates confidence based on frequency.
         Returns True if new concept, False if updated existing.
         """
+        concept_type = concept.get('concept_type')
+        name = concept.get('name', '')
+        description = concept.get('description', '')
+        confidence = concept.get('confidence', 0.5)
+        session_id = concept.get('session_id', '')
+
+        # Store in central Postgres
+        if self._use_central and self._project_id:
+            try:
+                self._storage.postgres.upsert_concept(
+                    project_id=self._project_id,
+                    concept_type=concept_type,
+                    name=name,
+                    description=description,
+                    confidence=confidence,
+                    source_session=session_id,
+                )
+                return True  # Postgres doesn't tell us if new or updated
+            except Exception as e:
+                log(f"Central concept storage failed: {e}")
+
+        # Fallback to local SQLite
+        return self._upsert_local(concept)
+
+    def _upsert_local(self, concept: Dict) -> bool:
+        """Fallback to local SQLite storage."""
         db = get_db_manager()
         now = datetime.now().isoformat()
 
@@ -601,7 +647,7 @@ class ConceptStore:
         try:
             return db.execute_write_func(CONCEPTS_DB, upsert_concept)
         except Exception as e:
-            log(f"Error upserting concept: {e}")
+            log(f"Error upserting concept to local: {e}")
             return False
 
     def _is_valid_purpose(self, purpose: str) -> bool:
@@ -638,6 +684,88 @@ class ConceptStore:
 
     def get_concepts_for_init(self, min_confidence: float = 0.6) -> Dict:
         """Get codebase concepts for mira_init response."""
+        # Try central Postgres first
+        if self._use_central and self._project_id:
+            try:
+                return self._get_concepts_from_central(min_confidence)
+            except Exception as e:
+                log(f"Central concept retrieval failed: {e}")
+
+        # Fallback to local SQLite
+        return self._get_concepts_from_local(min_confidence)
+
+    def _get_concepts_from_central(self, min_confidence: float) -> Dict:
+        """Get concepts from central Postgres."""
+        result = self._empty_response()
+
+        # Get all concepts from Postgres
+        concepts = self._storage.postgres.get_concepts(
+            project_id=self._project_id,
+            min_confidence=min_confidence
+        )
+
+        for c in concepts:
+            concept_type = c.get('concept_type')
+            name = c.get('name', '')
+            description = c.get('description', '')
+            confidence = c.get('confidence', 0.5)
+            frequency = c.get('frequency', 1)
+
+            conf_str = f"{int(confidence * 100)}%"
+
+            if concept_type == CONCEPT_COMPONENT:
+                result['components'].append({
+                    'name': name,
+                    'purpose': description,
+                    'files': [],
+                    'confidence': conf_str,
+                    'mentions': frequency
+                })
+            elif concept_type == CONCEPT_INTEGRATION:
+                result['integrations'].append({
+                    'flow': name,
+                    'mechanism': description or 'Connected',
+                    'confidence': conf_str
+                })
+            elif concept_type == CONCEPT_TECHNOLOGY:
+                result['technologies'].append({
+                    'name': name,
+                    'role': description,
+                    'confidence': conf_str
+                })
+            elif concept_type == CONCEPT_MODULE:
+                if self._is_valid_purpose(description):
+                    result['key_modules'].append({
+                        'file': name,
+                        'purpose': description,
+                        'confidence': conf_str
+                    })
+            elif concept_type == CONCEPT_PATTERN:
+                result['patterns'].append({
+                    'name': name,
+                    'description': description,
+                    'confidence': conf_str
+                })
+            elif concept_type == CONCEPT_FACT:
+                result['facts'].append({
+                    'fact': description,
+                    'confidence': conf_str
+                })
+            elif concept_type == CONCEPT_RULE:
+                result['rules'].append({
+                    'rule': description,
+                    'type': 'guideline',
+                    'confidence': conf_str
+                })
+
+        if result['components']:
+            top_components = [c['name'] for c in result['components'][:3]]
+            result['architecture_summary'] = f"Key components: {', '.join(top_components)}"
+
+        return result
+
+    def _get_concepts_from_local(self, min_confidence: float) -> Dict:
+        """Get concepts from local SQLite."""
         db = get_db_manager()
 
         result = {
@@ -821,18 +949,24 @@ class ConceptStore:
             return {'total': 0, 'by_type': {}}
 
 
-def extract_concepts_from_conversation(conversation: dict, session_id: str, project_path: str = ""):
+def extract_concepts_from_conversation(
+    conversation: dict,
+    session_id: str,
+    project_path: str = "",
+    storage=None
+):
     """
     Extract codebase concepts from a conversation.
 
     Called during ingestion to learn about the codebase.
+    Uses central Postgres if available, falls back to local SQLite.
     """
     messages = conversation.get('messages', [])
     if not messages:
         return {'concepts_found': 0}
 
     extractor = ConceptExtractor(project_path)
-    store = ConceptStore(project_path)
+    store = ConceptStore(project_path, storage=storage)
 
     concepts_found = 0
 

@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "central": {
+    "enabled": true,
+    "qdrant": {
+      "host": "100.107.224.88",
+      "port": 6333,
+      "collection": "mira",
+      "timeout_seconds": 30
+    },
+    "postgres": {
+      "host": "100.107.224.88",
+      "port": 5432,
+      "database": "mira",
+      "user": "mira",
+      "password": "REPLACE_WITH_ACTUAL_PASSWORD",
+      "pool_size": 3,
+      "timeout_seconds": 30
+    }
+  },
+  "fallback": {
+    "enabled": true,
+    "warn_on_fallback": true
+  },
+  "cache": {
+    "custodian_ttl_seconds": 300,
+    "project_id_ttl_seconds": 3600
+  }
+}

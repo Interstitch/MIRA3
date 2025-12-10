@@ -8,7 +8,7 @@ Learns about the user (custodian) from their conversation patterns:
 - Work patterns (dev loop, communication style)
 - Danger zones (files/modules that caused issues)
 
-Uses centralized db_manager for thread-safe writes during parallel ingestion.
+Uses central Postgres for key preferences with local SQLite fallback.
 """
 
 import json
@@ -19,6 +19,22 @@ from typing import Optional
 
 from .utils import log, get_mira_path, get_custodian
 from .db_manager import get_db_manager
+
+
+# Global storage instance for custodian
+_custodian_storage = None
+
+
+def _get_custodian_storage():
+    """Get storage instance for custodian (lazy init)."""
+    global _custodian_storage
+    if _custodian_storage is None:
+        try:
+            from .storage import get_storage
+            _custodian_storage = get_storage()
+        except ImportError:
+            pass
+    return _custodian_storage
 
 
 # Database name for custodian
@@ -203,12 +219,28 @@ def _learn_identity(db, user_messages: list, session_id: str, now: str) -> int:
                 name = match.group(1)
                 # Avoid false positives
                 if name.lower() not in name_blocklist:
+                    # Store in local SQLite
                     db.execute_write(
                         CUSTODIAN_DB,
                         """INSERT OR REPLACE INTO identity (key, value, confidence, source_session, learned_at)
                            VALUES (?, ?, ?, ?, ?)""",
                         ('name', name, 0.8, session_id, now)
                     )
+
+                    # Also store in central Postgres
+                    storage = _get_custodian_storage()
+                    if storage and storage.using_central:
+                        try:
+                            storage.postgres.upsert_custodian(
+                                key='identity:name',
+                                value=name,
+                                category='identity',
+                                confidence=0.8,
+                                source_session=session_id,
+                            )
+                        except Exception as e:
+                            log(f"Central identity storage failed: {e}")
+
                     learned += 1
                     break
 
@@ -315,6 +347,20 @@ def _learn_preferences(db, user_messages: list, session_id: str, now: str) -> in
                         return 1
 
                 learned += db.execute_write_func(CUSTODIAN_DB, upsert_preference)
+
+                # Also store key preferences in central Postgres
+                storage = _get_custodian_storage()
+                if storage and storage.using_central and confidence >= 0.7:
+                    try:
+                        storage.postgres.upsert_custodian(
+                            key=f'pref:{category}:{pref_text[:30]}',
+                            value=pref_text,
+                            category=category,
+                            confidence=confidence,
+                            source_session=session_id,
+                        )
+                    except Exception as e:
+                        pass  # Don't log for preferences, too noisy
 
     return learned
 
@@ -621,6 +667,7 @@ def get_full_custodian_profile() -> dict:
     Get the complete custodian profile for providing context to Claude.
 
     This is the main function called by mira_init to provide rich context.
+    Reads from both central Postgres and local SQLite.
     """
     db = get_db_manager()
 
@@ -638,6 +685,36 @@ def get_full_custodian_profile() -> dict:
         'development_lifecycle': None,
         'summary': '',
     }
+
+    # First, try to get key preferences from central Postgres
+    storage = _get_custodian_storage()
+    if storage and storage.using_central:
+        try:
+            central_prefs = storage.postgres.get_all_custodian()
+            for pref in central_prefs:
+                key = pref.get('key', '')
+                value = pref.get('value', '')
+                category = pref.get('category', '')
+
+                # Handle identity from central
+                if key == 'identity:name' and value:
+                    profile['name'] = value
+                    profile['identity']['name'] = {
+                        'value': value,
+                        'confidence': pref.get('confidence', 0.5)
+                    }
+
+                # Handle preferences from central
+                elif key.startswith('pref:') and category:
+                    if category not in profile['preferences']:
+                        profile['preferences'][category] = []
+                    profile['preferences'][category].append({
+                        'preference': value,
+                        'frequency': pref.get('frequency', 1),
+                        'confidence': pref.get('confidence', 0.5)
+                    })
+        except Exception as e:
+            log(f"Error reading central custodian: {e}")
 
     try:
         # Get identity

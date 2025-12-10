@@ -1,8 +1,11 @@
 """
 MIRA3 Artifact Storage Module
 
-SQLite-based storage for artifacts (code blocks, file operations, etc.)
-Uses centralized db_manager for thread-safe writes during parallel ingestion.
+Hybrid storage for artifacts:
+- File operations (Write/Edit tracking): Local SQLite (only useful locally)
+- Artifact content (code blocks, lists, etc.): Central Postgres (searchable across machines)
+
+Uses centralized db_manager for local thread-safe writes.
 """
 
 import json
@@ -11,7 +14,7 @@ import re
 from .utils import log, extract_query_terms
 from .db_manager import get_db_manager
 
-# Database name for artifacts
+# Database name for local file operations only
 ARTIFACTS_DB = "artifacts.db"
 
 # Schema for artifacts database
@@ -390,16 +393,58 @@ def _escape_fts_term(term: str) -> str:
     return f'"{escaped}"'
 
 
-def search_artifacts_for_query(query: str, limit: int = 10) -> list:
-    """Search artifacts using full-text search."""
+def search_artifacts_for_query(query: str, limit: int = 10, storage=None) -> list:
+    """
+    Search artifacts using full-text search in central Postgres.
+
+    Args:
+        query: Search query
+        limit: Maximum results
+        storage: Storage instance for central Postgres
+
+    Returns list of matching artifacts with excerpts.
+    """
+    if not query:
+        return []
+
+    # Get storage if not provided
+    if storage is None:
+        try:
+            from .storage import get_storage
+            storage = get_storage()
+        except ImportError:
+            return _search_artifacts_local(query, limit)
+
+    if not storage.using_central or not storage.postgres:
+        return _search_artifacts_local(query, limit)
+
+    try:
+        results = storage.postgres.search_artifacts_fts(query, limit=limit)
+        formatted = []
+        for r in results:
+            content = r.get('content', '')
+            formatted.append({
+                'session_id': r.get('session_id', ''),
+                'artifact_type': r.get('artifact_type', ''),
+                'title': r.get('metadata', {}).get('title') if isinstance(r.get('metadata'), dict) else None,
+                'language': r.get('language'),
+                'excerpt': content[:500] + ('...' if len(content) > 500 else ''),
+                'project_path': r.get('project_path', ''),
+            })
+        return formatted
+    except Exception as e:
+        log(f"Central artifact search error: {e}")
+        return _search_artifacts_local(query, limit)
+
+
+def _search_artifacts_local(query: str, limit: int = 10) -> list:
+    """Fallback to local SQLite search for artifacts."""
     db = get_db_manager()
 
-    # Extract search terms using centralized function (alphanumeric, 3+ chars)
     terms = extract_query_terms(query, max_terms=5)
     if not terms:
         return []
 
-    # Build FTS query with escaped terms to prevent FTS injection
     escaped_terms = [_escape_fts_term(t) for t in terms]
     fts_query = ' OR '.join(escaped_terms)
 
@@ -424,18 +469,19 @@ def search_artifacts_for_query(query: str, limit: int = 10) -> list:
             })
         return results
     except Exception as e:
-        log(f"Artifact search error: {e}")
+        log(f"Local artifact search error: {e}")
         return []
 
 
 def store_artifact(session_id: str, artifact_type: str, content: str,
                    language: str = None, title: str = None, role: str = None,
-                   message_index: int = None, timestamp: str = None) -> bool:
+                   message_index: int = None, timestamp: str = None,
+                   postgres_session_id: int = None, storage=None) -> bool:
     """
-    Store a detected artifact in the database.
+    Store a detected artifact in central Postgres storage.
 
     Args:
-        session_id: The conversation session ID
+        session_id: The conversation session ID (string)
         artifact_type: Type of artifact (code_block, list, table, config, error, url, command)
         content: The artifact content
         language: Programming language (for code blocks)
@@ -443,49 +489,47 @@ def store_artifact(session_id: str, artifact_type: str, content: str,
         role: user or assistant
         message_index: Index of the message in conversation
         timestamp: When the artifact was created
+        postgres_session_id: The Postgres session ID (int) for foreign key
+        storage: Storage instance for central Postgres
 
     Returns:
-        True if stored successfully, False if duplicate
+        True if stored successfully, False if failed or duplicate
     """
-    import hashlib
-
-    db = get_db_manager()
-
-    # Create content hash for deduplication
-    content_hash = hashlib.sha256(content.encode('utf-8')).hexdigest()[:32]
-
-    def insert_with_fts(cursor):
+    # Get storage if not provided
+    if storage is None:
         try:
-            cursor.execute('''
-                INSERT INTO artifacts (
-                    session_id, artifact_type, content, content_hash,
-                    language, title, line_count, char_count,
-                    role, message_index, timestamp
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ''', (
-                session_id, artifact_type, content, content_hash,
-                language, title, content.count('\n') + 1, len(content),
-                role, message_index, timestamp
-            ))
-
-            rowid = cursor.lastrowid
-
-            # Update FTS index
-            cursor.execute('''
-                INSERT INTO artifacts_fts (rowid, content, title)
-                VALUES (?, ?, ?)
-            ''', (rowid, content, title or ''))
-
-            return True
-        except Exception as e:
-            # Likely duplicate (UNIQUE constraint)
-            if 'UNIQUE' not in str(e):
-                log(f"Error storing artifact: {e}")
+            from .storage import get_storage
+            storage = get_storage()
+        except ImportError:
+            log("Storage not available for artifact storage")
             return False
 
+    if not storage.using_central or not storage.postgres:
+        log("Central storage not available for artifact storage")
+        return False
+
     try:
-        return db.execute_write_func(ARTIFACTS_DB, insert_with_fts)
-    except Exception:
+        line_count = content.count('\n') + 1
+        metadata = {
+            'role': role,
+            'message_index': message_index,
+            'timestamp': timestamp,
+            'title': title,
+        }
+
+        storage.postgres.insert_artifact(
+            session_id=postgres_session_id,
+            artifact_type=artifact_type,
+            content=content,
+            language=language,
+            line_count=line_count,
+            metadata=metadata,
+        )
+        return True
+    except Exception as e:
+        # Log but don't fail - artifacts are supplementary
+        if 'duplicate' not in str(e).lower() and 'unique' not in str(e).lower():
+            log(f"Error storing artifact: {e}")
         return False
 
 
@@ -522,7 +566,8 @@ def detect_language(content: str) -> str:
 
 
 def extract_artifacts_from_content(content: str, session_id: str, role: str = None,
-                                   message_index: int = None, timestamp: str = None) -> int:
+                                   message_index: int = None, timestamp: str = None,
+                                   postgres_session_id: int = None, storage=None) -> int:
     """
     Extract and store artifacts from message content.
 
@@ -534,6 +579,15 @@ def extract_artifacts_from_content(content: str, session_id: str, role: str = No
     - Error messages and stack traces
     - URLs
     - Shell commands
+
+    Args:
+        content: Message content to extract artifacts from
+        session_id: String session ID
+        role: user or assistant
+        message_index: Index of message in conversation
+        timestamp: Message timestamp
+        postgres_session_id: Postgres session ID for foreign key (required for central storage)
+        storage: Storage instance for central Postgres
 
     Returns the number of artifacts stored.
     """
@@ -559,7 +613,9 @@ def extract_artifacts_from_content(content: str, session_id: str, role: str = No
             title=f"{language or 'code'} block",
             role=role,
             message_index=message_index,
-            timestamp=timestamp
+            timestamp=timestamp,
+            postgres_session_id=postgres_session_id,
+            storage=storage
         ):
             artifacts_stored += 1
 
@@ -578,7 +634,9 @@ def extract_artifacts_from_content(content: str, session_id: str, role: str = No
                 title=f"indented {language or 'code'} block",
                 role=role,
                 message_index=message_index,
-                timestamp=timestamp
+                timestamp=timestamp,
+                postgres_session_id=postgres_session_id,
+                storage=storage
             ):
                 artifacts_stored += 1
 
@@ -595,7 +653,9 @@ def extract_artifacts_from_content(content: str, session_id: str, role: str = No
                 title=f"numbered list ({len(items)} items)",
                 role=role,
                 message_index=message_index,
-                timestamp=timestamp
+                timestamp=timestamp,
+                postgres_session_id=postgres_session_id,
+                storage=storage
             ):
                 artifacts_stored += 1
 
@@ -612,7 +672,9 @@ def extract_artifacts_from_content(content: str, session_id: str, role: str = No
                 title=f"bullet list ({len(items)} items)",
                 role=role,
                 message_index=message_index,
-                timestamp=timestamp
+                timestamp=timestamp,
+                postgres_session_id=postgres_session_id,
+                storage=storage
             ):
                 artifacts_stored += 1
 
@@ -630,7 +692,9 @@ def extract_artifacts_from_content(content: str, session_id: str, role: str = No
                 title=f"markdown table ({len(rows)} rows)",
                 role=role,
                 message_index=message_index,
-                timestamp=timestamp
+                timestamp=timestamp,
+                postgres_session_id=postgres_session_id,
+                storage=storage
             ):
                 artifacts_stored += 1
 
@@ -651,7 +715,9 @@ def extract_artifacts_from_content(content: str, session_id: str, role: str = No
                     title='JSON configuration',
                     role=role,
                     message_index=message_index,
-                    timestamp=timestamp
+                    timestamp=timestamp,
+                    postgres_session_id=postgres_session_id,
+                    storage=storage
                 ):
                     artifacts_stored += 1
         except (json.JSONDecodeError, ValueError):
@@ -674,7 +740,9 @@ def extract_artifacts_from_content(content: str, session_id: str, role: str = No
                     title='error/stack trace',
                     role=role,
                     message_index=message_index,
-                    timestamp=timestamp
+                    timestamp=timestamp,
+                    postgres_session_id=postgres_session_id,
+                    storage=storage
                 ):
                     artifacts_stored += 1
 
@@ -695,7 +763,9 @@ def extract_artifacts_from_content(content: str, session_id: str, role: str = No
             title=f"shell commands ({len(commands)})",
             role=role,
             message_index=message_index,
-            timestamp=timestamp
+            timestamp=timestamp,
+            postgres_session_id=postgres_session_id,
+            storage=storage
         ):
             artifacts_stored += 1
 
@@ -713,16 +783,26 @@ def extract_artifacts_from_content(content: str, session_id: str, role: str = No
             title=f"URLs ({len(significant_urls)})",
             role=role,
             message_index=message_index,
-            timestamp=timestamp
+            timestamp=timestamp,
+            postgres_session_id=postgres_session_id,
+            storage=storage
         ):
             artifacts_stored += 1
 
     return artifacts_stored
 
 
-def extract_artifacts_from_messages(messages: list, session_id: str) -> int:
+def extract_artifacts_from_messages(messages: list, session_id: str,
+                                     postgres_session_id: int = None,
+                                     storage=None) -> int:
     """
     Extract artifacts from all messages in a conversation.
+
+    Args:
+        messages: List of conversation messages
+        session_id: String session ID
+        postgres_session_id: Postgres session ID for foreign key (required for central storage)
+        storage: Storage instance for central Postgres
 
     Returns the total number of artifacts stored.
     """
@@ -747,7 +827,9 @@ def extract_artifacts_from_messages(messages: list, session_id: str) -> int:
                 session_id=session_id,
                 role=role,
                 message_index=idx,
-                timestamp=timestamp
+                timestamp=timestamp,
+                postgres_session_id=postgres_session_id,
+                storage=storage
             )
             total_stored += stored
 

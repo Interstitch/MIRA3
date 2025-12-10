@@ -1,0 +1,131 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://mira.local/schemas/server.json",
+  "title": "MIRA Central Server Configuration",
+  "description": "Configuration for connecting to centralized MIRA storage (Qdrant + Postgres)",
+  "type": "object",
+  "required": ["version", "central"],
+  "properties": {
+    "version": {
+      "type": "integer",
+      "const": 1,
+      "description": "Schema version for forward compatibility"
+    },
+    "central": {
+      "type": "object",
+      "description": "Central server connection settings",
+      "required": ["enabled", "qdrant", "postgres"],
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "Whether to use central storage (false = local only)"
+        },
+        "qdrant": {
+          "type": "object",
+          "description": "Qdrant vector database connection",
+          "required": ["host", "port"],
+          "properties": {
+            "host": {
+              "type": "string",
+              "description": "Qdrant server hostname or IP (Tailscale IP recommended)"
+            },
+            "port": {
+              "type": "integer",
+              "default": 6333,
+              "description": "Qdrant HTTP API port"
+            },
+            "collection": {
+              "type": "string",
+              "default": "mira",
+              "description": "Qdrant collection name"
+            },
+            "timeout_seconds": {
+              "type": "integer",
+              "default": 30,
+              "minimum": 5,
+              "maximum": 120,
+              "description": "Connection and operation timeout"
+            }
+          }
+        },
+        "postgres": {
+          "type": "object",
+          "description": "PostgreSQL database connection",
+          "required": ["host", "port", "database", "user", "password"],
+          "properties": {
+            "host": {
+              "type": "string",
+              "description": "Postgres server hostname or IP (Tailscale IP recommended)"
+            },
+            "port": {
+              "type": "integer",
+              "default": 5432,
+              "description": "Postgres port"
+            },
+            "database": {
+              "type": "string",
+              "default": "mira",
+              "description": "Database name"
+            },
+            "user": {
+              "type": "string",
+              "description": "Database user"
+            },
+            "password": {
+              "type": "string",
+              "description": "Database password (can be overridden by MIRA_POSTGRES_PASSWORD env var)"
+            },
+            "pool_size": {
+              "type": "integer",
+              "default": 3,
+              "minimum": 1,
+              "maximum": 10,
+              "description": "Connection pool size (keep low for single-user)"
+            },
+            "timeout_seconds": {
+              "type": "integer",
+              "default": 30,
+              "minimum": 5,
+              "maximum": 120,
+              "description": "Connection and query timeout"
+            }
+          }
+        }
+      }
+    },
+    "fallback": {
+      "type": "object",
+      "description": "Fallback behavior when central server is unavailable",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Whether to fall back to local storage on failure"
+        },
+        "warn_on_fallback": {
+          "type": "boolean",
+          "default": true,
+          "description": "Log warning when falling back to local storage"
+        }
+      }
+    },
+    "cache": {
+      "type": "object",
+      "description": "Caching settings for stable data",
+      "properties": {
+        "custodian_ttl_seconds": {
+          "type": "integer",
+          "default": 300,
+          "minimum": 60,
+          "description": "How long to cache custodian data (rarely changes)"
+        },
+        "project_id_ttl_seconds": {
+          "type": "integer",
+          "default": 3600,
+          "minimum": 300,
+          "description": "How long to cache project ID lookups (immutable)"
+        }
+      }
+    }
+  }
+}

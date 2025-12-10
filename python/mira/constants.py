@@ -19,8 +19,11 @@ TIME_GAP_THRESHOLD = 2 * 60 * 60  # 2 hours in seconds
 WATCHER_DEBOUNCE_SECONDS = 5
 
 # Dependencies to install in venv
+# Core dependencies (always installed)
+# NOTE: ChromaDB removed - using remote Qdrant + Postgres exclusively
 DEPENDENCIES = [
-    "chromadb",
-    "sentence-transformers",
-    "watchdog",
+    "sentence-transformers",  # For local embedding generation
+    "watchdog",               # File watching for auto-ingestion
+    "qdrant-client",          # Vector database client
+    "psycopg2-binary",        # PostgreSQL client
 ]
