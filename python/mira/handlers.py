@@ -150,8 +150,8 @@ def handle_init(params: dict, collection, storage=None) -> dict:
     # Add interaction tips based on learned preferences
     custodian_profile['interaction_tips'] = _build_interaction_tips(custodian_profile)
 
-    # Get current work context
-    work_context = get_current_work_context()
+    # Get current work context (filtered by project)
+    work_context = get_current_work_context(project_path)
 
     # Get codebase knowledge learned from conversations
     # NOTE: This only returns genuinely learned content - no CLAUDE.md echoes
@@ -1315,9 +1315,13 @@ def _filter_recent_decisions(facts: list) -> list:
     return valid
 
 
-def get_current_work_context() -> dict:
+def get_current_work_context(project_path: str = "") -> dict:
     """
-    Get context about current/recent work.
+    Get context about current/recent work for a specific project.
+
+    Args:
+        project_path: Filter to sessions from this project path only.
+                      If empty, returns work from all projects.
 
     Returns only non-empty fields to minimize token waste.
     """
@@ -1331,15 +1335,26 @@ def get_current_work_context() -> dict:
         return {}
 
     # Scan more files to find diverse tasks (not just recent repeats of same work)
+    # Scan extra files when filtering by project since many may be skipped
+    scan_limit = 50 if project_path else 15
     recent_files = sorted(
         metadata_path.glob("*.json"),
         key=lambda p: p.stat().st_mtime,
         reverse=True
-    )[:15]
+    )[:scan_limit]
 
     for meta_file in recent_files:
         try:
             meta = json.loads(meta_file.read_text())
+
+            # Filter by project if specified
+            if project_path:
+                file_project = meta.get('project_path', '')
+                # Convert encoded path format (-workspaces-MIRA3 -> /workspaces/MIRA3)
+                normalized = _format_project_path(file_project)
+                # Check if this session belongs to the requested project
+                if project_path not in normalized and normalized not in project_path:
+                    continue  # Skip sessions from other projects
 
             task = meta.get('task_description', '')
             # Skip command messages and empty tasks
