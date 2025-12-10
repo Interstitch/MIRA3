@@ -506,6 +506,54 @@ class Storage:
 
     # ==================== Health & Status ====================
 
+    def get_storage_mode(self) -> Dict[str, Any]:
+        """
+        Get current storage mode information for display to user.
+
+        Returns a dict with:
+        - mode: "central" or "local"
+        - description: Human-readable description
+        - setup_instructions: How to enable central storage (if in local mode)
+        """
+        self._init_central()
+
+        if self._using_central:
+            return {
+                "mode": "central",
+                "description": "Using central Qdrant + Postgres storage (cross-machine sync enabled)",
+                "qdrant_host": self.config.central.qdrant.host if self.config.central else None,
+                "postgres_host": self.config.central.postgres.host if self.config.central else None,
+            }
+        else:
+            return {
+                "mode": "local",
+                "description": "Using local SQLite storage only (single-machine)",
+                "setup": {
+                    "summary": "To sync across machines, you need a central server running Qdrant + Postgres accessible via Tailscale VPN.",
+                    "steps": [
+                        "1. Set up a server with Qdrant (port 6333) and Postgres (port 5432) - can use Docker",
+                        "2. Install Tailscale on both the server and this machine",
+                        "3. Create ~/.mira/server.json with connection details (see template below)",
+                        "4. Restart MIRA - it will auto-connect to central storage",
+                    ],
+                    "config_template": {
+                        "version": 1,
+                        "central": {
+                            "enabled": True,
+                            "qdrant": {"host": "YOUR_TAILSCALE_IP", "port": 6333},
+                            "postgres": {
+                                "host": "YOUR_TAILSCALE_IP",
+                                "port": 5432,
+                                "database": "mira",
+                                "user": "mira",
+                                "password": "YOUR_PASSWORD"
+                            }
+                        }
+                    },
+                    "note": "Central storage is optional. MIRA works fully in local mode."
+                }
+            }
+
     def health_check(self) -> Dict[str, Any]:
         """Check health of central storage."""
         status = {
@@ -514,11 +562,13 @@ class Storage:
             "qdrant_healthy": False,
             "postgres_healthy": False,
             "using_central": False,
+            "mode": "local",
         }
 
         if self._init_central():
             status["central_available"] = True
             status["using_central"] = self._using_central
+            status["mode"] = "central" if self._using_central else "local"
             if self._qdrant:
                 status["qdrant_healthy"] = self._qdrant.is_healthy()
             if self._postgres:

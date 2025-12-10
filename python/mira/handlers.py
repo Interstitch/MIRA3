@@ -230,6 +230,20 @@ def handle_init(params: dict, collection, storage=None) -> dict:
         artifact_total=artifact_total, error_count=error_count
     )
 
+    # Get storage mode information
+    storage_mode = None
+    if storage:
+        storage_mode = storage.get_storage_mode()
+    else:
+        storage_mode = {
+            "mode": "local",
+            "description": "Using local SQLite storage only (single-machine)",
+            "setup": {
+                "summary": "To sync across machines, create ~/.mira/server.json with Qdrant + Postgres connection details.",
+                "note": "Central storage is optional. MIRA works fully in local mode."
+            }
+        }
+
     # Build response - only include fields that provide value
     response = {
         # GUIDANCE: How Claude should use this context (most important)
@@ -243,7 +257,20 @@ def handle_init(params: dict, collection, storage=None) -> dict:
             "custodian": custodian_data,
             "current_work": work_context,
         },
+
+        # Storage mode - always show so user knows sync status
+        "storage": storage_mode,
     }
+
+    # Add alert if using local storage (for new user awareness)
+    if storage_mode.get("mode") == "local":
+        setup_info = storage_mode.get("setup", {})
+        alerts.insert(0, {
+            "type": "storage_mode",
+            "priority": "info",
+            "message": "Running in local-only mode. Conversation history stays on this machine only.",
+            "note": setup_info.get("note", "Central storage is optional."),
+        })
 
     # Show indexing progress if not fully caught up
     claude_path = Path.home() / ".claude" / "projects"
@@ -254,14 +281,18 @@ def handle_init(params: dict, collection, storage=None) -> dict:
         response["indexing"] = {
             "indexed": count,
             "total": total_files,
-            "pending": pending
+            "pending": pending,
+            "storage_mode": storage_mode.get("mode", "local"),
         }
         if pending > 0:
             response["guidance"]["actions"].append(
                 f"Indexing in progress: {count}/{total_files} sessions ({pending} pending)"
             )
     elif count < 5:
-        response["indexed_conversations"] = count
+        response["indexing"] = {
+            "indexed": count,
+            "storage_mode": storage_mode.get("mode", "local"),
+        }
         response["guidance"]["actions"].append(
             f"Limited history: only {count} indexed sessions. Context may be sparse."
         )
