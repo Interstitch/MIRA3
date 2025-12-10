@@ -44,13 +44,24 @@ def ensure_venv_and_deps() -> bool:
 
     # Check if venv exists and is set up
     deps_installed = False
+    deps_version = 0
 
     if config_path.exists():
         try:
             config = json.loads(config_path.read_text())
             deps_installed = config.get("deps_installed", False)
+            deps_version = config.get("deps_version", 0)
         except (json.JSONDecodeError, IOError, OSError):
             pass
+
+    # Current dependency version - increment when adding new required packages
+    # v1: Added qdrant-client and psycopg2-binary as required (not optional)
+    CURRENT_DEPS_VERSION = 1
+
+    # Force reinstall if deps version is outdated
+    if deps_version < CURRENT_DEPS_VERSION:
+        deps_installed = False
+        log(f"Dependency version outdated ({deps_version} < {CURRENT_DEPS_VERSION}), will reinstall")
 
     if not venv_path.exists():
         log("Creating virtualenv at " + str(venv_path))
@@ -96,8 +107,12 @@ def ensure_venv_and_deps() -> bool:
             log("MIRA requires server.json to connect to remote Qdrant + Postgres.")
             log("See docs/CENTRAL_SETUP.md for configuration instructions.")
 
-        # Mark as installed
-        config = {"deps_installed": True, "installed_at": datetime.now().isoformat()}
+        # Mark as installed with version
+        config = {
+            "deps_installed": True,
+            "deps_version": CURRENT_DEPS_VERSION,
+            "installed_at": datetime.now().isoformat()
+        }
         config_path.write_text(json.dumps(config, indent=2))
         log("Dependencies installed successfully")
 
