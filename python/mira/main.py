@@ -7,6 +7,9 @@ Supports both central storage (Qdrant + Postgres) and local fallback (SQLite).
 
 import sys
 import json
+import os
+import signal
+import fcntl
 import threading
 from pathlib import Path
 
@@ -19,6 +22,86 @@ from .handlers import handle_rpc_request
 from .watcher import run_file_watcher
 from .ingestion import run_full_ingestion
 from .migrations import ensure_schema_current, check_migrations_needed
+
+
+# Global lock file handle - must stay open for duration of process
+_lock_file = None
+
+
+def acquire_singleton_lock(mira_path: Path) -> bool:
+    """
+    Acquire exclusive lock to ensure only one MIRA instance runs.
+
+    Uses flock() which automatically releases on process death.
+    If another instance holds the lock, kills it and takes over.
+
+    Returns True if lock acquired, False on failure.
+    """
+    global _lock_file
+
+    lock_path = mira_path / "mira.lock"
+    pid_path = mira_path / "mira.pid"
+
+    # Open lock file (create if doesn't exist)
+    _lock_file = open(lock_path, "w")
+
+    try:
+        # Try non-blocking exclusive lock
+        fcntl.flock(_lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        # Got the lock - write our PID
+        pid_path.write_text(str(os.getpid()))
+        log(f"Acquired singleton lock (PID {os.getpid()})")
+        return True
+
+    except BlockingIOError:
+        # Another process holds the lock - try to kill it
+        log("Another MIRA instance detected, attempting takeover...")
+
+        old_pid = None
+        if pid_path.exists():
+            try:
+                old_pid = int(pid_path.read_text().strip())
+            except (ValueError, OSError):
+                pass
+
+        if old_pid:
+            try:
+                # Send SIGTERM first (graceful)
+                os.kill(old_pid, signal.SIGTERM)
+                log(f"Sent SIGTERM to old MIRA process {old_pid}")
+
+                # Wait briefly for it to die
+                import time
+                for _ in range(10):  # 1 second max
+                    time.sleep(0.1)
+                    try:
+                        # Check if still alive (signal 0 = just check)
+                        os.kill(old_pid, 0)
+                    except ProcessLookupError:
+                        break  # Dead
+                else:
+                    # Still alive - force kill
+                    try:
+                        os.kill(old_pid, signal.SIGKILL)
+                        log(f"Sent SIGKILL to stubborn process {old_pid}")
+                    except ProcessLookupError:
+                        pass
+
+            except ProcessLookupError:
+                log(f"Old process {old_pid} already dead")
+            except PermissionError:
+                log(f"Cannot kill process {old_pid} - permission denied")
+                return False
+
+        # Try to acquire lock again
+        try:
+            fcntl.flock(_lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            pid_path.write_text(str(os.getpid()))
+            log(f"Acquired singleton lock after takeover (PID {os.getpid()})")
+            return True
+        except BlockingIOError:
+            log("Failed to acquire lock even after kill attempt")
+            return False
 
 
 def send_notification(method: str, params: dict):
@@ -38,6 +121,11 @@ def run_backend():
     # Ensure directories exist
     for path in [archives_path, metadata_path]:
         path.mkdir(parents=True, exist_ok=True)
+
+    # Acquire singleton lock - kills any existing MIRA instance
+    if not acquire_singleton_lock(mira_path):
+        log("FATAL: Could not acquire singleton lock")
+        sys.exit(1)
 
     # Run schema migrations before anything else
     log("Checking database schema...")
