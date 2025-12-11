@@ -31,6 +31,8 @@ def ingest_conversation(file_info: dict, collection, mira_path: Path = None, sto
     """
     Ingest a single conversation: parse, extract, archive, index.
 
+    Supports incremental ingestion - only processes new messages since last run.
+
     Args:
         file_info: Dict with session_id, file_path, project_path, last_modified
         collection: Deprecated - kept for API compatibility, ignored
@@ -61,43 +63,57 @@ def ingest_conversation(file_info: dict, collection, mira_path: Path = None, sto
     archives_path.mkdir(parents=True, exist_ok=True)
     metadata_path.mkdir(parents=True, exist_ok=True)
 
-    # Check if already ingested (by checking metadata file)
+    # Check if already ingested and track incremental state
     meta_file = metadata_path / f"{session_id}.json"
-    needs_central_sync = False
+    existing_meta = None
+    last_indexed_message_count = 0
+    is_incremental = False
 
     if meta_file.exists():
-        # Check if source file was modified
         try:
             existing_meta = json.loads(meta_file.read_text())
+            last_indexed_message_count = existing_meta.get('last_indexed_message_count', 0)
+
             if existing_meta.get('last_modified') == file_info.get('last_modified'):
                 # File hasn't changed - but check if we need to sync to central
                 if storage.using_central:
-                    # Check if session exists in central storage
                     if not storage.session_exists_in_central(session_id):
-                        needs_central_sync = True
                         log(f"[{session_id[:12]}] Local session not in central, will sync")
+                        # Continue with full processing for central sync
                     else:
                         return False  # Already in central, skip
                 else:
                     return False  # Local only mode, already processed
+            else:
+                # File changed - check if we can do incremental
+                is_incremental = last_indexed_message_count > 0
         except (json.JSONDecodeError, IOError, OSError):
             pass
 
     short_id = session_id[:12]
     t_start = time.time()
-    log(f"[{short_id}] Starting ingestion...")
+    log(f"[{short_id}] Starting ingestion{'(incremental)' if is_incremental else ''}...")
 
     # Parse conversation
     t0 = time.time()
     conversation = parse_conversation(file_path)
-    msg_count = len(conversation.get('messages', []))
+    messages = conversation.get('messages', [])
+    msg_count = len(messages)
     if not msg_count:
         log(f"[{short_id}] Skipped: no messages")
         return False
     t_parse = (time.time() - t0) * 1000
-    log(f"[{short_id}] Parsed {msg_count} messages ({t_parse:.0f}ms)")
 
-    # Extract metadata
+    # Determine new messages to process
+    new_message_start = 0
+    if is_incremental and last_indexed_message_count < msg_count:
+        new_message_start = last_indexed_message_count
+        new_msg_count = msg_count - last_indexed_message_count
+        log(f"[{short_id}] Parsed {msg_count} messages, {new_msg_count} NEW (from idx {new_message_start}) ({t_parse:.0f}ms)")
+    else:
+        log(f"[{short_id}] Parsed {msg_count} messages ({t_parse:.0f}ms)")
+
+    # Extract metadata (always from full conversation for accurate summary)
     t0 = time.time()
     metadata = extract_metadata(conversation, file_info)
     kw_count = len(metadata.get('keywords', []))
@@ -113,6 +129,9 @@ def ingest_conversation(file_info: dict, collection, mira_path: Path = None, sto
         log(f"[{short_id}] Failed to read file: {e}")
         return False
 
+    # Add incremental tracking to metadata
+    metadata['last_indexed_message_count'] = msg_count
+
     # Save metadata
     meta_file.write_text(json.dumps(metadata, indent=2))
 
@@ -127,9 +146,12 @@ def ingest_conversation(file_info: dict, collection, mira_path: Path = None, sto
                 except json.JSONDecodeError:
                     pass
 
+    # For incremental, only process new messages for file ops
+    raw_messages_to_process = raw_messages[new_message_start:] if is_incremental else raw_messages
+
     # Extract and store file operations for reconstruction capability (local only)
     try:
-        ops_count = extract_file_operations_from_messages(raw_messages, session_id)
+        ops_count = extract_file_operations_from_messages(raw_messages_to_process, session_id)
         if ops_count > 0:
             log(f"[{short_id}] File ops: {ops_count}")
     except Exception as e:
@@ -196,27 +218,43 @@ def ingest_conversation(file_info: dict, collection, mira_path: Path = None, sto
             log(f"[{short_id}] Archive failed: {e}")
 
         # Extract artifacts with session ID for proper foreign keys
+        # Use incremental message slice if available
         try:
             t0 = time.time()
             artifact_count = extract_artifacts_from_messages(
-                raw_messages, session_id,
+                raw_messages_to_process, session_id,
                 postgres_session_id=db_session_id,
-                storage=storage
+                storage=storage,
+                message_start_index=new_message_start,  # For correct message_index in artifacts
             )
             t_artifacts = (time.time() - t0) * 1000
             if artifact_count > 0:
-                log(f"[{short_id}] Artifacts: {artifact_count} ({t_artifacts:.0f}ms, {artifact_count*1000/max(1,t_artifacts):.0f}/sec)")
+                incr_note = f" (incremental from msg {new_message_start})" if is_incremental else ""
+                log(f"[{short_id}] Artifacts: {artifact_count} ({t_artifacts:.0f}ms, {artifact_count*1000/max(1,t_artifacts):.0f}/sec){incr_note}")
         except Exception as e:
             log(f"[{short_id}] Artifacts failed: {e}")
+
+        # Create incremental conversation for custodian/insights/concepts
+        # Only process new messages for these extractions
+        if is_incremental and new_message_start > 0:
+            conversation_to_process = {
+                **conversation,
+                'messages': messages[new_message_start:]
+            }
+            incr_msg_count = len(messages) - new_message_start
+        else:
+            conversation_to_process = conversation
+            incr_msg_count = len(messages)
 
         # Learn about the custodian from this conversation
         try:
             t0 = time.time()
-            custodian_result = extract_custodian_learnings(conversation, session_id)
+            custodian_result = extract_custodian_learnings(conversation_to_process, session_id)
             learned = custodian_result.get('learned', 0) if isinstance(custodian_result, dict) else 0
             t_custodian = (time.time() - t0) * 1000
             if learned > 0:
-                log(f"[{short_id}] Custodian: {learned} learnings ({t_custodian:.0f}ms)")
+                incr_note = f" (from {incr_msg_count} new msgs)" if is_incremental else ""
+                log(f"[{short_id}] Custodian: {learned} learnings ({t_custodian:.0f}ms){incr_note}")
         except Exception as e:
             log(f"[{short_id}] Custodian failed: {e}")
 
@@ -224,7 +262,7 @@ def ingest_conversation(file_info: dict, collection, mira_path: Path = None, sto
         try:
             t0 = time.time()
             insights = extract_insights_from_conversation(
-                conversation, session_id,
+                conversation_to_process, session_id,
                 project_path=project_path_normalized,
                 postgres_session_id=db_session_id,
                 storage=storage
@@ -233,7 +271,8 @@ def ingest_conversation(file_info: dict, collection, mira_path: Path = None, sto
             dec_count = insights.get('decisions_found', 0)
             t_insights = (time.time() - t0) * 1000
             if err_count > 0 or dec_count > 0:
-                log(f"[{short_id}] Insights: {err_count} errors, {dec_count} decisions ({t_insights:.0f}ms)")
+                incr_note = f" (from {incr_msg_count} new msgs)" if is_incremental else ""
+                log(f"[{short_id}] Insights: {err_count} errors, {dec_count} decisions ({t_insights:.0f}ms){incr_note}")
         except Exception as e:
             log(f"[{short_id}] Insights failed: {e}")
 
@@ -242,14 +281,15 @@ def ingest_conversation(file_info: dict, collection, mira_path: Path = None, sto
             try:
                 t0 = time.time()
                 concepts = extract_concepts_from_conversation(
-                    conversation, session_id,
+                    conversation_to_process, session_id,
                     project_path=project_path_normalized,
                     storage=storage
                 )
                 concept_count = concepts.get('concepts_found', 0)
                 t_concepts = (time.time() - t0) * 1000
                 if concept_count > 0:
-                    log(f"[{short_id}] Concepts: {concept_count} ({t_concepts:.0f}ms)")
+                    incr_note = f" (from {incr_msg_count} new msgs)" if is_incremental else ""
+                    log(f"[{short_id}] Concepts: {concept_count} ({t_concepts:.0f}ms){incr_note}")
             except Exception as e:
                 log(f"[{short_id}] Concepts failed: {e}")
 

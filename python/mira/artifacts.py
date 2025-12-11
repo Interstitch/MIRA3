@@ -943,18 +943,23 @@ def collect_artifacts_from_content(content: str, session_id: str, role: str = No
 
 def extract_artifacts_from_messages(messages: list, session_id: str,
                                      postgres_session_id: int = None,
-                                     storage=None) -> int:
+                                     storage=None,
+                                     message_start_index: int = 0) -> int:
     """
     Extract artifacts from all messages in a conversation.
 
     Uses BATCH insertion for performance - collects all artifacts first,
     then inserts in a single database operation.
 
+    Supports incremental extraction via message_start_index - artifacts
+    will have correct message_index relative to the full conversation.
+
     Args:
-        messages: List of conversation messages
+        messages: List of conversation messages (may be a slice for incremental)
         session_id: String session ID
         postgres_session_id: Postgres session ID for foreign key (required for central storage)
         storage: Storage instance for central Postgres
+        message_start_index: Starting index in full conversation (for incremental processing)
 
     Returns the total number of artifacts stored.
     """
@@ -964,6 +969,9 @@ def extract_artifacts_from_messages(messages: list, session_id: str,
     all_artifacts = []
 
     for idx, msg in enumerate(messages):
+        # Calculate actual message index in full conversation
+        actual_message_index = message_start_index + idx
+
         msg_type = msg.get('type', '')
         role = msg_type if msg_type in ('user', 'assistant') else None
 
@@ -979,7 +987,7 @@ def extract_artifacts_from_messages(messages: list, session_id: str,
                 content=content,
                 session_id=session_id,
                 role=role,
-                message_index=idx,
+                message_index=actual_message_index,  # Use actual index for incremental support
                 timestamp=timestamp,
                 postgres_session_id=postgres_session_id,
             )
