@@ -574,6 +574,139 @@ class PostgresBackend:
                 columns = [desc[0] for desc in cur.description]
                 return [dict(zip(columns, row)) for row in cur.fetchall()]
 
+    # ==================== File Operations ====================
+
+    def batch_insert_file_operations(
+        self,
+        operations: List[Dict[str, Any]],
+    ) -> int:
+        """
+        Batch insert file operations (Write/Edit tool uses) for file history tracking.
+
+        Args:
+            operations: List of operation dicts with keys:
+                - session_id (int): Postgres session ID
+                - operation_type (str): 'write' or 'edit'
+                - file_path (str): Path to the file
+                - content (str, optional): Full content for writes
+                - old_string (str, optional): Old text for edits
+                - new_string (str, optional): New text for edits
+                - replace_all (bool, optional): Whether edit replaces all occurrences
+                - sequence_num (int): Order within session
+                - timestamp (str, optional): When operation occurred
+                - operation_hash (str): Hash for deduplication
+
+        Returns:
+            Number of operations inserted
+        """
+        import time
+        if not operations:
+            return 0
+
+        pg = _get_psycopg2()
+
+        t_start = time.time()
+
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                values = []
+                for op in operations:
+                    values.append((
+                        op.get("session_id"),
+                        op.get("operation_type"),
+                        op.get("file_path"),
+                        op.get("content"),
+                        op.get("old_string"),
+                        op.get("new_string"),
+                        op.get("replace_all", False),
+                        op.get("sequence_num", 0),
+                        op.get("timestamp"),
+                        op.get("operation_hash"),
+                    ))
+
+                # Batch insert with ON CONFLICT on operation_hash
+                pg["extras"].execute_values(
+                    cur,
+                    """
+                    INSERT INTO file_operations
+                        (session_id, operation_type, file_path, content, old_string,
+                         new_string, replace_all, sequence_num, timestamp, operation_hash)
+                    VALUES %s
+                    ON CONFLICT (operation_hash) DO NOTHING
+                    """,
+                    values,
+                    page_size=100
+                )
+
+                t_total = (time.time() - t_start) * 1000
+                from .utils import log as mira_log
+                mira_log(f"Batch insert: {len(operations)} file_ops in {t_total:.0f}ms")
+
+                return len(operations)
+
+    def get_file_operations_stats(self) -> Dict[str, Any]:
+        """Get statistics about file operations in central storage."""
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                stats = {}
+
+                # Total operations
+                cur.execute("SELECT COUNT(*) FROM file_operations")
+                stats['total_operations'] = cur.fetchone()[0]
+
+                # Unique files
+                cur.execute("SELECT COUNT(DISTINCT file_path) FROM file_operations")
+                stats['unique_files'] = cur.fetchone()[0]
+
+                # By operation type
+                cur.execute("""
+                    SELECT operation_type, COUNT(*)
+                    FROM file_operations
+                    GROUP BY operation_type
+                """)
+                stats['by_type'] = {row[0]: row[1] for row in cur.fetchall()}
+
+                # Most active files (top 10)
+                cur.execute("""
+                    SELECT file_path, COUNT(*) as ops
+                    FROM file_operations
+                    GROUP BY file_path
+                    ORDER BY ops DESC
+                    LIMIT 10
+                """)
+                stats['most_active_files'] = [
+                    {'file_path': row[0], 'operations': row[1]}
+                    for row in cur.fetchall()
+                ]
+
+                return stats
+
+    def get_file_history(self, file_path: str, limit: int = 100) -> List[Dict[str, Any]]:
+        """
+        Get the operation history for a specific file.
+
+        Useful for replaying/reconstructing file changes over time.
+        """
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT fo.id, fo.operation_type, fo.file_path, fo.content,
+                           fo.old_string, fo.new_string, fo.replace_all,
+                           fo.sequence_num, fo.timestamp, fo.created_at,
+                           s.session_id as uuid, p.path as project_path
+                    FROM file_operations fo
+                    JOIN sessions s ON fo.session_id = s.id
+                    JOIN projects p ON s.project_id = p.id
+                    WHERE fo.file_path = %s
+                    ORDER BY fo.created_at, fo.sequence_num
+                    LIMIT %s
+                    """,
+                    (file_path, limit)
+                )
+                columns = [desc[0] for desc in cur.description]
+                return [dict(zip(columns, row)) for row in cur.fetchall()]
+
     # ==================== Custodian ====================
 
     def get_custodian(self, key: str) -> Optional[Dict[str, Any]]:

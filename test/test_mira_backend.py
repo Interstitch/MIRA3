@@ -2593,6 +2593,19 @@ class TestMiraStatusArtifacts:
         assert 'active_ingestions' in result
         assert isinstance(result['active_ingestions'], list)
 
+    def test_status_includes_file_operations(self):
+        """Test that handle_status includes file operations stats."""
+        from mira.handlers import handle_status
+
+        result = handle_status(None, storage=None)
+
+        # Should include file_operations stats
+        assert 'file_operations' in result
+        file_ops = result['file_operations']
+        assert 'total_operations' in file_ops
+        assert 'unique_files' in file_ops
+        assert 'storage' in file_ops
+
 
 class TestActiveIngestionTracking:
     """Test active ingestion tracking."""

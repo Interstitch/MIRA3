@@ -185,16 +185,10 @@ def ingest_conversation(file_info: dict, collection, mira_path: Path = None, sto
                 except json.JSONDecodeError:
                     pass
 
-    # For incremental, only process new messages for file ops
+    # For incremental, only process new messages
     raw_messages_to_process = raw_messages[new_message_start:] if is_incremental else raw_messages
 
-    # Extract and store file operations for reconstruction capability (local only)
-    try:
-        ops_count = extract_file_operations_from_messages(raw_messages_to_process, session_id)
-        if ops_count > 0:
-            log(f"[{short_id}] File ops: {ops_count}")
-    except Exception as e:
-        log(f"[{short_id}] File ops failed: {e}")
+    # NOTE: File operations extraction moved after session upsert to get postgres_session_id
 
     # Build document content for vector search
     doc_content = build_document_content(conversation, metadata)
@@ -272,6 +266,22 @@ def ingest_conversation(file_info: dict, collection, mira_path: Path = None, sto
                 log(f"[{short_id}] Artifacts: {artifact_count} ({t_artifacts:.0f}ms, {artifact_count*1000/max(1,t_artifacts):.0f}/sec){incr_note}")
         except Exception as e:
             log(f"[{short_id}] Artifacts failed: {e}")
+
+        # Extract file operations (Write/Edit tool uses) for file history
+        try:
+            t0 = time.time()
+            file_ops_count = extract_file_operations_from_messages(
+                raw_messages_to_process,
+                session_id,
+                postgres_session_id=db_session_id,
+                storage=storage,
+            )
+            t_file_ops = (time.time() - t0) * 1000
+            if file_ops_count > 0:
+                incr_note = f" (incremental from msg {new_message_start})" if is_incremental else ""
+                log(f"[{short_id}] File ops: {file_ops_count} ({t_file_ops:.0f}ms){incr_note}")
+        except Exception as e:
+            log(f"[{short_id}] File ops failed: {e}")
 
         # Create incremental conversation for custodian/insights/concepts
         # Only process new messages for these extractions

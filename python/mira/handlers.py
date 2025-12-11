@@ -1510,6 +1510,28 @@ def handle_status(collection, storage=None) -> dict:
         artifact_stats = get_artifact_stats()
         artifact_stats['storage'] = 'local_only'
 
+    # Get file operations stats (for file history tracking)
+    file_ops_stats = {}
+    if storage and storage.using_central and storage.postgres:
+        try:
+            file_ops_stats = storage.postgres.get_file_operations_stats()
+            file_ops_stats['storage'] = 'central'
+        except Exception:
+            # Table might not exist yet - that's OK
+            file_ops_stats = {'total_operations': 0, 'unique_files': 0, 'storage': 'pending_migration'}
+    else:
+        # Get from local storage
+        try:
+            from .artifacts import get_journey_stats
+            journey = get_journey_stats()
+            file_ops_stats = {
+                'total_operations': journey.get('files_created', 0) + journey.get('total_edits', 0),
+                'unique_files': journey.get('unique_files', 0),
+                'storage': 'local_only'
+            }
+        except Exception:
+            file_ops_stats = {'total_operations': 0, 'unique_files': 0, 'storage': 'error'}
+
     return {
         "total_files": total_files,
         "archived": archived,
@@ -1520,6 +1542,7 @@ def handle_status(collection, storage=None) -> dict:
         "errors": error_stats,
         "decisions": decision_stats,
         "artifacts": artifact_stats,
+        "file_operations": file_ops_stats,
         "storage_health": health,
         "sync_queue": sync_queue_stats,
         "audit": audit_stats,

@@ -195,15 +195,29 @@ def reconstruct_file(file_path: str) -> str:
     return content
 
 
-def extract_file_operations_from_messages(messages: list, session_id: str) -> int:
+def extract_file_operations_from_messages(
+    messages: list,
+    session_id: str,
+    postgres_session_id: int = None,
+    storage=None
+) -> int:
     """
     Extract Write and Edit tool operations from conversation messages.
 
     Parses tool_use blocks to find file operations and stores them.
+    Prefers central storage (Postgres) with local SQLite fallback.
+
+    Args:
+        messages: List of conversation messages
+        session_id: UUID session ID (for local storage)
+        postgres_session_id: Integer session ID (for central storage)
+        storage: Storage instance for central Postgres
 
     Returns the number of operations stored.
     """
-    ops_stored = 0
+    import hashlib
+
+    operations = []
     sequence_num = 0
 
     for msg in messages:
@@ -234,15 +248,24 @@ def extract_file_operations_from_messages(messages: list, session_id: str) -> in
             if name == 'Write':
                 file_content = inp.get('content', '')
                 if file_content:
-                    store_file_operation(
-                        session_id=session_id,
-                        op_type='write',
-                        file_path=file_path,
-                        content=file_content,
-                        sequence_num=sequence_num,
-                        timestamp=timestamp
-                    )
-                    ops_stored += 1
+                    # Create hash for deduplication
+                    hash_input = f"{session_id}:write:{file_path}:{file_content[:500]}"
+                    op_hash = hashlib.sha256(hash_input.encode()).hexdigest()[:32]
+
+                    operations.append({
+                        'session_id': postgres_session_id,
+                        'operation_type': 'write',
+                        'file_path': file_path,
+                        'content': file_content,
+                        'old_string': None,
+                        'new_string': None,
+                        'replace_all': False,
+                        'sequence_num': sequence_num,
+                        'timestamp': timestamp,
+                        'operation_hash': op_hash,
+                        # For local fallback
+                        '_local_session_id': session_id,
+                    })
                     sequence_num += 1
 
             elif name == 'Edit':
@@ -251,18 +274,56 @@ def extract_file_operations_from_messages(messages: list, session_id: str) -> in
                 replace_all = inp.get('replace_all', False)
 
                 if old_string:  # Edit must have old_string
-                    store_file_operation(
-                        session_id=session_id,
-                        op_type='edit',
-                        file_path=file_path,
-                        old_string=old_string,
-                        new_string=new_string,
-                        replace_all=replace_all,
-                        sequence_num=sequence_num,
-                        timestamp=timestamp
-                    )
-                    ops_stored += 1
+                    # Create hash for deduplication
+                    hash_input = f"{session_id}:edit:{file_path}:{old_string[:200]}:{new_string[:200]}"
+                    op_hash = hashlib.sha256(hash_input.encode()).hexdigest()[:32]
+
+                    operations.append({
+                        'session_id': postgres_session_id,
+                        'operation_type': 'edit',
+                        'file_path': file_path,
+                        'content': None,
+                        'old_string': old_string,
+                        'new_string': new_string,
+                        'replace_all': replace_all,
+                        'sequence_num': sequence_num,
+                        'timestamp': timestamp,
+                        'operation_hash': op_hash,
+                        # For local fallback
+                        '_local_session_id': session_id,
+                    })
                     sequence_num += 1
+
+    if not operations:
+        return 0
+
+    # Try central storage first
+    if storage and storage.using_central and storage.postgres and postgres_session_id:
+        try:
+            count = storage.postgres.batch_insert_file_operations(operations)
+            log(f"Batch inserted {count} file_ops to central storage")
+            return count
+        except Exception as e:
+            log(f"Central file_ops insert failed, falling back to local: {e}")
+
+    # Fallback to local SQLite
+    ops_stored = 0
+    for op in operations:
+        try:
+            store_file_operation(
+                session_id=op['_local_session_id'],
+                op_type=op['operation_type'],
+                file_path=op['file_path'],
+                content=op.get('content'),
+                old_string=op.get('old_string'),
+                new_string=op.get('new_string'),
+                replace_all=op.get('replace_all', False),
+                sequence_num=op['sequence_num'],
+                timestamp=op.get('timestamp')
+            )
+            ops_stored += 1
+        except Exception as e:
+            log(f"Local file_op store failed: {e}")
 
     return ops_stored
 

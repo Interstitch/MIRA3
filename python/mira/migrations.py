@@ -325,13 +325,33 @@ def run_postgres_migrations(postgres_backend) -> Dict[str, Any]:
                 cur.execute("SELECT MAX(version) FROM schema_version")
                 pg_version = cur.fetchone()[0] or 0
 
-                # Add Postgres-specific migrations here as needed
-                # Example:
-                # if pg_version < 2:
-                #     cur.execute("ALTER TABLE sessions ADD COLUMN IF NOT EXISTS new_field TEXT")
-                #     cur.execute("INSERT INTO schema_version (version, description) VALUES (2, 'Add new_field')")
-                #     conn.commit()
-                #     results["migrations_run"].append({"version": 2, "name": "add_new_field"})
+                # Postgres migration v2: Add file_operations table
+                if pg_version < 2:
+                    log("Postgres migration v2: Adding file_operations table")
+                    cur.execute("""
+                        CREATE TABLE IF NOT EXISTS file_operations (
+                            id SERIAL PRIMARY KEY,
+                            session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+                            operation_type TEXT NOT NULL,  -- 'write' or 'edit'
+                            file_path TEXT NOT NULL,
+                            content TEXT,                  -- Full content for writes
+                            old_string TEXT,               -- Old text for edits
+                            new_string TEXT,               -- New text for edits
+                            replace_all BOOLEAN DEFAULT FALSE,
+                            sequence_num INTEGER DEFAULT 0,
+                            timestamp TEXT,
+                            operation_hash TEXT UNIQUE,    -- For deduplication
+                            created_at TIMESTAMPTZ DEFAULT NOW()
+                        )
+                    """)
+                    # Add indexes for common queries
+                    cur.execute("CREATE INDEX IF NOT EXISTS idx_file_ops_session ON file_operations(session_id)")
+                    cur.execute("CREATE INDEX IF NOT EXISTS idx_file_ops_path ON file_operations(file_path)")
+                    cur.execute("CREATE INDEX IF NOT EXISTS idx_file_ops_created ON file_operations(created_at)")
+                    cur.execute("INSERT INTO schema_version (version, description) VALUES (2, 'Add file_operations table')")
+                    conn.commit()
+                    results["migrations_run"].append({"version": 2, "name": "add_file_operations"})
+                    pg_version = 2
 
                 results["current_version"] = pg_version
 
