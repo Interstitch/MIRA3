@@ -510,7 +510,7 @@ class PostgresBackend:
                 t_prep = (time.time() - t_prep_start) * 1000 - t_conn
 
                 # Batch insert with ON CONFLICT to skip duplicates
-                # Uses unique constraint on (session_id, artifact_type, md5(content))
+                # Uses unique index idx_artifacts_session_type_content on (session_id, artifact_type, md5(content))
                 t_exec_start = time.time()
                 pg["extras"].execute_values(
                     cur,
@@ -865,7 +865,7 @@ class PostgresBackend:
         """Insert a decision. Returns decision ID, or existing ID if duplicate."""
         with self._get_connection() as conn:
             with conn.cursor() as cur:
-                # Use ON CONFLICT with unique constraint on (session_id, md5(decision))
+                # Use ON CONFLICT with unique index idx_decisions_session_decision on (session_id, md5(decision))
                 cur.execute(
                     """
                     INSERT INTO decisions (project_id, session_id, category, decision, reasoning, alternatives, confidence)
