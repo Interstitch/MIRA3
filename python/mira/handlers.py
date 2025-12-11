@@ -1458,6 +1458,14 @@ def handle_status(collection, storage=None) -> dict:
     except Exception:
         pass
 
+    # Get active ingestion jobs
+    active_ingestions = []
+    try:
+        from .ingestion import get_active_ingestions
+        active_ingestions = get_active_ingestions()
+    except Exception:
+        pass
+
     # Get artifact stats - central is source of truth, local is fallback cache
     artifact_stats = {}
 
@@ -1514,7 +1522,8 @@ def handle_status(collection, storage=None) -> dict:
         "artifacts": artifact_stats,
         "storage_health": health,
         "sync_queue": sync_queue_stats,
-        "audit": audit_stats
+        "audit": audit_stats,
+        "active_ingestions": active_ingestions
     }
 
 

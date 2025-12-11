@@ -26,6 +26,45 @@ from .insights import extract_insights_from_conversation
 from .concepts import extract_concepts_from_conversation
 from .audit import audit_log
 
+import threading
+
+# Module-level tracking of active ingestions for status reporting
+_active_ingestions = {}  # session_id -> {file_path, project_path, started_at, worker}
+_active_lock = threading.Lock()
+
+
+def get_active_ingestions() -> list:
+    """Return list of currently active ingestion jobs."""
+    with _active_lock:
+        return [
+            {
+                'session_id': sid,
+                'file_path': info['file_path'],
+                'project_path': info['project_path'],
+                'started_at': info['started_at'],
+                'worker': info['worker'],
+                'elapsed_ms': int((time.time() - info['started_at']) * 1000)
+            }
+            for sid, info in _active_ingestions.items()
+        ]
+
+
+def _mark_ingestion_active(session_id: str, file_path: str, project_path: str, worker: str):
+    """Mark a session as currently being ingested."""
+    with _active_lock:
+        _active_ingestions[session_id] = {
+            'file_path': file_path,
+            'project_path': project_path,
+            'started_at': time.time(),
+            'worker': worker
+        }
+
+
+def _mark_ingestion_done(session_id: str):
+    """Mark a session as done ingesting."""
+    with _active_lock:
+        _active_ingestions.pop(session_id, None)
+
 
 def ingest_conversation(file_info: dict, collection, mira_path: Path = None, storage=None) -> bool:
     """
@@ -567,25 +606,35 @@ def run_full_ingestion(collection, mira_path: Path = None, max_workers: int = 4,
     def ingest_one(file_info):
         """Ingest a single conversation and return result."""
         worker_id = threading.current_thread().name
+        session_id = file_info['session_id']
         with stats_lock:
             active_workers[0] += 1
             if active_workers[0] > max_concurrent[0]:
                 max_concurrent[0] = active_workers[0]
+
+        # Track this ingestion as active
+        _mark_ingestion_active(
+            session_id,
+            file_info.get('file_path', ''),
+            file_info.get('project_path', ''),
+            worker_id
+        )
         try:
             result = ingest_conversation(file_info, None, mira_path, storage)
             with stats_lock:
                 processed_count[0] += 1
                 cnt = processed_count[0]
             if result:
-                log(f"[{cnt}/{len(conversations)}] [{worker_id}] Ingested: {file_info['session_id'][:12]}...")
-            return ('ingested' if result else 'skipped', file_info['session_id'])
+                log(f"[{cnt}/{len(conversations)}] [{worker_id}] Ingested: {session_id[:12]}...")
+            return ('ingested' if result else 'skipped', session_id)
         except Exception as e:
             with stats_lock:
                 processed_count[0] += 1
                 cnt = processed_count[0]
-            log(f"[{cnt}/{len(conversations)}] [{worker_id}] Failed {file_info['session_id'][:12]}: {e}")
-            return ('failed', file_info['session_id'])
+            log(f"[{cnt}/{len(conversations)}] [{worker_id}] Failed {session_id[:12]}: {e}")
+            return ('failed', session_id)
         finally:
+            _mark_ingestion_done(session_id)
             with stats_lock:
                 active_workers[0] -= 1
 

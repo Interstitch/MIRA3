@@ -2583,6 +2583,52 @@ class TestMiraStatusArtifacts:
         # Should include sync_queue stats
         assert 'sync_queue' in result
 
+    def test_status_includes_active_ingestions(self):
+        """Test that handle_status includes active ingestions list."""
+        from mira.handlers import handle_status
+
+        result = handle_status(None, storage=None)
+
+        # Should include active_ingestions list (empty when nothing ingesting)
+        assert 'active_ingestions' in result
+        assert isinstance(result['active_ingestions'], list)
+
+
+class TestActiveIngestionTracking:
+    """Test active ingestion tracking."""
+
+    def test_get_active_ingestions_empty(self):
+        """Test get_active_ingestions returns empty list initially."""
+        from mira.ingestion import get_active_ingestions
+
+        result = get_active_ingestions()
+        assert isinstance(result, list)
+
+    def test_mark_and_clear_ingestion(self):
+        """Test marking and clearing active ingestion."""
+        from mira.ingestion import (
+            get_active_ingestions, _mark_ingestion_active, _mark_ingestion_done
+        )
+
+        # Mark as active
+        _mark_ingestion_active('test-session-123', '/path/to/file.jsonl', 'test-project', 'Ingest-0')
+
+        # Should now be in active list
+        active = get_active_ingestions()
+        assert len(active) == 1
+        assert active[0]['session_id'] == 'test-session-123'
+        assert active[0]['file_path'] == '/path/to/file.jsonl'
+        assert active[0]['project_path'] == 'test-project'
+        assert active[0]['worker'] == 'Ingest-0'
+        assert 'elapsed_ms' in active[0]
+
+        # Mark as done
+        _mark_ingestion_done('test-session-123')
+
+        # Should be empty again
+        active = get_active_ingestions()
+        assert len(active) == 0
+
 
 def run_tests():
     """Run all tests and report results."""
