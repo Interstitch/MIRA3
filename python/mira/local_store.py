@@ -173,6 +173,18 @@ def init_local_db():
     log("Local storage database initialized")
 
 
+def get_project_id(path: str) -> Optional[int]:
+    """Get project ID by path without creating. Returns None if not found."""
+    init_local_db()
+    db = get_db_manager()
+    row = db.execute_read_one(
+        LOCAL_DB,
+        "SELECT id FROM projects WHERE path = ?",
+        (path,)
+    )
+    return row['id'] if row else None
+
+
 def get_or_create_project(
     path: str,
     slug: Optional[str] = None,

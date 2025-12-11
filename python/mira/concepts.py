@@ -961,14 +961,23 @@ def extract_concepts_from_conversation(
     Called during ingestion to learn about the codebase.
     Uses central Postgres if available, falls back to local SQLite.
     """
+    import time
+    from .utils import log
+
     messages = conversation.get('messages', [])
     if not messages:
         return {'concepts_found': 0}
+
+    short_id = session_id[:12]
+    t_start = time.time()
 
     extractor = ConceptExtractor(project_path)
     store = ConceptStore(project_path, storage=storage)
 
     concepts_found = 0
+    candidates_total = 0
+    t_extract = 0
+    t_upsert = 0
 
     for msg in messages:
         role = msg.get('role', '')
@@ -983,11 +992,16 @@ def extract_concepts_from_conversation(
         if not content:
             continue
 
+        t0 = time.time()
         candidates = extractor.extract_from_message(content, role, session_id)
+        t_extract += time.time() - t0
+        candidates_total += len(candidates)
 
+        t0 = time.time()
         for candidate in candidates:
             if store.upsert(candidate):
                 concepts_found += 1
+        t_upsert += time.time() - t0
 
     skip_hot_files = {'node.js', 'vue.js', 'next.js', 'react.js', 'express.js'}
     for filename, count in extractor.get_hot_files():
@@ -999,6 +1013,9 @@ def extract_concepts_from_conversation(
                 'confidence': min(0.9, 0.5 + count * 0.05),
                 'session_id': session_id,
             })
+
+    t_total = (time.time() - t_start) * 1000
+    log(f"[{short_id}] Concepts detail: {len(messages)} msgs, {candidates_total} candidates | extract={t_extract*1000:.0f}ms upsert={t_upsert*1000:.0f}ms total={t_total:.0f}ms")
 
     return {'concepts_found': concepts_found}
 

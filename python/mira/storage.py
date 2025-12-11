@@ -12,6 +12,7 @@ Design principles:
 - Clear messaging about current storage mode
 """
 
+import hashlib
 import logging
 import time
 from typing import Any, Dict, List, Optional
@@ -107,6 +108,21 @@ class Storage:
         """Check if using central storage."""
         self._init_central()
         return self._using_central
+
+    def _queue_for_sync(self, data_type: str, item_id: str, payload: Dict[str, Any]):
+        """Queue an item for later sync to central storage."""
+        try:
+            from .sync_queue import get_sync_queue
+            queue = get_sync_queue()
+
+            # Generate hash for deduplication
+            hash_input = f"{data_type}:{item_id}"
+            item_hash = hashlib.sha256(hash_input.encode()).hexdigest()[:32]
+
+            queue.enqueue(data_type, item_hash, payload)
+            log.debug(f"Queued {data_type} for sync: {item_id}")
+        except Exception as e:
+            log.error(f"Failed to queue {data_type} for sync: {e}")
 
     @property
     def qdrant(self):
@@ -222,6 +238,35 @@ class Storage:
 
     # ==================== Project Operations ====================
 
+    def get_project_id(self, project_path: str) -> Optional[int]:
+        """
+        Get project ID for a given path without creating if it doesn't exist.
+
+        Args:
+            project_path: Filesystem path to the project
+
+        Returns project ID or None if not found.
+        """
+        if self._init_central() and self._postgres:
+            try:
+                with self._postgres._get_connection() as conn:
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            "SELECT id FROM projects WHERE path = %s",
+                            (project_path,)
+                        )
+                        row = cur.fetchone()
+                        return row[0] if row else None
+            except Exception as e:
+                log.error(f"Central get_project_id failed: {e}")
+
+        # Local fallback
+        try:
+            return local_store.get_project_id(project_path)
+        except Exception as e:
+            log.error(f"Local get_project_id failed: {e}")
+            return None
+
     def get_or_create_project(
         self,
         path: str,
@@ -266,7 +311,9 @@ class Storage:
         """
         Upsert a session.
 
-        Uses central Postgres if available, falls back to local SQLite.
+        Strategy:
+        1. Try central Postgres first
+        2. If central fails, queue for later sync AND store in local fallback
 
         Args:
             project_path: Filesystem path to the project
@@ -285,9 +332,16 @@ class Storage:
                 )
             except Exception as e:
                 log.error(f"Central upsert_session failed: {e}")
+                # Queue for later sync
+                self._queue_for_sync("session", session_id, {
+                    "project_path": project_path,
+                    "session_id": session_id,
+                    "git_remote": git_remote,
+                    **kwargs,
+                })
                 # Fall through to local
 
-        # Local fallback
+        # Local fallback (also used as temp storage while queued)
         try:
             project_id = local_store.get_or_create_project(project_path, git_remote=git_remote)
             return local_store.upsert_session(
@@ -414,7 +468,13 @@ class Storage:
         confidence: float = 0.5,
         source_session: Optional[str] = None,
     ):
-        """Upsert a custodian preference. Uses central if available, falls back to local."""
+        """
+        Upsert a custodian preference.
+
+        Strategy:
+        1. Try central Postgres first
+        2. If central fails, queue for later sync AND store locally
+        """
         if self._init_central() and self._postgres:
             try:
                 self._postgres.upsert_custodian(
@@ -427,6 +487,14 @@ class Storage:
                 return
             except Exception as e:
                 log.error(f"Central upsert_custodian failed: {e}")
+                # Queue for later sync
+                self._queue_for_sync("custodian", key, {
+                    "key": key,
+                    "value": value,
+                    "category": category,
+                    "confidence": confidence,
+                    "source_session": source_session,
+                })
                 # Fall through to local
 
         # Local fallback
@@ -447,17 +515,26 @@ class Storage:
         self,
         query: str,
         project_path: Optional[str] = None,
+        project_id: Optional[int] = None,
         limit: int = 5,
     ) -> List[Dict[str, Any]]:
-        """Search error patterns. Uses central if available, falls back to local."""
+        """
+        Search error patterns. Uses central if available, falls back to local.
+
+        Args:
+            query: Error message or description to search for
+            project_path: Optional project path to filter by
+            project_id: Optional project ID (takes precedence over project_path)
+            limit: Maximum results
+        """
         if self._init_central() and self._postgres:
             try:
-                project_id = None
-                if project_path:
-                    project_id = self._postgres.get_or_create_project(project_path)
+                pid = project_id
+                if pid is None and project_path:
+                    pid = self._postgres.get_or_create_project(project_path)
                 return self._postgres.search_error_patterns(
                     query=query,
-                    project_id=project_id,
+                    project_id=pid,
                     limit=limit,
                 )
             except Exception as e:
@@ -466,17 +543,72 @@ class Storage:
 
         # Local fallback
         try:
-            project_id = None
-            if project_path:
-                project_id = local_store.get_or_create_project(project_path)
+            pid = project_id
+            if pid is None and project_path:
+                pid = local_store.get_or_create_project(project_path)
             return local_store.search_error_patterns(
                 query=query,
-                project_id=project_id,
+                project_id=pid,
                 limit=limit,
             )
         except Exception as e:
             log.error(f"Local search_error_patterns failed: {e}")
             return []
+
+    def upsert_error_pattern(
+        self,
+        project_path: str,
+        signature: str,
+        error_type: Optional[str],
+        error_text: str,
+        solution: Optional[str] = None,
+        file_path: Optional[str] = None,
+    ):
+        """
+        Upsert an error pattern.
+
+        Strategy:
+        1. Try central Postgres first
+        2. If central fails, queue for later sync AND store locally
+        """
+        if self._init_central() and self._postgres:
+            try:
+                project_id = self._postgres.get_or_create_project(project_path)
+                self._postgres.upsert_error_pattern(
+                    project_id=project_id,
+                    signature=signature,
+                    error_type=error_type,
+                    error_text=error_text,
+                    solution=solution,
+                    file_path=file_path,
+                )
+                return
+            except Exception as e:
+                log.error(f"Central upsert_error_pattern failed: {e}")
+                # Queue for later sync
+                self._queue_for_sync("error", signature, {
+                    "project_path": project_path,
+                    "signature": signature,
+                    "error_type": error_type,
+                    "error_text": error_text,
+                    "solution": solution,
+                    "file_path": file_path,
+                })
+                # Fall through to local
+
+        # Local fallback
+        try:
+            project_id = local_store.get_or_create_project(project_path)
+            local_store.upsert_error_pattern(
+                project_id=project_id,
+                signature=signature,
+                error_type=error_type,
+                error_text=error_text,
+                solution=solution,
+                file_path=file_path,
+            )
+        except Exception as e:
+            log.error(f"Local upsert_error_pattern failed: {e}")
 
     # ==================== Decision Operations ====================
 
@@ -484,18 +616,28 @@ class Storage:
         self,
         query: str,
         project_path: Optional[str] = None,
+        project_id: Optional[int] = None,
         category: Optional[str] = None,
         limit: int = 10,
     ) -> List[Dict[str, Any]]:
-        """Search decisions. Uses central if available, falls back to local."""
+        """
+        Search decisions. Uses central if available, falls back to local.
+
+        Args:
+            query: Search query
+            project_path: Optional project path to filter by
+            project_id: Optional project ID (takes precedence over project_path)
+            category: Optional category filter
+            limit: Maximum results
+        """
         if self._init_central() and self._postgres:
             try:
-                project_id = None
-                if project_path:
-                    project_id = self._postgres.get_or_create_project(project_path)
+                pid = project_id
+                if pid is None and project_path:
+                    pid = self._postgres.get_or_create_project(project_path)
                 return self._postgres.search_decisions(
                     query=query,
-                    project_id=project_id,
+                    project_id=pid,
                     category=category,
                     limit=limit,
                 )
@@ -505,18 +647,76 @@ class Storage:
 
         # Local fallback
         try:
-            project_id = None
-            if project_path:
-                project_id = local_store.get_or_create_project(project_path)
+            pid = project_id
+            if pid is None and project_path:
+                pid = local_store.get_or_create_project(project_path)
             return local_store.search_decisions(
                 query=query,
-                project_id=project_id,
+                project_id=pid,
                 category=category,
                 limit=limit,
             )
         except Exception as e:
             log.error(f"Local search_decisions failed: {e}")
             return []
+
+    def upsert_decision(
+        self,
+        project_path: str,
+        decision: str,
+        category: Optional[str] = None,
+        reasoning: Optional[str] = None,
+        alternatives: Optional[List[str]] = None,
+        session_id: Optional[str] = None,
+        confidence: float = 0.5,
+    ):
+        """
+        Upsert a decision.
+
+        Strategy:
+        1. Try central Postgres first
+        2. If central fails, queue for later sync AND store locally
+        """
+        if self._init_central() and self._postgres:
+            try:
+                project_id = self._postgres.get_or_create_project(project_path)
+                self._postgres.insert_decision(
+                    project_id=project_id,
+                    decision=decision,
+                    category=category,
+                    reasoning=reasoning,
+                    alternatives=alternatives,
+                    confidence=confidence,
+                )
+                return
+            except Exception as e:
+                log.error(f"Central upsert_decision failed: {e}")
+                # Queue for later sync
+                decision_hash = hashlib.sha256(f"{project_path}:{decision[:100]}".encode()).hexdigest()[:16]
+                self._queue_for_sync("decision", decision_hash, {
+                    "project_path": project_path,
+                    "decision": decision,
+                    "category": category,
+                    "reasoning": reasoning,
+                    "alternatives": alternatives,
+                    "session_id": session_id,
+                    "confidence": confidence,
+                })
+                # Fall through to local
+
+        # Local fallback
+        try:
+            project_id = local_store.get_or_create_project(project_path)
+            local_store.upsert_decision(
+                project_id=project_id,
+                decision=decision,
+                category=category,
+                reasoning=reasoning,
+                alternatives=alternatives,
+                confidence=confidence,
+            )
+        except Exception as e:
+            log.error(f"Local upsert_decision failed: {e}")
 
     # ==================== Concept Operations ====================
 
@@ -582,6 +782,102 @@ class Storage:
         except Exception as e:
             log.error(f"Local upsert_archive failed: {e}")
             return None
+
+    def update_archive(
+        self,
+        session_id: str,
+        content: str,
+        size_bytes: int,
+        line_count: int,
+    ) -> bool:
+        """
+        Update archive content for an existing session by UUID.
+
+        Used for active session sync - updates the archive without full re-ingestion.
+
+        Args:
+            session_id: The session UUID string
+            content: Full JSONL content
+            size_bytes: File size in bytes
+            line_count: Number of lines
+
+        Returns True if successful, False otherwise.
+        """
+        if not self._init_central() or not self._postgres:
+            return False
+
+        try:
+            with self._postgres._get_connection() as conn:
+                with conn.cursor() as cur:
+                    # Get the internal session ID
+                    cur.execute(
+                        "SELECT id FROM sessions WHERE session_id = %s",
+                        (session_id,)
+                    )
+                    row = cur.fetchone()
+                    if not row:
+                        return False
+
+                    postgres_session_id = row[0]
+                    content_hash = hashlib.sha256(content.encode()).hexdigest()
+
+                    # Update archive
+                    cur.execute(
+                        """
+                        INSERT INTO archives (session_id, content, content_hash, size_bytes, line_count)
+                        VALUES (%s, %s, %s, %s, %s)
+                        ON CONFLICT (session_id) DO UPDATE SET
+                            content = EXCLUDED.content,
+                            content_hash = EXCLUDED.content_hash,
+                            size_bytes = EXCLUDED.size_bytes,
+                            line_count = EXCLUDED.line_count,
+                            updated_at = NOW()
+                        """,
+                        (postgres_session_id, content, content_hash, size_bytes, line_count)
+                    )
+                    conn.commit()
+                    return True
+        except Exception as e:
+            log.error(f"update_archive failed: {e}")
+            return False
+
+    def update_session_metadata(
+        self,
+        session_id: str,
+        summary: str,
+        keywords: List[str],
+    ) -> bool:
+        """
+        Update session metadata (summary and keywords) for an existing session.
+
+        Used for active session sync - updates metadata without full re-ingestion.
+
+        Args:
+            session_id: The session UUID string
+            summary: Updated summary text
+            keywords: Updated keywords list
+
+        Returns True if successful, False otherwise.
+        """
+        if not self._init_central() or not self._postgres:
+            return False
+
+        try:
+            with self._postgres._get_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        UPDATE sessions
+                        SET summary = %s, keywords = %s
+                        WHERE session_id = %s
+                        """,
+                        (summary, keywords, session_id)
+                    )
+                    conn.commit()
+                    return cur.rowcount > 0
+        except Exception as e:
+            log.error(f"update_session_metadata failed: {e}")
+            return False
 
     def get_archive(self, session_uuid: str) -> Optional[str]:
         """

@@ -70,7 +70,7 @@ def configure_model_cache():
     models_path.mkdir(parents=True, exist_ok=True)
 
     # Set environment variables for Hugging Face / sentence-transformers
-    os.environ["TRANSFORMERS_CACHE"] = str(models_path)
+    # HF_HOME is the current standard (TRANSFORMERS_CACHE is deprecated)
     os.environ["HF_HOME"] = str(models_path)
     os.environ["SENTENCE_TRANSFORMERS_HOME"] = str(models_path)
 

@@ -766,17 +766,30 @@ def extract_insights_from_conversation(
         postgres_session_id: Postgres session ID (for foreign keys)
         storage: Storage instance
     """
+    import time
+    from .utils import log
+
+    short_id = session_id[:12]
+    msg_count = len(conversation.get('messages', []))
+
+    t0 = time.time()
     errors = extract_errors_from_conversation(
         conversation, session_id,
         project_path=project_path,
         storage=storage
     )
+    t_errors = (time.time() - t0) * 1000
+
+    t0 = time.time()
     decisions = extract_decisions_from_conversation(
         conversation, session_id,
         project_path=project_path,
         postgres_session_id=postgres_session_id,
         storage=storage
     )
+    t_decisions = (time.time() - t0) * 1000
+
+    log(f"[{short_id}] Insights detail: {msg_count} msgs | errors={errors or 0} ({t_errors:.0f}ms) decisions={decisions or 0} ({t_decisions:.0f}ms)")
 
     return {
         'errors_found': errors or 0,

@@ -98,7 +98,7 @@ class PostgresBackend:
         database: str,
         user: str,
         password: str,
-        pool_size: int = 3,
+        pool_size: int = 6,
         timeout: int = 30,
     ):
         self.host = host
@@ -118,6 +118,9 @@ class PostgresBackend:
         self._project_cache_time: Dict[str, float] = {}
         self._project_cache_ttl = 3600  # 1 hour
 
+        # Pool warmup config
+        self._min_connections = 2  # Keep warm connections ready
+
     def _get_pool(self):
         """Get or create connection pool (lazy initialization)."""
         if self._pool is not None:
@@ -130,8 +133,10 @@ class PostgresBackend:
         log.info(f"Connecting to PostgreSQL at {self.host}:{self.port}/{self.database}")
 
         try:
+            # Use minconn=2 to keep warm connections ready
+            # This avoids cold-start latency on each query
             self._pool = pg["pool"].ThreadedConnectionPool(
-                minconn=1,
+                minconn=self._min_connections,
                 maxconn=self.pool_size,
                 host=self.host,
                 port=self.port,
@@ -139,10 +144,15 @@ class PostgresBackend:
                 user=self.user,
                 password=self.password,
                 connect_timeout=self.timeout,
+                # TCP keepalive to prevent Tailscale/firewall from closing idle connections
+                keepalives=1,
+                keepalives_idle=30,      # Start keepalive after 30s idle
+                keepalives_interval=10,  # Send keepalive every 10s
+                keepalives_count=3,      # Give up after 3 failed keepalives
             )
             self._healthy = True
             self._last_health_check = time.time()
-            log.info("Connected to PostgreSQL")
+            log.info(f"Connected to PostgreSQL (pool: min={self._min_connections}, max={self.pool_size})")
             return self._pool
         except Exception as e:
             log.error(f"Failed to connect to PostgreSQL: {e}")
@@ -153,14 +163,22 @@ class PostgresBackend:
         """Get a connection from the pool (context manager)."""
         pool = self._get_pool()
         conn = pool.getconn()
+        close_conn = False
         try:
+            # Validate connection is alive (catches stale Tailscale connections)
+            if conn.closed:
+                pool.putconn(conn, close=True)
+                conn = pool.getconn()
             yield conn
             conn.commit()
-        except Exception:
+        except Exception as e:
             conn.rollback()
+            # If connection error, mark it bad so pool doesn't reuse
+            if "connection" in str(e).lower() or "server closed" in str(e).lower():
+                close_conn = True
             raise
         finally:
-            pool.putconn(conn)
+            pool.putconn(conn, close=close_conn)
 
     def is_healthy(self) -> bool:
         """Check if PostgreSQL connection is healthy."""
@@ -443,6 +461,75 @@ class PostgresBackend:
                 )
                 return cur.fetchone()[0]
 
+    def batch_insert_artifacts(
+        self,
+        artifacts: List[Dict[str, Any]],
+    ) -> int:
+        """
+        Batch insert multiple artifacts in a single transaction.
+
+        Much faster than individual inserts - reduces network round trips.
+
+        Args:
+            artifacts: List of artifact dicts with keys:
+                - session_id (int): Postgres session ID
+                - artifact_type (str): code_block, list, table, etc.
+                - content (str): Artifact content
+                - language (str, optional): Programming language
+                - line_count (int, optional): Number of lines
+                - metadata (dict, optional): Additional metadata
+
+        Returns:
+            Number of artifacts inserted
+        """
+        import time
+        if not artifacts:
+            return 0
+
+        pg = _get_psycopg2()
+
+        t_start = time.time()
+        t_prep_start = time.time()
+
+        with self._get_connection() as conn:
+            t_conn = (time.time() - t_prep_start) * 1000
+            with conn.cursor() as cur:
+                # Use execute_values for efficient batch insert
+                values = []
+                for a in artifacts:
+                    metadata_json = pg["extras"].Json(a.get("metadata")) if a.get("metadata") else None
+                    values.append((
+                        a.get("session_id"),
+                        a.get("artifact_type"),
+                        a.get("content"),
+                        a.get("language"),
+                        a.get("line_count"),
+                        metadata_json,
+                    ))
+
+                t_prep = (time.time() - t_prep_start) * 1000 - t_conn
+
+                # Batch insert with ON CONFLICT to skip duplicates
+                t_exec_start = time.time()
+                pg["extras"].execute_values(
+                    cur,
+                    """
+                    INSERT INTO artifacts (session_id, artifact_type, content, language, line_count, metadata)
+                    VALUES %s
+                    ON CONFLICT DO NOTHING
+                    """,
+                    values,
+                    page_size=100  # Insert 100 rows per round-trip
+                )
+                t_exec = (time.time() - t_exec_start) * 1000
+
+                t_total = (time.time() - t_start) * 1000
+                pages = (len(artifacts) + 99) // 100
+                from .utils import log as mira_log
+                mira_log(f"Batch insert: {len(artifacts)} artifacts in {pages} pages | conn={t_conn:.0f}ms prep={t_prep:.0f}ms exec={t_exec:.0f}ms total={t_total:.0f}ms | {len(artifacts)*1000/max(1,t_total):.0f}/sec")
+
+                return len(artifacts)
+
     def search_artifacts_fts(
         self,
         query: str,
@@ -620,7 +707,14 @@ class PostgresBackend:
                     )
 
                 columns = [desc[0] for desc in cur.description]
-                return [dict(zip(columns, row)) for row in cur.fetchall()]
+                results = []
+                for row in cur.fetchall():
+                    item = dict(zip(columns, row))
+                    # Convert datetime to ISO string for JSON serialization
+                    if 'last_seen' in item and item['last_seen']:
+                        item['last_seen'] = item['last_seen'].isoformat()
+                    results.append(item)
+                return results
 
     # ==================== Decisions ====================
 
@@ -687,7 +781,19 @@ class PostgresBackend:
                 )
 
                 columns = [desc[0] for desc in cur.description]
-                return [dict(zip(columns, row)) for row in cur.fetchall()]
+                results = []
+                for row in cur.fetchall():
+                    item = dict(zip(columns, row))
+                    # Convert datetime to ISO string for JSON serialization
+                    if 'created_at' in item and item['created_at']:
+                        item['created_at'] = item['created_at'].isoformat()
+                    # Convert Decimal to float for JSON serialization
+                    if 'rank' in item and hasattr(item['rank'], '__float__'):
+                        item['rank'] = float(item['rank'])
+                    if 'confidence' in item and hasattr(item['confidence'], '__float__'):
+                        item['confidence'] = float(item['confidence'])
+                    results.append(item)
+                return results
 
     # ==================== Concepts ====================
 
@@ -899,40 +1005,47 @@ class PostgresBackend:
         """
         Full-text search on archive content.
 
+        Uses ILIKE for reliable matching (works with any size content),
+        avoids tsvector which has a 1MB limit.
+
         Returns session info and matching excerpts.
         """
         with self._get_connection() as conn:
             with conn.cursor() as cur:
+                # Use ILIKE for reliable matching regardless of content size
+                # tsvector has a 1MB limit which large archives exceed
+                search_pattern = f'%{query}%'
+
                 if project_id:
                     cur.execute(
                         """
                         SELECT s.session_id, s.summary, a.content,
                                p.path as project_path,
-                               ts_rank(to_tsvector('english', a.content), plainto_tsquery('english', %s)) as rank
+                               1.0 as rank
                         FROM archives a
                         JOIN sessions s ON a.session_id = s.id
                         JOIN projects p ON s.project_id = p.id
                         WHERE s.project_id = %s
-                          AND to_tsvector('english', a.content) @@ plainto_tsquery('english', %s)
-                        ORDER BY rank DESC
+                          AND a.content ILIKE %s
+                        ORDER BY a.updated_at DESC
                         LIMIT %s
                         """,
-                        (query, project_id, query, limit)
+                        (project_id, search_pattern, limit)
                     )
                 else:
                     cur.execute(
                         """
                         SELECT s.session_id, s.summary, a.content,
                                p.path as project_path,
-                               ts_rank(to_tsvector('english', a.content), plainto_tsquery('english', %s)) as rank
+                               1.0 as rank
                         FROM archives a
                         JOIN sessions s ON a.session_id = s.id
                         JOIN projects p ON s.project_id = p.id
-                        WHERE to_tsvector('english', a.content) @@ plainto_tsquery('english', %s)
-                        ORDER BY rank DESC
+                        WHERE a.content ILIKE %s
+                        ORDER BY a.updated_at DESC
                         LIMIT %s
                         """,
-                        (query, query, limit)
+                        (search_pattern, limit)
                     )
 
                 columns = [desc[0] for desc in cur.description]

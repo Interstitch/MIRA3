@@ -18,6 +18,10 @@ TIME_GAP_THRESHOLD = 2 * 60 * 60  # 2 hours in seconds
 # File watcher debounce time (seconds)
 WATCHER_DEBOUNCE_SECONDS = 5
 
+# Active session sync interval (seconds)
+# How often to check and sync the active session to remote storage
+ACTIVE_SESSION_SYNC_INTERVAL = 10
+
 # Dependencies to install in venv
 # Core dependencies (always installed)
 # NOTE: ChromaDB removed - using remote Qdrant + Postgres exclusively

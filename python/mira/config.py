@@ -35,7 +35,7 @@ class PostgresConfig:
     database: str = "mira"
     user: str = "mira"
     password: str = ""
-    pool_size: int = 3
+    pool_size: int = 12  # max_workers=4 × 3 connections/worker for nested operations
     timeout_seconds: int = 30
 
     def connection_string(self, mask_password: bool = False) -> str:

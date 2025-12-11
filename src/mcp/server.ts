@@ -6,6 +6,12 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { spawnBackend, callRpc, shutdownBackend } from "../backend/spawner.js";
+import { createRequire } from "module";
+
+// Read version from package.json (single source of truth)
+const require = createRequire(import.meta.url);
+const pkg = require("../../package.json");
+const VERSION = pkg.version;
 
 // Tool parameter schemas
 const SearchSchema = z.object({
@@ -35,8 +41,8 @@ const DecisionsSchema = z.object({
 
 export async function startServer(): Promise<void> {
   const server = new McpServer({
-    name: "mira3",
-    version: "0.1.0",
+    name: "claude-mira3",
+    version: VERSION,
   });
 
   // Spawn Python backend on startup

@@ -17,6 +17,22 @@ from .db_manager import get_db_manager
 # Database name for local file operations only
 ARTIFACTS_DB = "artifacts.db"
 
+# Pre-compiled regex patterns for artifact extraction (performance optimization)
+# These are compiled once at module load, not per-function-call
+RE_CODE_BLOCK = re.compile(r'```(\w*)\n([\s\S]*?)```')
+RE_INDENTED_CODE = re.compile(r'(?:^[ ]{4,}[^\s].*\n?)+', re.MULTILINE)
+RE_NUMBERED_LIST = re.compile(r'(?:^\d+[.)]\s+.+\n?)+', re.MULTILINE)
+RE_BULLET_LIST = re.compile(r'(?:^[\-\*\+]\s+.+\n?)+', re.MULTILINE)
+RE_TABLE = re.compile(r'(?:^\|.+\|.*\n?)+', re.MULTILINE)
+RE_JSON_BLOCK = re.compile(r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}')
+RE_ERROR_PATTERNS = [
+    re.compile(r'(?:error|exception|traceback|failed|failure)[\s:]+.+', re.IGNORECASE | re.MULTILINE),
+    re.compile(r'^\s*File ".+", line \d+', re.MULTILINE),
+    re.compile(r'^\s*\w+Error:', re.MULTILINE),
+]
+RE_SHELL_COMMAND = re.compile(r'^(?:\$|>|#)\s+.+', re.MULTILINE)
+RE_URL = re.compile(r'https?://[^\s<>\[\]()\'\"]+[^\s<>\[\]()\'\".,;:!?]')
+
 # Schema for artifacts database
 ARTIFACTS_SCHEMA = """
 -- File operations table - stores Write and Edit operations for file reconstruction
@@ -476,9 +492,15 @@ def _search_artifacts_local(query: str, limit: int = 10) -> list:
 def store_artifact(session_id: str, artifact_type: str, content: str,
                    language: str = None, title: str = None, role: str = None,
                    message_index: int = None, timestamp: str = None,
-                   postgres_session_id: int = None, storage=None) -> bool:
+                   postgres_session_id: int = None, storage=None,
+                   project_path: str = None) -> bool:
     """
-    Store a detected artifact in central Postgres storage.
+    Store a detected artifact - tries central first, queues locally if unavailable.
+
+    Storage strategy:
+    1. Try to store directly to central Postgres
+    2. If central unavailable, queue to local sync queue
+    3. Sync worker will flush queue to central when available
 
     Args:
         session_id: The conversation session ID (string)
@@ -491,45 +513,75 @@ def store_artifact(session_id: str, artifact_type: str, content: str,
         timestamp: When the artifact was created
         postgres_session_id: The Postgres session ID (int) for foreign key
         storage: Storage instance for central Postgres
+        project_path: Project path for queued items
 
     Returns:
-        True if stored successfully, False if failed or duplicate
+        True if stored (central or queued), False if failed completely
     """
+    import hashlib
+
+    # Build payload for both central storage and queue
+    line_count = content.count('\n') + 1
+    metadata = {
+        'role': role,
+        'message_index': message_index,
+        'timestamp': timestamp,
+        'title': title,
+    }
+
+    # Generate hash for deduplication
+    hash_input = f"{session_id}:{artifact_type}:{content[:500]}"
+    item_hash = hashlib.sha256(hash_input.encode()).hexdigest()[:32]
+
     # Get storage if not provided
     if storage is None:
         try:
             from .storage import get_storage
             storage = get_storage()
         except ImportError:
-            log("Storage not available for artifact storage")
-            return False
+            storage = None
 
-    if not storage.using_central or not storage.postgres:
-        log("Central storage not available for artifact storage")
-        return False
+    # Try central storage first
+    if storage and storage.using_central and storage.postgres:
+        try:
+            storage.postgres.insert_artifact(
+                session_id=postgres_session_id,
+                artifact_type=artifact_type,
+                content=content,
+                language=language,
+                line_count=line_count,
+                metadata=metadata,
+            )
+            return True  # Success - stored in central
+        except Exception as e:
+            # Duplicate is fine - already stored
+            if 'duplicate' in str(e).lower() or 'unique' in str(e).lower():
+                return True
+            # Other errors - fall through to queue
+            log(f"Central artifact storage failed, queueing: {e}")
 
+    # Central unavailable or failed - queue for later sync
     try:
-        line_count = content.count('\n') + 1
-        metadata = {
-            'role': role,
-            'message_index': message_index,
-            'timestamp': timestamp,
-            'title': title,
+        from .sync_queue import get_sync_queue
+        queue = get_sync_queue()
+
+        payload = {
+            'session_id': session_id,
+            'postgres_session_id': postgres_session_id,
+            'artifact_type': artifact_type,
+            'content': content,
+            'language': language,
+            'line_count': line_count,
+            'metadata': metadata,
+            'project_path': project_path,
         }
 
-        storage.postgres.insert_artifact(
-            session_id=postgres_session_id,
-            artifact_type=artifact_type,
-            content=content,
-            language=language,
-            line_count=line_count,
-            metadata=metadata,
-        )
-        return True
+        queued = queue.enqueue("artifact", item_hash, payload)
+        if queued:
+            log(f"Artifact queued for sync: {artifact_type}")
+        return queued
     except Exception as e:
-        # Log but don't fail - artifacts are supplementary
-        if 'duplicate' not in str(e).lower() and 'unique' not in str(e).lower():
-            log(f"Error storing artifact: {e}")
+        log(f"Failed to queue artifact: {e}")
         return False
 
 
@@ -792,11 +844,111 @@ def extract_artifacts_from_content(content: str, session_id: str, role: str = No
     return artifacts_stored
 
 
+def collect_artifacts_from_content(content: str, session_id: str, role: str = None,
+                                    message_index: int = None, timestamp: str = None,
+                                    postgres_session_id: int = None) -> list:
+    """
+    Collect artifacts from message content WITHOUT storing them.
+
+    Returns a list of artifact dicts ready for batch insertion.
+    This is much faster than storing one at a time.
+    """
+    import hashlib
+
+    artifacts = []
+
+    def add_artifact(artifact_type: str, artifact_content: str, language: str = None, title: str = None):
+        """Helper to add artifact to collection with deduplication."""
+        # Generate hash for deduplication
+        hash_input = f"{session_id}:{artifact_type}:{artifact_content[:500]}"
+        content_hash = hashlib.sha256(hash_input.encode()).hexdigest()[:32]
+
+        artifacts.append({
+            "session_id": postgres_session_id,
+            "artifact_type": artifact_type,
+            "content": artifact_content,
+            "language": language,
+            "line_count": artifact_content.count('\n') + 1,
+            "metadata": {
+                "role": role,
+                "message_index": message_index,
+                "timestamp": timestamp,
+                "title": title,
+                "content_hash": content_hash,
+            }
+        })
+
+    # 1. Fenced code blocks (```language ... ```) - uses pre-compiled RE_CODE_BLOCK
+    for match in RE_CODE_BLOCK.finditer(content):
+        lang_hint = match.group(1).lower() if match.group(1) else None
+        code = match.group(2).strip()
+        if len(code) >= 20:
+            language = lang_hint or detect_language(code)
+            add_artifact('code_block', code, language, f"{language or 'code'} block")
+
+    # 2. Indented code blocks (4+ spaces, multiple lines) - uses pre-compiled RE_INDENTED_CODE
+    for match in RE_INDENTED_CODE.finditer(content):
+        code = match.group(0)
+        if code.count('\n') >= 2 and len(code) >= 50:
+            language = detect_language(code)
+            add_artifact('code_block', code.strip(), language, f"indented {language or 'code'} block")
+
+    # 3. Numbered lists (3+ items) - uses pre-compiled RE_NUMBERED_LIST
+    for match in RE_NUMBERED_LIST.finditer(content):
+        list_content = match.group(0).strip()
+        items = [line.strip() for line in list_content.split('\n') if line.strip()]
+        if len(items) >= 3:
+            add_artifact('list', list_content, None, f"numbered list ({len(items)} items)")
+
+    # 4. Bullet lists (3+ items) - uses pre-compiled RE_BULLET_LIST
+    for match in RE_BULLET_LIST.finditer(content):
+        list_content = match.group(0).strip()
+        items = [line.strip() for line in list_content.split('\n') if line.strip()]
+        if len(items) >= 3:
+            add_artifact('list', list_content, None, f"bullet list ({len(items)} items)")
+
+    # 5. Markdown tables - uses pre-compiled RE_TABLE
+    for match in RE_TABLE.finditer(content):
+        table = match.group(0).strip()
+        rows = [r for r in table.split('\n') if r.strip()]
+        if len(rows) >= 3 and any('---' in r for r in rows):
+            add_artifact('table', table, None, f"markdown table ({len(rows)} rows)")
+
+    # 6. JSON configuration blocks - uses pre-compiled RE_JSON_BLOCK
+    for match in RE_JSON_BLOCK.finditer(content):
+        json_content = match.group(0)
+        try:
+            import json as json_module
+            parsed = json_module.loads(json_content)
+            if isinstance(parsed, dict) and len(parsed) >= 2:
+                add_artifact('config', json_content, 'json', 'JSON configuration')
+        except (json.JSONDecodeError, ValueError):
+            pass
+
+    # 7. Error messages and stack traces - uses pre-compiled RE_ERROR_PATTERNS
+    for pattern in RE_ERROR_PATTERNS:
+        for match in pattern.finditer(content):
+            error_content = match.group(0).strip()
+            if len(error_content) >= 50:
+                add_artifact('error', error_content, None, 'error/stack trace')
+
+    # 8. URLs - uses pre-compiled RE_URL
+    urls = list(set(RE_URL.findall(content)))
+    significant_urls = [u for u in urls if len(u) > 20 and 'example.com' not in u]
+    if len(significant_urls) >= 2:
+        add_artifact('url', '\n'.join(significant_urls), None, f"URLs ({len(significant_urls)})")
+
+    return artifacts
+
+
 def extract_artifacts_from_messages(messages: list, session_id: str,
                                      postgres_session_id: int = None,
                                      storage=None) -> int:
     """
     Extract artifacts from all messages in a conversation.
+
+    Uses BATCH insertion for performance - collects all artifacts first,
+    then inserts in a single database operation.
 
     Args:
         messages: List of conversation messages
@@ -808,7 +960,8 @@ def extract_artifacts_from_messages(messages: list, session_id: str,
     """
     from .utils import extract_text_content
 
-    total_stored = 0
+    # Collect all artifacts first (fast - no DB calls)
+    all_artifacts = []
 
     for idx, msg in enumerate(messages):
         msg_type = msg.get('type', '')
@@ -822,15 +975,52 @@ def extract_artifacts_from_messages(messages: list, session_id: str,
         timestamp = msg.get('timestamp', '')
 
         if content:
-            stored = extract_artifacts_from_content(
+            artifacts = collect_artifacts_from_content(
                 content=content,
                 session_id=session_id,
                 role=role,
                 message_index=idx,
                 timestamp=timestamp,
                 postgres_session_id=postgres_session_id,
-                storage=storage
             )
-            total_stored += stored
+            all_artifacts.extend(artifacts)
 
-    return total_stored
+    # Batch insert all artifacts in one operation
+    if not all_artifacts:
+        return 0
+
+    # Get storage if not provided
+    if storage is None:
+        try:
+            from .storage import get_storage
+            storage = get_storage()
+        except ImportError:
+            storage = None
+
+    # Try batch insert to central
+    if storage and storage.using_central and storage.postgres:
+        try:
+            count = storage.postgres.batch_insert_artifacts(all_artifacts)
+            log(f"Batch inserted {count} artifacts to central storage")
+            return count
+        except Exception as e:
+            log(f"Batch insert failed, falling back to queue: {e}")
+
+    # Fallback: queue for later sync
+    try:
+        from .sync_queue import get_sync_queue
+        queue = get_sync_queue()
+        import hashlib
+
+        queued = 0
+        for artifact in all_artifacts:
+            hash_input = f"artifact:{artifact.get('metadata', {}).get('content_hash', '')}"
+            item_hash = hashlib.sha256(hash_input.encode()).hexdigest()[:32]
+            if queue.enqueue("artifact", item_hash, artifact):
+                queued += 1
+
+        log(f"Queued {queued} artifacts for later sync")
+        return queued
+    except Exception as e:
+        log(f"Failed to queue artifacts: {e}")
+        return 0

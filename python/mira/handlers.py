@@ -1449,6 +1449,59 @@ def handle_status(collection, storage=None) -> dict:
     except Exception:
         pass
 
+    # Get sync queue stats
+    sync_queue_stats = {}
+    try:
+        from .sync_queue import get_sync_queue
+        queue = get_sync_queue()
+        sync_queue_stats = queue.get_stats()
+    except Exception:
+        pass
+
+    # Get artifact stats - central is source of truth, local is fallback cache
+    artifact_stats = {}
+
+    if storage and storage.using_central and storage.postgres:
+        try:
+            with storage.postgres._get_connection() as conn:
+                with conn.cursor() as cur:
+                    # Total central artifacts
+                    cur.execute("SELECT COUNT(*) FROM artifacts")
+                    artifact_stats['total'] = cur.fetchone()[0]
+
+                    # Central artifacts by type
+                    cur.execute("""
+                        SELECT artifact_type, COUNT(*)
+                        FROM artifacts
+                        GROUP BY artifact_type
+                        ORDER BY COUNT(*) DESC
+                    """)
+                    artifact_stats['by_type'] = {
+                        row[0]: row[1] for row in cur.fetchall()
+                    }
+
+                    # Central artifacts by language (for code blocks)
+                    cur.execute("""
+                        SELECT language, COUNT(*)
+                        FROM artifacts
+                        WHERE language IS NOT NULL
+                        GROUP BY language
+                        ORDER BY COUNT(*) DESC
+                    """)
+                    artifact_stats['by_language'] = {
+                        row[0]: row[1] for row in cur.fetchall()
+                    }
+
+                    artifact_stats['storage'] = 'central'
+        except Exception:
+            # Fall back to local stats if central query fails
+            artifact_stats = get_artifact_stats()
+            artifact_stats['storage'] = 'local_fallback'
+    else:
+        # No central storage - use local stats
+        artifact_stats = get_artifact_stats()
+        artifact_stats['storage'] = 'local_only'
+
     return {
         "total_files": total_files,
         "archived": archived,
@@ -1458,7 +1511,9 @@ def handle_status(collection, storage=None) -> dict:
         "last_sync": datetime.now().isoformat(),
         "errors": error_stats,
         "decisions": decision_stats,
+        "artifacts": artifact_stats,
         "storage_health": health,
+        "sync_queue": sync_queue_stats,
         "audit": audit_stats
     }
 
@@ -1467,35 +1522,56 @@ def handle_error_lookup(params: dict, storage=None) -> dict:
     """
     Search for past error solutions.
 
+    Uses project-first search strategy:
+    1. Search within current project first
+    2. If no results, expand to search all projects globally
+
     Args:
-        params: Request parameters (query, limit)
+        params: Request parameters (query, limit, project_path)
         storage: Storage instance for central Qdrant + Postgres
 
     Params:
         query: Error message or description to search for
         limit: Maximum results (default: 5)
+        project_path: Optional project path to search first
 
     Returns matching errors with their solutions.
     """
     query = params.get("query", "")
     limit = params.get("limit", 5)
+    project_path = params.get("project_path")
 
     if not query:
         return {"results": [], "total": 0}
 
-    # Try central storage first
+    # Try central storage with project-first strategy
     if storage and storage.using_central:
         try:
-            results = storage.search_error_patterns(query, limit=limit)
+            # Get project_id if project_path provided
+            project_id = None
+            if project_path:
+                project_id = storage.get_project_id(project_path)
+
+            # First: search within project only
+            results = []
+            searched_global = False
+            if project_id:
+                results = storage.search_error_patterns(query, project_id=project_id, limit=limit)
+
+            # If no results and we had a project filter, search globally
+            if not results:
+                results = storage.search_error_patterns(query, project_id=None, limit=limit)
+                searched_global = True if project_id else False
+
             if results:
                 return {
                     "results": results,
                     "total": len(results),
                     "query": query,
-                    "source": "central"
+                    "source": "central" + ("_global" if searched_global else "")
                 }
-        except Exception:
-            pass
+        except Exception as e:
+            log(f"Central error lookup failed: {e}")
 
     # Fall back to local search
     results = search_error_solutions(query, limit=limit)
@@ -1512,39 +1588,66 @@ def handle_decisions(params: dict, storage=None) -> dict:
     """
     Search for past architectural/design decisions.
 
+    Uses project-first search strategy:
+    1. Search within current project first
+    2. If no results, expand to search all projects globally
+
     Args:
-        params: Request parameters (query, category, limit)
+        params: Request parameters (query, category, limit, project_path)
         storage: Storage instance for central Qdrant + Postgres
 
     Params:
         query: Search query
         category: Optional category filter (architecture, technology, etc.)
         limit: Maximum results (default: 10)
+        project_path: Optional project path to search first
 
     Returns matching decisions with context.
     """
     query = params.get("query", "")
     category = params.get("category")
     limit = params.get("limit", 10)
+    project_path = params.get("project_path")
 
-    # Try central storage first
+    # Try central storage with project-first strategy
     if storage and storage.using_central:
         try:
-            results = storage.search_decisions(
-                query=query or "",
-                category=category,
-                limit=limit
-            )
+            # Get project_id if project_path provided
+            project_id = None
+            if project_path:
+                project_id = storage.get_project_id(project_path)
+
+            # First: search within project only
+            results = []
+            searched_global = False
+            if project_id:
+                results = storage.search_decisions(
+                    query=query or "",
+                    project_id=project_id,
+                    category=category,
+                    limit=limit
+                )
+
+            # If no results and we had a project filter, search globally
+            if not results:
+                results = storage.search_decisions(
+                    query=query or "",
+                    project_id=None,
+                    category=category,
+                    limit=limit
+                )
+                searched_global = True if project_id else False
+
             if results:
                 return {
                     "results": results,
                     "total": len(results),
                     "query": query,
                     "category": category,
-                    "source": "central"
+                    "source": "central" + ("_global" if searched_global else "")
                 }
-        except Exception:
-            pass
+        except Exception as e:
+            log(f"Central decisions search failed: {e}")
 
     # Fall back to local search
     if not query:

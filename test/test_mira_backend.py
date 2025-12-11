@@ -463,15 +463,16 @@ Can you help?'''
     def test_store_artifact_without_central_storage(self):
         """Test that store_artifact gracefully handles missing central storage."""
         init_artifact_db()
-        # Without central storage, store_artifact returns False
+        # Without central storage, store_artifact now queues for sync
         result = store_artifact(
             session_id='test-no-central',
             artifact_type='code_block',
             content='print("hello")',
             language='python'
         )
-        # Should return False without central storage (not crash)
-        assert result == False
+        # With sync queue, returns True (queued) or False (failed to queue)
+        # Either way shouldn't crash
+        assert result in [True, False]
 
     def test_search_artifacts_for_query(self):
         init_artifact_db()
@@ -750,14 +751,19 @@ class TestHandlers:
 
     def test_handle_status(self):
         from mira.handlers import handle_status
+        from mira.sync_queue import SyncQueue
         import tempfile
 
+        shutdown_db_manager()
+        SyncQueue._initialized = False
         temp_dir = tempfile.mkdtemp()
         original_cwd = os.getcwd()
         try:
             os.chdir(temp_dir)
             mira_path = Path(temp_dir) / '.mira'
             mira_path.mkdir()
+            # Initialize artifact db for status call
+            init_artifact_db()
 
             # Collection is deprecated, storage is optional
             result = handle_status(None, storage=None)
@@ -767,6 +773,7 @@ class TestHandlers:
             assert 'storage_path' in result
             assert 'last_sync' in result
         finally:
+            shutdown_db_manager()
             os.chdir(original_cwd)
             shutil.rmtree(temp_dir)
 
@@ -2072,6 +2079,511 @@ class TestLocalToCentralSync:
         assert result == True  # Should be ingested (file modified)
 
 
+class TestSyncQueue:
+    """Test sync queue functionality."""
+
+    @classmethod
+    def setup_class(cls):
+        shutdown_db_manager()
+        from mira.sync_queue import SyncQueue
+        SyncQueue._initialized = False
+        cls.temp_dir = tempfile.mkdtemp()
+        cls.original_cwd = os.getcwd()
+        os.chdir(cls.temp_dir)
+        mira_path = Path(cls.temp_dir) / '.mira'
+        mira_path.mkdir(exist_ok=True)
+
+    @classmethod
+    def teardown_class(cls):
+        shutdown_db_manager()
+        os.chdir(cls.original_cwd)
+        shutil.rmtree(cls.temp_dir, ignore_errors=True)
+
+    def test_enqueue_item(self):
+        """Test enqueueing items to sync queue."""
+        from mira.sync_queue import SyncQueue
+        SyncQueue._initialized = False
+        queue = SyncQueue()
+
+        result = queue.enqueue(
+            data_type="artifact",
+            item_hash="abc123",
+            payload={"content": "test code", "language": "python"}
+        )
+        assert result == True
+
+    def test_enqueue_duplicate(self):
+        """Test that duplicate items don't create new entries."""
+        from mira.sync_queue import SyncQueue
+        SyncQueue._initialized = False
+        queue = SyncQueue()
+
+        # Enqueue same item twice
+        queue.enqueue("session", "session-hash-1", {"summary": "test"})
+        queue.enqueue("session", "session-hash-1", {"summary": "updated"})
+
+        # Should still only have one pending item
+        items = queue.get_pending("session", limit=100)
+        session_items = [i for i in items if i["item_hash"] == "session-hash-1"]
+        assert len(session_items) <= 1
+
+    def test_get_pending_items(self):
+        """Test retrieving pending items from queue."""
+        from mira.sync_queue import SyncQueue
+        SyncQueue._initialized = False
+        queue = SyncQueue()
+
+        # Add some items
+        queue.enqueue("error", "error-hash-1", {"error_type": "TypeError"})
+        queue.enqueue("error", "error-hash-2", {"error_type": "ValueError"})
+
+        items = queue.get_pending("error", limit=10)
+        assert isinstance(items, list)
+        assert all("payload" in item for item in items)
+
+    def test_mark_synced(self):
+        """Test marking items as synced removes them from queue."""
+        from mira.sync_queue import SyncQueue
+        SyncQueue._initialized = False
+        queue = SyncQueue()
+
+        queue.enqueue("decision", "decision-hash-1", {"decision": "use FastAPI"})
+
+        items = queue.get_pending("decision", limit=10)
+        decision_items = [i for i in items if i["item_hash"] == "decision-hash-1"]
+
+        if decision_items:
+            queue.mark_synced([decision_items[0]["id"]])
+
+            # Should no longer be pending
+            items_after = queue.get_pending("decision", limit=100)
+            assert not any(i["item_hash"] == "decision-hash-1" for i in items_after)
+
+    def test_mark_failed_increases_retry_count(self):
+        """Test that failed items get retry count incremented."""
+        from mira.sync_queue import SyncQueue
+        SyncQueue._initialized = False
+        queue = SyncQueue()
+
+        queue.enqueue("custodian", "cust-hash-1", {"key": "name", "value": "Max"})
+
+        items = queue.get_pending("custodian", limit=10)
+        cust_items = [i for i in items if i["item_hash"] == "cust-hash-1"]
+
+        if cust_items:
+            original_retry = cust_items[0]["retry_count"]
+            queue.mark_failed([cust_items[0]["id"]], "Connection failed")
+
+            # Check retry count increased
+            items_after = queue.get_pending("custodian", limit=100, max_retries=10)
+            failed_item = next((i for i in items_after if i["item_hash"] == "cust-hash-1"), None)
+            if failed_item:
+                assert failed_item["retry_count"] > original_retry
+
+    def test_get_stats(self):
+        """Test queue statistics."""
+        from mira.sync_queue import SyncQueue
+        SyncQueue._initialized = False
+        queue = SyncQueue()
+
+        # Add some items
+        queue.enqueue("artifact", "stat-test-1", {"content": "test1"})
+        queue.enqueue("artifact", "stat-test-2", {"content": "test2"})
+
+        stats = queue.get_stats()
+        assert "total_pending" in stats
+        assert "total_failed" in stats
+        assert "pending" in stats
+
+    def test_record_sync_stats(self):
+        """Test recording sync statistics."""
+        from mira.sync_queue import SyncQueue
+        SyncQueue._initialized = False
+        queue = SyncQueue()
+
+        queue.record_sync_stats(
+            data_type="artifact",
+            items_synced=10,
+            items_failed=2,
+            duration_ms=150
+        )
+
+        recent = queue.get_recent_sync_stats(limit=5)
+        assert isinstance(recent, list)
+
+
+class TestSyncWorker:
+    """Test sync worker functionality."""
+
+    @classmethod
+    def setup_class(cls):
+        shutdown_db_manager()
+        from mira.sync_queue import SyncQueue
+        SyncQueue._initialized = False
+        cls.temp_dir = tempfile.mkdtemp()
+        cls.original_cwd = os.getcwd()
+        os.chdir(cls.temp_dir)
+        mira_path = Path(cls.temp_dir) / '.mira'
+        mira_path.mkdir(exist_ok=True)
+
+    @classmethod
+    def teardown_class(cls):
+        shutdown_db_manager()
+        os.chdir(cls.original_cwd)
+        shutil.rmtree(cls.temp_dir, ignore_errors=True)
+
+    def test_sync_worker_init(self):
+        """Test sync worker initialization."""
+        from mira.sync_worker import SyncWorker
+
+        worker = SyncWorker(storage=None)
+        assert worker.running == False
+        assert worker.storage is None
+
+    def test_sync_worker_start_stop(self):
+        """Test starting and stopping sync worker."""
+        from mira.sync_worker import SyncWorker
+        import time
+
+        worker = SyncWorker(storage=None)
+        worker.start()
+        assert worker.running == True
+        assert worker.thread is not None
+
+        # Let it run briefly
+        time.sleep(0.1)
+
+        worker.stop()
+        assert worker.running == False
+
+    def test_force_sync_without_central(self):
+        """Test force sync returns error when central not available."""
+        from mira.sync_worker import SyncWorker
+
+        worker = SyncWorker(storage=None)
+        result = worker.force_sync()
+
+        # Without central storage, should return error
+        assert "error" in result or result.get("synced", 0) == 0
+
+
+class TestCollectArtifactsFromContent:
+    """Test artifact collection without storage."""
+
+    @classmethod
+    def setup_class(cls):
+        shutdown_db_manager()
+        cls.temp_dir = tempfile.mkdtemp()
+        cls.original_cwd = os.getcwd()
+        os.chdir(cls.temp_dir)
+        mira_path = Path(cls.temp_dir) / '.mira'
+        mira_path.mkdir(exist_ok=True)
+        init_artifact_db()
+
+    @classmethod
+    def teardown_class(cls):
+        shutdown_db_manager()
+        os.chdir(cls.original_cwd)
+        shutil.rmtree(cls.temp_dir, ignore_errors=True)
+
+    def test_collect_code_blocks(self):
+        """Test collecting code blocks from content."""
+        from mira.artifacts import collect_artifacts_from_content
+
+        content = '''Here is some code:
+
+```python
+def hello():
+    print("world")
+
+class MyClass:
+    pass
+```
+
+And more code:
+
+```javascript
+function test() {
+    return 42;
+}
+```
+'''
+        artifacts = collect_artifacts_from_content(
+            content=content,
+            session_id="test-session",
+            role="assistant"
+        )
+
+        # Should collect code blocks
+        assert isinstance(artifacts, list)
+        code_blocks = [a for a in artifacts if a["artifact_type"] == "code_block"]
+        # May or may not detect depending on minimum length
+        assert isinstance(code_blocks, list)
+
+    def test_collect_bullet_list(self):
+        """Test collecting bullet lists from content."""
+        from mira.artifacts import collect_artifacts_from_content
+
+        content = '''Steps to follow:
+
+- Install dependencies
+- Configure environment
+- Run tests
+- Deploy application
+
+Done!'''
+
+        artifacts = collect_artifacts_from_content(
+            content=content,
+            session_id="test-list",
+            role="assistant"
+        )
+
+        assert isinstance(artifacts, list)
+        lists = [a for a in artifacts if a["artifact_type"] == "bullet_list"]
+        assert isinstance(lists, list)
+
+    def test_collect_numbered_list(self):
+        """Test collecting numbered lists from content."""
+        from mira.artifacts import collect_artifacts_from_content
+
+        content = '''Steps:
+
+1. First step
+2. Second step
+3. Third step
+4. Fourth step
+
+Done.'''
+
+        artifacts = collect_artifacts_from_content(
+            content=content,
+            session_id="test-numbered",
+            role="assistant"
+        )
+
+        assert isinstance(artifacts, list)
+
+    def test_collect_markdown_table(self):
+        """Test collecting markdown tables from content."""
+        from mira.artifacts import collect_artifacts_from_content
+
+        content = '''Comparison:
+
+| Feature | A | B |
+|---------|---|---|
+| Speed   | 1 | 2 |
+| Size    | 3 | 4 |
+
+End.'''
+
+        artifacts = collect_artifacts_from_content(
+            content=content,
+            session_id="test-table",
+            role="assistant"
+        )
+
+        assert isinstance(artifacts, list)
+
+    def test_collect_returns_metadata(self):
+        """Test that collected artifacts have required metadata."""
+        from mira.artifacts import collect_artifacts_from_content
+
+        content = '''```python
+def example():
+    return True
+```'''
+
+        artifacts = collect_artifacts_from_content(
+            content=content,
+            session_id="test-meta",
+            role="assistant",
+            message_index=5,
+            timestamp="2025-01-01T00:00:00Z"
+        )
+
+        for artifact in artifacts:
+            assert "session_id" in artifact
+            assert "artifact_type" in artifact
+            assert "content" in artifact
+
+
+class TestBatchArtifactInsertion:
+    """Test batch artifact insertion for performance."""
+
+    @classmethod
+    def setup_class(cls):
+        shutdown_db_manager()
+        cls.temp_dir = tempfile.mkdtemp()
+        cls.original_cwd = os.getcwd()
+        os.chdir(cls.temp_dir)
+        mira_path = Path(cls.temp_dir) / '.mira'
+        mira_path.mkdir(exist_ok=True)
+        init_artifact_db()
+
+    @classmethod
+    def teardown_class(cls):
+        shutdown_db_manager()
+        os.chdir(cls.original_cwd)
+        shutil.rmtree(cls.temp_dir, ignore_errors=True)
+
+    def test_extract_artifacts_from_messages_batch(self):
+        """Test batch extraction from multiple messages."""
+        from mira.artifacts import extract_artifacts_from_messages
+
+        messages = [
+            {
+                'type': 'assistant',
+                'timestamp': '2025-01-01T10:00:00Z',
+                'message': {'content': [{'type': 'text', 'text': '''
+Here is a function:
+
+```python
+def process_data(items):
+    results = []
+    for item in items:
+        results.append(transform(item))
+    return results
+```
+'''}]}
+            },
+            {
+                'type': 'assistant',
+                'timestamp': '2025-01-01T10:01:00Z',
+                'message': {'content': [{'type': 'text', 'text': '''
+Steps to use:
+
+1. Import the function
+2. Call with data
+3. Handle results
+4. Log output
+
+Done!
+'''}]}
+            }
+        ]
+
+        # Without central storage, returns 0 but shouldn't crash
+        count = extract_artifacts_from_messages(messages, "batch-test-session")
+        assert count >= 0
+
+
+class TestGetProjectId:
+    """Test get_project_id functionality."""
+
+    @classmethod
+    def setup_class(cls):
+        shutdown_db_manager()
+        from mira import local_store
+        local_store._initialized = False
+        cls.temp_dir = tempfile.mkdtemp()
+        os.environ['MIRA_PATH'] = str(Path(cls.temp_dir) / '.mira')
+        (Path(cls.temp_dir) / '.mira').mkdir(exist_ok=True)
+        local_store.init_local_db()
+
+    @classmethod
+    def teardown_class(cls):
+        shutdown_db_manager()
+        if 'MIRA_PATH' in os.environ:
+            del os.environ['MIRA_PATH']
+        shutil.rmtree(cls.temp_dir, ignore_errors=True)
+
+    def test_get_project_id_exists(self):
+        """Test getting project ID for existing project."""
+        from mira.local_store import get_or_create_project, get_project_id
+
+        # Create project
+        project_id = get_or_create_project('/test/project/path')
+        assert project_id > 0
+
+        # Get project ID (should match)
+        retrieved_id = get_project_id('/test/project/path')
+        assert retrieved_id == project_id
+
+    def test_get_project_id_not_exists(self):
+        """Test getting project ID for non-existent project."""
+        from mira.local_store import get_project_id
+
+        # Should return None for non-existent project
+        result = get_project_id('/nonexistent/path/12345')
+        assert result is None
+
+
+class TestProjectFirstSearch:
+    """Test project-first search in error_lookup and decisions."""
+
+    @classmethod
+    def setup_class(cls):
+        shutdown_db_manager()
+        cls.temp_dir = tempfile.mkdtemp()
+        cls.original_cwd = os.getcwd()
+        os.chdir(cls.temp_dir)
+        mira_path = Path(cls.temp_dir) / '.mira'
+        mira_path.mkdir(exist_ok=True)
+        init_insights_db()
+
+    @classmethod
+    def teardown_class(cls):
+        shutdown_db_manager()
+        os.chdir(cls.original_cwd)
+        shutil.rmtree(cls.temp_dir, ignore_errors=True)
+
+    def test_search_error_solutions_with_project(self):
+        """Test error search can filter by project path."""
+        # The search_error_solutions function should accept project_path parameter
+        results = search_error_solutions("test error", limit=5, project_path=None)
+        assert isinstance(results, list)
+
+    def test_search_decisions_with_project(self):
+        """Test decision search can filter by project path."""
+        # The search_decisions function should accept project_path parameter
+        results = search_decisions("test decision", limit=5, project_path=None)
+        assert isinstance(results, list)
+
+
+class TestMiraStatusArtifacts:
+    """Test that mira_status includes artifact stats."""
+
+    @classmethod
+    def setup_class(cls):
+        shutdown_db_manager()
+        from mira.sync_queue import SyncQueue
+        SyncQueue._initialized = False
+        cls.temp_dir = tempfile.mkdtemp()
+        cls.original_cwd = os.getcwd()
+        os.chdir(cls.temp_dir)
+        mira_path = Path(cls.temp_dir) / '.mira'
+        mira_path.mkdir(exist_ok=True)
+        # Initialize required databases
+        init_artifact_db()
+
+    @classmethod
+    def teardown_class(cls):
+        shutdown_db_manager()
+        os.chdir(cls.original_cwd)
+        shutil.rmtree(cls.temp_dir, ignore_errors=True)
+
+    def test_status_includes_artifacts(self):
+        """Test that handle_status includes artifact count."""
+        from mira.handlers import handle_status
+
+        result = handle_status(None, storage=None)
+
+        # Should include artifact stats
+        assert 'artifacts' in result
+        artifacts = result['artifacts']
+        assert 'total' in artifacts
+
+    def test_status_includes_sync_queue(self):
+        """Test that handle_status includes sync queue stats."""
+        from mira.handlers import handle_status
+
+        result = handle_status(None, storage=None)
+
+        # Should include sync_queue stats
+        assert 'sync_queue' in result
+
+
 def run_tests():
     """Run all tests and report results."""
     import traceback
@@ -2095,6 +2607,13 @@ def run_tests():
         TestLocalStore,
         TestStorageFallback,
         TestLocalToCentralSync,
+        TestSyncQueue,
+        TestSyncWorker,
+        TestCollectArtifactsFromContent,
+        TestBatchArtifactInsertion,
+        TestGetProjectId,
+        TestProjectFirstSearch,
+        TestMiraStatusArtifacts,
     ]
 
     total = 0

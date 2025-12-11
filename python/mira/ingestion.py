@@ -12,6 +12,7 @@ Archives are stored in the available storage backend.
 import hashlib
 import json
 import shutil
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import List, Dict, Any, Optional
@@ -83,21 +84,26 @@ def ingest_conversation(file_info: dict, collection, mira_path: Path = None, sto
             pass
 
     short_id = session_id[:12]
+    t_start = time.time()
     log(f"[{short_id}] Starting ingestion...")
 
     # Parse conversation
+    t0 = time.time()
     conversation = parse_conversation(file_path)
     msg_count = len(conversation.get('messages', []))
     if not msg_count:
         log(f"[{short_id}] Skipped: no messages")
         return False
-    log(f"[{short_id}] Parsed {msg_count} messages")
+    t_parse = (time.time() - t0) * 1000
+    log(f"[{short_id}] Parsed {msg_count} messages ({t_parse:.0f}ms)")
 
     # Extract metadata
+    t0 = time.time()
     metadata = extract_metadata(conversation, file_info)
     kw_count = len(metadata.get('keywords', []))
     facts_count = len(metadata.get('key_facts', []))
-    log(f"[{short_id}] Metadata: {kw_count} keywords, {facts_count} facts")
+    t_meta = (time.time() - t0) * 1000
+    log(f"[{short_id}] Metadata: {kw_count} keywords, {facts_count} facts ({t_meta:.0f}ms)")
 
     # Read file content for remote archiving
     try:
@@ -150,6 +156,7 @@ def ingest_conversation(file_info: dict, collection, mira_path: Path = None, sto
     try:
         # Upsert session (uses central if available, falls back to local)
         # This returns the session ID needed for archive and artifact foreign keys
+        t0 = time.time()
         db_session_id = storage.upsert_session(
             project_path=project_path_normalized,
             session_id=session_id,
@@ -166,48 +173,56 @@ def ingest_conversation(file_info: dict, collection, mira_path: Path = None, sto
             started_at=metadata.get('started_at'),
             ended_at=metadata.get('last_modified'),
         )
+        t_session = (time.time() - t0) * 1000
 
         if db_session_id is None:
             log(f"[{short_id}] ERROR: Failed to create session")
             return False
 
         storage_mode = "central" if storage.using_central else "local"
-        log(f"[{short_id}] Session upserted ({storage_mode}, id={db_session_id})")
+        log(f"[{short_id}] Session upserted ({storage_mode}, id={db_session_id}) ({t_session:.0f}ms)")
 
         # Archive conversation (full JSONL content)
         try:
+            t0 = time.time()
             archive_id = storage.upsert_archive(
                 postgres_session_id=db_session_id,
                 content=file_content,
                 content_hash=content_hash,
             )
-            log(f"[{short_id}] Archived (archive_id={archive_id})")
+            t_archive = (time.time() - t0) * 1000
+            log(f"[{short_id}] Archived (archive_id={archive_id}) ({t_archive:.0f}ms)")
         except Exception as e:
             log(f"[{short_id}] Archive failed: {e}")
 
         # Extract artifacts with session ID for proper foreign keys
         try:
+            t0 = time.time()
             artifact_count = extract_artifacts_from_messages(
                 raw_messages, session_id,
                 postgres_session_id=db_session_id,
                 storage=storage
             )
+            t_artifacts = (time.time() - t0) * 1000
             if artifact_count > 0:
-                log(f"[{short_id}] Artifacts: {artifact_count}")
+                log(f"[{short_id}] Artifacts: {artifact_count} ({t_artifacts:.0f}ms, {artifact_count*1000/max(1,t_artifacts):.0f}/sec)")
         except Exception as e:
             log(f"[{short_id}] Artifacts failed: {e}")
 
         # Learn about the custodian from this conversation
         try:
+            t0 = time.time()
             custodian_result = extract_custodian_learnings(conversation, session_id)
             learned = custodian_result.get('learned', 0) if isinstance(custodian_result, dict) else 0
+            t_custodian = (time.time() - t0) * 1000
             if learned > 0:
-                log(f"[{short_id}] Custodian: {learned} learnings")
+                log(f"[{short_id}] Custodian: {learned} learnings ({t_custodian:.0f}ms)")
         except Exception as e:
             log(f"[{short_id}] Custodian failed: {e}")
 
         # Extract insights (errors, decisions) from this conversation
         try:
+            t0 = time.time()
             insights = extract_insights_from_conversation(
                 conversation, session_id,
                 project_path=project_path_normalized,
@@ -216,28 +231,32 @@ def ingest_conversation(file_info: dict, collection, mira_path: Path = None, sto
             )
             err_count = insights.get('errors_found', 0)
             dec_count = insights.get('decisions_found', 0)
+            t_insights = (time.time() - t0) * 1000
             if err_count > 0 or dec_count > 0:
-                log(f"[{short_id}] Insights: {err_count} errors, {dec_count} decisions")
+                log(f"[{short_id}] Insights: {err_count} errors, {dec_count} decisions ({t_insights:.0f}ms)")
         except Exception as e:
             log(f"[{short_id}] Insights failed: {e}")
 
         # Extract codebase concepts (central only - requires vector storage)
         if storage.using_central:
             try:
+                t0 = time.time()
                 concepts = extract_concepts_from_conversation(
                     conversation, session_id,
                     project_path=project_path_normalized,
                     storage=storage
                 )
                 concept_count = concepts.get('concepts_found', 0)
+                t_concepts = (time.time() - t0) * 1000
                 if concept_count > 0:
-                    log(f"[{short_id}] Concepts: {concept_count}")
+                    log(f"[{short_id}] Concepts: {concept_count} ({t_concepts:.0f}ms)")
             except Exception as e:
                 log(f"[{short_id}] Concepts failed: {e}")
 
         # Vector indexing (central only - local uses FTS instead)
         if storage.using_central:
             try:
+                t0 = time.time()
                 from .embedding import get_embedding_function
                 embed_fn = get_embedding_function()
                 doc_vector = embed_fn([doc_content])[0]
@@ -249,11 +268,13 @@ def ingest_conversation(file_info: dict, collection, mira_path: Path = None, sto
                     project_path=project_path_normalized,
                     chunk_type="session",
                 )
-                log(f"[{short_id}] Indexed to central storage")
+                t_vector = (time.time() - t0) * 1000
+                log(f"[{short_id}] Indexed to central storage ({t_vector:.0f}ms)")
             except Exception as e:
                 log(f"[{short_id}] Vector indexing failed: {e}")
 
-        log(f"[{short_id}] Ingestion complete ({storage_mode} mode)")
+        t_total = (time.time() - t_start) * 1000
+        log(f"[{short_id}] Ingestion complete ({storage_mode} mode) - TOTAL: {t_total:.0f}ms")
 
         # Audit log successful ingestion
         audit_log(
@@ -274,6 +295,128 @@ def ingest_conversation(file_info: dict, collection, mira_path: Path = None, sto
             resource_type="session",
             resource_id=session_id,
             parameters={"project_path": project_path_normalized},
+            status="failure",
+            error_message=str(e),
+        )
+        return False
+
+
+def sync_active_session(
+    file_path: str,
+    session_id: str,
+    project_path: str,
+    mira_path: Path = None,
+    storage=None
+) -> bool:
+    """
+    Sync the active session to remote storage.
+
+    This is a lightweight sync that updates the archive content and re-indexes
+    vectors without full re-extraction of metadata. Used by the active session
+    watcher for near real-time sync.
+
+    Args:
+        file_path: Full path to the session JSONL file
+        session_id: Session UUID
+        project_path: Project directory name
+        mira_path: Path to .mira directory
+        storage: Storage instance
+
+    Returns:
+        True if synced successfully, False if skipped or failed
+    """
+    if mira_path is None:
+        mira_path = get_mira_path()
+
+    if storage is None:
+        try:
+            from .storage import get_storage
+            storage = get_storage()
+        except ImportError:
+            log("[active-sync] Storage not available")
+            return False
+
+    # Only sync to central storage
+    if not storage.using_central:
+        return False
+
+    short_id = f"{session_id[:12]}"
+    file_path = Path(file_path)
+
+    try:
+        # Parse conversation
+        parsed = parse_conversation(file_path)
+        messages = parsed.get('messages', [])
+
+        if not messages:
+            return False
+
+        # Get file stats for archive
+        file_stat = file_path.stat()
+        file_size = file_stat.st_size
+
+        # Read raw content for archive
+        archive_content = file_path.read_text()
+        line_count = archive_content.count('\n')
+
+        # Check if session exists in central
+        if not storage.session_exists_in_central(session_id):
+            # Session doesn't exist yet - do full ingestion instead
+            log(f"[{short_id}] Session not in central, doing full ingest")
+            file_info = {
+                'session_id': session_id,
+                'file_path': str(file_path),
+                'project_path': project_path,
+                'last_modified': datetime.fromtimestamp(file_stat.st_mtime).isoformat()
+            }
+            return ingest_conversation(file_info, None, mira_path, storage)
+
+        # Update archive content in central storage
+        try:
+            storage.update_archive(
+                session_id=session_id,
+                content=archive_content,
+                size_bytes=file_size,
+                line_count=line_count
+            )
+            log(f"[{short_id}] Archive updated ({file_size} bytes)")
+        except Exception as e:
+            log(f"[{short_id}] Archive update failed: {e}")
+            # Continue anyway - archive update is not critical
+
+        # Re-extract and update metadata/keywords for better search
+        file_info = {'project_path': project_path}
+        raw_meta = extract_metadata(parsed, file_info)
+
+        # Update session metadata in central
+        try:
+            storage.update_session_metadata(
+                session_id=session_id,
+                summary=raw_meta.get('summary', ''),
+                keywords=raw_meta.get('keywords', []),
+            )
+        except Exception as e:
+            log(f"[{short_id}] Metadata update failed: {e}")
+
+        # Audit log
+        audit_log(
+            action="active_sync",
+            resource_type="session",
+            resource_id=session_id,
+            parameters={"project_path": project_path},
+            result_summary={"size_bytes": file_size, "line_count": line_count},
+            status="success",
+        )
+
+        return True
+
+    except Exception as e:
+        log(f"[{short_id}] Active sync failed: {e}")
+        audit_log(
+            action="active_sync",
+            resource_type="session",
+            resource_id=session_id,
+            parameters={"project_path": project_path},
             status="failure",
             error_message=str(e),
         )
@@ -326,7 +469,7 @@ def discover_conversations(claude_path: Path = None) -> list:
     return conversations
 
 
-def run_full_ingestion(collection, mira_path: Path = None, max_workers: int = 2, storage=None) -> dict:
+def run_full_ingestion(collection, mira_path: Path = None, max_workers: int = 4, storage=None) -> dict:
     """
     Run full ingestion of all discovered conversations.
 
@@ -336,7 +479,7 @@ def run_full_ingestion(collection, mira_path: Path = None, max_workers: int = 2,
     Args:
         collection: Deprecated - kept for API compatibility, ignored
         mira_path: Path to .mira directory
-        max_workers: Number of parallel ingestion threads (default: 2 to avoid pool exhaustion)
+        max_workers: Number of parallel ingestion threads (default: 4, pool_size=12)
         storage: Storage instance
 
     Returns stats dict with counts.
@@ -357,10 +500,15 @@ def run_full_ingestion(collection, mira_path: Path = None, max_workers: int = 2,
             return {'discovered': 0, 'ingested': 0, 'skipped': 0, 'failed': 0}
 
     storage_mode = "central" if storage.using_central else "local"
-    log(f"Running ingestion in {storage_mode} mode")
+    pool_size = storage.postgres.pool_size if storage.postgres else "N/A"
+    log(f"╔══════════════════════════════════════════════════════════════╗")
+    log(f"║ PARALLEL INGESTION: {max_workers} workers, pool_size={pool_size}, mode={storage_mode}")
+    log(f"╚══════════════════════════════════════════════════════════════╝")
 
+    t_discover_start = time.time()
     conversations = discover_conversations()
-    log(f"Discovered {len(conversations)} conversation files")
+    t_discover = (time.time() - t_discover_start) * 1000
+    log(f"Discovered {len(conversations)} conversation files ({t_discover:.0f}ms)")
 
     stats = {
         'discovered': len(conversations),
@@ -371,23 +519,38 @@ def run_full_ingestion(collection, mira_path: Path = None, max_workers: int = 2,
     stats_lock = threading.Lock()
 
     processed_count = [0]  # Use list to allow mutation in nested function
+    active_workers = [0]   # Track concurrent workers
+    max_concurrent = [0]   # Peak concurrency observed
+
+    t_ingestion_start = time.time()
 
     def ingest_one(file_info):
         """Ingest a single conversation and return result."""
+        worker_id = threading.current_thread().name
+        with stats_lock:
+            active_workers[0] += 1
+            if active_workers[0] > max_concurrent[0]:
+                max_concurrent[0] = active_workers[0]
         try:
             result = ingest_conversation(file_info, None, mira_path, storage)
-            processed_count[0] += 1
+            with stats_lock:
+                processed_count[0] += 1
+                cnt = processed_count[0]
             if result:
-                log(f"[{processed_count[0]}/{len(conversations)}] Ingested: {file_info['session_id'][:12]}...")
+                log(f"[{cnt}/{len(conversations)}] [{worker_id}] Ingested: {file_info['session_id'][:12]}...")
             return ('ingested' if result else 'skipped', file_info['session_id'])
         except Exception as e:
-            processed_count[0] += 1
-            log(f"[{processed_count[0]}/{len(conversations)}] Failed {file_info['session_id'][:12]}: {e}")
+            with stats_lock:
+                processed_count[0] += 1
+                cnt = processed_count[0]
+            log(f"[{cnt}/{len(conversations)}] [{worker_id}] Failed {file_info['session_id'][:12]}: {e}")
             return ('failed', file_info['session_id'])
+        finally:
+            with stats_lock:
+                active_workers[0] -= 1
 
     # Use thread pool for parallel ingestion
-    # Limit workers to avoid overwhelming Postgres
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+    with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="Ingest") as executor:
         futures = {executor.submit(ingest_one, fi): fi for fi in conversations}
 
         for future in as_completed(futures):
@@ -395,5 +558,13 @@ def run_full_ingestion(collection, mira_path: Path = None, max_workers: int = 2,
             with stats_lock:
                 stats[result_type] += 1
 
-    log(f"Ingestion complete: {stats['ingested']} new, {stats['skipped']} skipped, {stats['failed']} failed")
+    t_total = (time.time() - t_ingestion_start) * 1000
+    rate = stats['ingested'] * 1000 / max(1, t_total) * 60  # sessions per minute
+
+    log(f"╔══════════════════════════════════════════════════════════════╗")
+    log(f"║ INGESTION COMPLETE")
+    log(f"║   New: {stats['ingested']}, Skipped: {stats['skipped']}, Failed: {stats['failed']}")
+    log(f"║   Time: {t_total:.0f}ms, Rate: {rate:.1f} sessions/min")
+    log(f"║   Peak concurrency: {max_concurrent[0]} workers")
+    log(f"╚══════════════════════════════════════════════════════════════╝")
     return stats

@@ -21,10 +21,15 @@ from .artifacts import search_artifacts_for_query
 
 def handle_search(params: dict, collection, storage=None) -> dict:
     """
-    Search conversations.
+    Search conversations with tiered/layered search strategy.
 
-    Central mode: Hybrid vector + FTS search with parallel queries
-    Local mode: FTS-only keyword search
+    Search tiers (in order, falls through if no results):
+    1. Central hybrid (vector + metadata FTS) - semantic understanding
+    2. Archive FTS - raw content search in conversation archives
+    3. Artifact search - code blocks, lists, tables, etc.
+    4. Local FTS fallback - if central unavailable
+
+    Always attempts to return results by trying each tier.
 
     Args:
         params: Search parameters (query, limit, project_path)
@@ -32,7 +37,7 @@ def handle_search(params: dict, collection, storage=None) -> dict:
         storage: Storage instance
 
     Returns:
-        Dict with results, total, and optional artifacts
+        Dict with results, total, artifacts, and search_type
     """
     query = params.get("query", "")
     limit = params.get("limit", 10)
@@ -51,65 +56,156 @@ def handle_search(params: dict, collection, storage=None) -> dict:
             log("ERROR: Storage not available")
             return {"results": [], "total": 0, "error": "Storage not available"}
 
-    # Central storage: hybrid vector + FTS search
+    results = []
+    search_type = "none"
+    artifact_results = []
+    searched_global = False  # Track if we've expanded beyond project
+
+    # Always search artifacts (fast, runs in parallel conceptually)
+    try:
+        artifact_results = search_artifacts_for_query(query, limit=5) or []
+    except Exception as e:
+        log(f"Artifact search failed: {e}")
+
+    # PROJECT-FIRST SEARCH STRATEGY:
+    # 1. First search within project_path if provided
+    # 2. If no results, expand search to all projects
+
+    # TIER 1: Central hybrid search (vector + metadata FTS) - project first
     if storage.using_central:
         try:
+            # First: search within project only
             central_results = _search_central_parallel(
                 storage, query, project_path, limit
             )
+            if central_results:
+                enriched = enrich_results_from_archives(central_results, query, mira_path, storage)
+                results = enriched
+                search_type = "central_hybrid"
 
-            # Enrich with archive excerpts
-            enriched = enrich_results_from_archives(central_results, query, mira_path, storage)
-            artifact_results = search_artifacts_for_query(query, limit=5)
-
-            return {
-                "results": enriched,
-                "total": len(enriched),
-                "search_type": "central_hybrid",
-                "artifacts": artifact_results if artifact_results else []
-            }
+            # If no results and we had a project filter, try global
+            if not results and project_path:
+                log(f"No results in project, expanding search globally")
+                central_results = _search_central_parallel(
+                    storage, query, None, limit  # No project filter
+                )
+                if central_results:
+                    enriched = enrich_results_from_archives(central_results, query, mira_path, storage)
+                    results = enriched
+                    search_type = "central_hybrid_global"
+                    searched_global = True
         except Exception as e:
-            log(f"Central search failed: {e}")
-            # Fall through to local FTS
+            log(f"Central hybrid search failed: {e}")
 
-    # Local fallback: FTS-only search
-    try:
-        fts_results = storage.search_sessions_fts(query, project_path, limit)
+    # TIER 2: Archive FTS (raw content search) - project first, then global
+    if not results and storage.using_central:
+        try:
+            # First: search within project only
+            archive_results = storage.search_archives_fts(query, project_path=project_path, limit=limit)
 
-        # Format results for consistency
-        results = []
-        for r in fts_results:
-            results.append({
-                "session_id": r.get("session_id", ""),
-                "summary": r.get("summary", ""),
-                "keywords": r.get("keywords", []) if isinstance(r.get("keywords"), list) else [],
-                "relevance": r.get("rank", 0.5),
-                "timestamp": r.get("started_at", ""),
-                "project_path": r.get("project_path", ""),
-                "search_source": "local_fts"
-            })
+            # If no results and we had a project filter, try global
+            if not archive_results and project_path and not searched_global:
+                log(f"No archive results in project, expanding search globally")
+                archive_results = storage.search_archives_fts(query, project_path=None, limit=limit)
+                searched_global = True
 
-        # Try to enrich with archive excerpts
-        enriched = enrich_results_from_archives(results, query, mira_path, storage)
-        artifact_results = search_artifacts_for_query(query, limit=5)
+            if archive_results:
+                # Format archive results
+                for r in archive_results:
+                    # Extract excerpts from content
+                    content = r.get("content", "")
+                    excerpts = _extract_excerpts(content, query, max_excerpts=3)
+                    # Convert rank to float (Postgres returns Decimal)
+                    rank = r.get("rank", 0.5)
+                    if hasattr(rank, '__float__'):
+                        rank = float(rank)
+                    results.append({
+                        "session_id": r.get("session_id", ""),
+                        "summary": r.get("summary", ""),
+                        "project_path": r.get("project_path", ""),
+                        "excerpts": excerpts,
+                        "relevance": rank,
+                        "search_source": "archive_fts" + ("_global" if searched_global else "")
+                    })
+                search_type = "archive_fts" + ("_global" if searched_global else "")
+        except Exception as e:
+            log(f"Archive FTS search failed: {e}")
 
-        return {
-            "results": enriched,
-            "total": len(enriched),
-            "search_type": "local_fts",
-            "artifacts": artifact_results if artifact_results else []
-        }
-    except Exception as e:
-        log(f"Local FTS search failed: {e}")
-        # Last resort: fulltext archive search
-        fallback_results = fulltext_search_archives(query, limit, mira_path, storage)
-        artifact_results = search_artifacts_for_query(query, limit=5)
-        return {
-            "results": fallback_results,
-            "total": len(fallback_results),
-            "search_type": "fulltext_fallback",
-            "artifacts": artifact_results if artifact_results else []
-        }
+    # TIER 3: Local FTS fallback (if central unavailable or no results)
+    if not results:
+        try:
+            fts_results = storage.search_sessions_fts(query, project_path, limit)
+            if fts_results:
+                for r in fts_results:
+                    results.append({
+                        "session_id": r.get("session_id", ""),
+                        "summary": r.get("summary", ""),
+                        "keywords": r.get("keywords", []) if isinstance(r.get("keywords"), list) else [],
+                        "relevance": r.get("rank", 0.5),
+                        "timestamp": r.get("started_at", ""),
+                        "project_path": r.get("project_path", ""),
+                        "search_source": "local_fts"
+                    })
+                enriched = enrich_results_from_archives(results, query, mira_path, storage)
+                results = enriched
+                search_type = "local_fts"
+        except Exception as e:
+            log(f"Local FTS search failed: {e}")
+
+    # TIER 4: Fulltext archive search (last resort)
+    if not results:
+        try:
+            fallback_results = fulltext_search_archives(query, limit, mira_path, storage)
+            if fallback_results:
+                results = fallback_results
+                search_type = "fulltext_fallback"
+        except Exception as e:
+            log(f"Fulltext fallback failed: {e}")
+
+    return {
+        "results": results,
+        "total": len(results),
+        "search_type": search_type,
+        "artifacts": artifact_results
+    }
+
+
+def _extract_excerpts(content: str, query: str, max_excerpts: int = 3) -> List[str]:
+    """Extract relevant excerpts from content around query matches."""
+    if not content or not query:
+        return []
+
+    excerpts = []
+    query_lower = query.lower()
+    content_lower = content.lower()
+
+    # Find all occurrences
+    start = 0
+    while len(excerpts) < max_excerpts:
+        idx = content_lower.find(query_lower, start)
+        if idx == -1:
+            break
+
+        # Extract context around match
+        excerpt_start = max(0, idx - 100)
+        excerpt_end = min(len(content), idx + len(query) + 100)
+
+        # Try to break at word boundaries
+        if excerpt_start > 0:
+            space_idx = content.rfind(' ', excerpt_start, idx)
+            if space_idx > excerpt_start:
+                excerpt_start = space_idx + 1
+
+        excerpt = content[excerpt_start:excerpt_end].strip()
+        if excerpt_start > 0:
+            excerpt = "..." + excerpt
+        if excerpt_end < len(content):
+            excerpt = excerpt + "..."
+
+        excerpts.append(excerpt)
+        start = idx + len(query)
+
+    return excerpts
 
 
 def _search_central_parallel(

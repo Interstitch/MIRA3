@@ -89,6 +89,15 @@ def run_backend():
     )
     watcher_thread.start()
 
+    # Start sync worker - flushes local queue to central storage
+    sync_worker = None
+    try:
+        from .sync_worker import start_sync_worker
+        sync_worker = start_sync_worker(storage)
+        log("Sync worker started")
+    except Exception as e:
+        log(f"Failed to start sync worker: {e}")
+
     # Main JSON-RPC loop
     for line in sys.stdin:
         line = line.strip()
@@ -103,6 +112,8 @@ def run_backend():
 
             # Handle shutdown
             if request.get("method") == "shutdown":
+                if sync_worker:
+                    sync_worker.stop()
                 storage.close()
                 break
 
