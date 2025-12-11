@@ -510,13 +510,14 @@ class PostgresBackend:
                 t_prep = (time.time() - t_prep_start) * 1000 - t_conn
 
                 # Batch insert with ON CONFLICT to skip duplicates
+                # Uses unique constraint on (session_id, artifact_type, md5(content))
                 t_exec_start = time.time()
                 pg["extras"].execute_values(
                     cur,
                     """
                     INSERT INTO artifacts (session_id, artifact_type, content, language, line_count, metadata)
                     VALUES %s
-                    ON CONFLICT DO NOTHING
+                    ON CONFLICT (session_id, artifact_type, md5(content)) DO NOTHING
                     """,
                     values,
                     page_size=100  # Insert 100 rows per round-trip
@@ -861,13 +862,16 @@ class PostgresBackend:
         session_id: Optional[int] = None,
         confidence: float = 0.5,
     ) -> int:
-        """Insert a decision. Returns decision ID."""
+        """Insert a decision. Returns decision ID, or existing ID if duplicate."""
         with self._get_connection() as conn:
             with conn.cursor() as cur:
+                # Use ON CONFLICT with unique constraint on (session_id, md5(decision))
                 cur.execute(
                     """
                     INSERT INTO decisions (project_id, session_id, category, decision, reasoning, alternatives, confidence)
                     VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (session_id, md5(decision)) DO UPDATE SET
+                        confidence = GREATEST(decisions.confidence, EXCLUDED.confidence)
                     RETURNING id
                     """,
                     (project_id, session_id, category, decision, reasoning, alternatives or [], confidence)

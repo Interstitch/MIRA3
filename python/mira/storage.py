@@ -91,6 +91,17 @@ class Storage:
             if self._qdrant.is_healthy() and self._postgres.is_healthy():
                 self._using_central = True
                 log.info("Central storage initialized successfully")
+
+                # Run Postgres schema migrations
+                try:
+                    from .migrations import run_postgres_migrations
+                    migration_result = run_postgres_migrations(self._postgres)
+                    if migration_result.get("migrations_run"):
+                        for m in migration_result["migrations_run"]:
+                            log.info(f"Postgres migration: {m['name']}")
+                except Exception as e:
+                    log.error(f"Postgres migration error: {e}")
+
                 return True
             else:
                 log.error("Central storage health check failed")

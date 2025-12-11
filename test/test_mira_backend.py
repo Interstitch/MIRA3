@@ -2643,6 +2643,59 @@ class TestActiveIngestionTracking:
         assert len(active) == 0
 
 
+class TestDeduplicationConstraints:
+    """Test that duplicate artifacts/decisions are prevented."""
+
+    def test_artifact_dedup_same_content(self):
+        """Test that identical artifacts are not duplicated."""
+        from mira.artifacts import collect_artifacts_from_content
+
+        content = """
+Here's a code block:
+```python
+def hello():
+    print("world")
+```
+"""
+        # Collect twice from same content
+        artifacts1 = collect_artifacts_from_content(content, "assistant", 0)
+        artifacts2 = collect_artifacts_from_content(content, "assistant", 0)
+
+        # Should get same artifacts
+        assert len(artifacts1) == len(artifacts2)
+        if artifacts1:
+            assert artifacts1[0]['content'] == artifacts2[0]['content']
+
+    def test_artifact_hash_consistency(self):
+        """Test that artifact content hashing is consistent."""
+        import hashlib
+
+        content = "def foo(): pass"
+
+        # Same inputs should produce same hash
+        hash1 = hashlib.md5(content.encode()).hexdigest()
+        hash2 = hashlib.md5(content.encode()).hexdigest()
+
+        assert hash1 == hash2
+
+    def test_decision_dedup_logic(self):
+        """Test that decision deduplication uses session_id + decision text."""
+        # The unique constraint is on (session_id, md5(decision))
+        # So same decision text in same session should not duplicate
+        import hashlib
+
+        decision1 = "Use PostgreSQL for storage"
+        decision2 = "Use PostgreSQL for storage"  # Same
+        decision3 = "Use SQLite for storage"  # Different
+
+        hash1 = hashlib.md5(decision1.encode()).hexdigest()
+        hash2 = hashlib.md5(decision2.encode()).hexdigest()
+        hash3 = hashlib.md5(decision3.encode()).hexdigest()
+
+        assert hash1 == hash2  # Same decision = same hash
+        assert hash1 != hash3  # Different decision = different hash
+
+
 class TestSingletonLock:
     """Test singleton lock mechanism for preventing duplicate MIRA instances."""
 

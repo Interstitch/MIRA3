@@ -353,6 +353,54 @@ def run_postgres_migrations(postgres_backend) -> Dict[str, Any]:
                     results["migrations_run"].append({"version": 2, "name": "add_file_operations"})
                     pg_version = 2
 
+                # Postgres migration v3: Add unique constraints and dedupe artifacts/decisions
+                if pg_version < 3:
+                    log("Postgres migration v3: Adding unique constraints and deduping")
+
+                    # First, dedupe artifacts - keep the oldest record of each duplicate
+                    cur.execute("""
+                        DELETE FROM artifacts a
+                        USING artifacts b
+                        WHERE a.id > b.id
+                          AND a.session_id = b.session_id
+                          AND a.artifact_type = b.artifact_type
+                          AND a.content = b.content
+                    """)
+                    artifact_deleted = cur.rowcount
+                    log(f"  Deleted {artifact_deleted} duplicate artifacts")
+
+                    # Add unique constraint to artifacts
+                    cur.execute("""
+                        ALTER TABLE artifacts
+                        ADD CONSTRAINT artifacts_session_type_content_key
+                        UNIQUE (session_id, artifact_type, md5(content))
+                    """)
+                    log("  Added unique constraint to artifacts")
+
+                    # Dedupe decisions - keep the oldest record of each duplicate
+                    cur.execute("""
+                        DELETE FROM decisions a
+                        USING decisions b
+                        WHERE a.id > b.id
+                          AND a.session_id = b.session_id
+                          AND a.decision = b.decision
+                    """)
+                    decision_deleted = cur.rowcount
+                    log(f"  Deleted {decision_deleted} duplicate decisions")
+
+                    # Add unique constraint to decisions
+                    cur.execute("""
+                        ALTER TABLE decisions
+                        ADD CONSTRAINT decisions_session_decision_key
+                        UNIQUE (session_id, md5(decision))
+                    """)
+                    log("  Added unique constraint to decisions")
+
+                    cur.execute("INSERT INTO schema_version (version, description) VALUES (3, 'Add unique constraints, dedupe artifacts/decisions')")
+                    conn.commit()
+                    results["migrations_run"].append({"version": 3, "name": "dedupe_and_constraints"})
+                    pg_version = 3
+
                 results["current_version"] = pg_version
 
     except Exception as e:
