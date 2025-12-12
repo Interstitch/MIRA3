@@ -97,8 +97,10 @@ def handle_search(params: dict, collection, storage=None) -> dict:
         except Exception as e:
             log(f"Central hybrid search failed: {e}")
 
-    # TIER 2: Archive FTS (raw content search) - project first, then global
-    if not results and storage.using_central:
+    # TIER 2: Archive FTS (raw content search) - ALWAYS run for exact matches
+    # Run regardless of vector results to find exact keyword matches in archive content
+    archive_fts_results = []
+    if storage.using_central:
         try:
             # First: search within project only
             archive_results = storage.search_archives_fts(query, project_path=project_path, limit=limit)
@@ -119,7 +121,7 @@ def handle_search(params: dict, collection, storage=None) -> dict:
                     rank = r.get("rank", 0.5)
                     if hasattr(rank, '__float__'):
                         rank = float(rank)
-                    results.append({
+                    archive_fts_results.append({
                         "session_id": r.get("session_id", ""),
                         "summary": r.get("summary", ""),
                         "project_path": r.get("project_path", ""),
@@ -127,9 +129,34 @@ def handle_search(params: dict, collection, storage=None) -> dict:
                         "relevance": rank,
                         "search_source": "archive_fts" + ("_global" if searched_global else "")
                     })
-                search_type = "archive_fts" + ("_global" if searched_global else "")
         except Exception as e:
             log(f"Archive FTS search failed: {e}")
+
+    # Merge vector results with archive FTS results
+    # Archive FTS results (exact matches) are prioritized and merged with vector results
+    if archive_fts_results:
+        # Get session IDs already in results from vector search
+        existing_session_ids = {r.get("session_id") for r in results}
+
+        # Add archive FTS results that aren't already in vector results
+        # These go first since they're exact matches
+        new_results = []
+        for ar in archive_fts_results:
+            session_id = ar.get("session_id")
+            if session_id not in existing_session_ids:
+                new_results.append(ar)
+            else:
+                # Update existing result with excerpts from archive FTS
+                for r in results:
+                    if r.get("session_id") == session_id:
+                        r["excerpts"] = ar.get("excerpts", [])
+                        r["has_archive_matches"] = True
+                        break
+
+        # Prepend new archive FTS results (exact matches first)
+        results = new_results + results
+        if new_results:
+            search_type = "combined" if search_type != "none" else "archive_fts"
 
     # TIER 3: Local FTS fallback (if central unavailable or no results)
     if not results:

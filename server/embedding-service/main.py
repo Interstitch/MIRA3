@@ -301,9 +301,15 @@ def index_session(row: dict) -> bool:
     """Index a single session to Qdrant. Returns True on success."""
     try:
         # Get text to embed (prefer archive content, fall back to summary)
+        # For archives, use LAST 8KB (recent messages) + summary for context
         text = ""
         if row.get('content'):
-            text = row['content'][:8000]
+            content = row['content']
+            # Use last 8KB of content (recent messages are more relevant)
+            # Prepend summary for context
+            summary = row.get('summary', '') or ''
+            recent_content = content[-7500:] if len(content) > 7500 else content
+            text = f"{summary}\n\n{recent_content}"
         elif row.get('summary'):
             text = row['summary']
 
