@@ -45,7 +45,7 @@ Set these values:
 
 ```bash
 POSTGRES_PASSWORD=your_secure_password_here
-BIND_IP=192.168.1.100  # Your server's IP address
+SERVER_IP=192.168.1.100  # Your server's IP address
 ```
 
 ### Step 3: Start
@@ -190,7 +190,7 @@ free -h
 ### Can't connect from client
 
 1. Check firewall allows ports 5432, 6333, 8200
-2. Verify `BIND_IP` in `.env` matches your server's IP
+2. Verify `SERVER_IP` in `.env` matches your server's IP
 3. Test connectivity: `curl http://YOUR_SERVER_IP:8200/health`
 
 ### Reset everything

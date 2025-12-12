@@ -8,8 +8,8 @@ services:
     container_name: qdrant
     restart: unless-stopped
     ports:
-      - "${BIND_IP:-127.0.0.1}:6333:6333"
-      - "${BIND_IP:-127.0.0.1}:6334:6334"
+      - "${SERVER_IP:-127.0.0.1}:6333:6333"
+      - "${SERVER_IP:-127.0.0.1}:6334:6334"
     volumes:
       - ${DATA_DIR:-/opt/mira}/qdrant/storage:/qdrant/storage
       - ${DATA_DIR:-/opt/mira}/qdrant/snapshots:/qdrant/snapshots
@@ -21,7 +21,7 @@ services:
     container_name: postgres
     restart: unless-stopped
     ports:
-      - "${BIND_IP:-127.0.0.1}:5432:5432"
+      - "${SERVER_IP:-127.0.0.1}:5432:5432"
     volumes:
       - ${DATA_DIR:-/opt/mira}/postgres/data:/var/lib/postgresql/data
       - ${DATA_DIR:-/opt/mira}/postgres/backups:/backups
@@ -45,7 +45,7 @@ services:
     container_name: embedding-service
     restart: unless-stopped
     ports:
-      - "${BIND_IP:-127.0.0.1}:8200:8200"
+      - "${SERVER_IP:-127.0.0.1}:8200:8200"
     environment:
       - QDRANT_HOST=qdrant
       - QDRANT_PORT=6333

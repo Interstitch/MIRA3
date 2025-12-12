@@ -66,7 +66,7 @@ else
     fi
 
     # Update .env
-    sed -i "s/BIND_IP=.*/BIND_IP=$SERVER_IP/" .env
+    sed -i "s/SERVER_IP=.*/SERVER_IP=$SERVER_IP/" .env
     sed -i "s/POSTGRES_PASSWORD=.*/POSTGRES_PASSWORD=$PG_PASSWORD/" .env
 
     echo ""
