@@ -283,13 +283,43 @@ class SyncWorker:
             return False
 
         try:
-            # Need to find the central session ID from the local session ID
-            # For now, we'll store using the session_db_id which should be looked up
-            self.storage.postgres.upsert_archive(
-                session_id=payload.get("session_db_id"),
-                content=payload.get("content"),
-                content_hash=payload.get("content_hash"),
-            )
+            import hashlib
+            session_id = payload.get("session_id")  # UUID
+            content = payload.get("content")
+            content_hash = payload.get("content_hash") or hashlib.sha256(content.encode()).hexdigest()
+
+            if not session_id:
+                raise ValueError("No session_id in archive payload")
+
+            # Look up the central session ID by UUID
+            with self.storage.postgres._get_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT id FROM sessions WHERE session_id = %s",
+                        (session_id,)
+                    )
+                    row = cur.fetchone()
+                    if not row:
+                        return False  # Session not synced yet, will retry
+
+                    postgres_session_id = row[0]
+
+                    # Insert/update archive with the correct remote session ID
+                    cur.execute(
+                        """
+                        INSERT INTO archives (session_id, content, content_hash, size_bytes, line_count)
+                        VALUES (%s, %s, %s, %s, %s)
+                        ON CONFLICT (session_id) DO UPDATE SET
+                            content = EXCLUDED.content,
+                            content_hash = EXCLUDED.content_hash,
+                            size_bytes = EXCLUDED.size_bytes,
+                            line_count = EXCLUDED.line_count,
+                            updated_at = NOW()
+                        """,
+                        (postgres_session_id, content, content_hash,
+                         len(content.encode('utf-8')), content.count('\n'))
+                    )
+                    conn.commit()
             return True
         except Exception as e:
             if 'duplicate' in str(e).lower() or 'unique' in str(e).lower():

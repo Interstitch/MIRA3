@@ -246,6 +246,7 @@ def ingest_conversation(file_info: dict, collection, mira_path: Path = None, sto
                 postgres_session_id=db_session_id,
                 content=file_content,
                 content_hash=content_hash,
+                session_id=session_id,  # UUID for central sync lookup
             )
             t_archive = (time.time() - t0) * 1000
             log(f"[{short_id}] Archived (archive_id={archive_id}) ({t_archive:.0f}ms)")

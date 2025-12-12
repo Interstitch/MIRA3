@@ -612,11 +612,18 @@ class Storage:
         postgres_session_id: int,
         content: str,
         content_hash: str,
+        session_id: Optional[str] = None,
     ) -> Optional[int]:
         """
         Store or update a conversation archive - LOCAL-FIRST.
 
         Always writes to local SQLite, queues for central sync.
+
+        Args:
+            postgres_session_id: Local integer session ID
+            content: Full conversation content
+            content_hash: SHA256 hash of content
+            session_id: UUID session identifier (required for central sync)
         """
         # Always write to local first
         try:
@@ -626,9 +633,9 @@ class Storage:
                 content_hash=content_hash,
             )
 
-            # Queue for central sync (archive content is large, use hash as reference)
+            # Queue for central sync (need UUID to look up remote session ID)
             self._queue_for_sync("archive", content_hash[:16], {
-                "session_db_id": postgres_session_id,
+                "session_id": session_id,  # UUID for remote lookup
                 "content": content,
                 "content_hash": content_hash,
             })
