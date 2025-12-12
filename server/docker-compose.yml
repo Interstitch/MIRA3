@@ -18,7 +18,7 @@ services:
       - QDRANT__LOG_LEVEL=${QDRANT_LOG_LEVEL:-INFO}
 
   postgres:
-    image: postgres:16
+    image: postgres:17
     container_name: postgres
     restart: unless-stopped
     ports:
@@ -28,7 +28,7 @@ services:
       - ${DATA_DIR:-/opt/mira}/postgres/backups:/backups
     environment:
       - POSTGRES_USER=${POSTGRES_USER:-mira}
-      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_PASSWORD
       - POSTGRES_DB=${POSTGRES_DB:-mira}
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-mira} -d ${POSTGRES_DB:-mira}"]
@@ -50,13 +50,13 @@ services:
     environment:
       - QDRANT_HOST=qdrant
       - QDRANT_PORT=6333
-      - QDRANT_API_KEY=${QDRANT_API_KEY}
+      - QDRANT_API_KEY
       - QDRANT_COLLECTION=${QDRANT_COLLECTION:-mira_sessions}
       - POSTGRES_HOST=postgres
       - POSTGRES_PORT=5432
       - POSTGRES_DB=${POSTGRES_DB:-mira}
       - POSTGRES_USER=${POSTGRES_USER:-mira}
-      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_PASSWORD
       - MODEL_NAME=${MODEL_NAME:-all-MiniLM-L6-v2}
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
     depends_on:
