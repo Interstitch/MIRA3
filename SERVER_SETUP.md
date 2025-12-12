@@ -47,7 +47,7 @@ mkdir -p /opt/mira && cd /opt/mira
 curl -O https://raw.githubusercontent.com/Interstitch/MIRA3/master/server/docker-compose.yml
 curl -O https://raw.githubusercontent.com/Interstitch/MIRA3/master/server/.env.example
 cp .env.example .env
-nano .env  # Set POSTGRES_PASSWORD and TAILSCALE_IP
+nano .env  # Set POSTGRES_PASSWORD and BIND_IP
 docker compose up -d
 ```
 
@@ -97,7 +97,7 @@ chmod 600 ~/.mira/server.json
 
 **Can't connect from client?**
 - Check firewall allows ports 5432, 6333, 8200
-- Verify the IP in `.env` matches your server's actual IP
+- Verify `BIND_IP` in `.env` matches your server's actual IP
 - Test: `curl http://YOUR_SERVER_IP:8200/health`
 
 **Services won't start?**

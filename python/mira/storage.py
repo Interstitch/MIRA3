@@ -825,9 +825,9 @@ class Storage:
                         "version": 1,
                         "central": {
                             "enabled": True,
-                            "qdrant": {"host": "YOUR_TAILSCALE_IP", "port": 6333},
+                            "qdrant": {"host": "YOUR_SERVER_IP", "port": 6333},
                             "postgres": {
-                                "host": "YOUR_TAILSCALE_IP",
+                                "host": "YOUR_SERVER_IP",
                                 "port": 5432,
                                 "database": "mira",
                                 "user": "mira",
