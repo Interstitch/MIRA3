@@ -361,13 +361,13 @@ def poll_and_index():
             # - Archive updated after vector_indexed_at
             cur.execute("""
                 SELECT s.id, s.session_id, s.project_id, s.summary, s.keywords,
-                       p.path as project_path, a.content, a.updated_at as archive_updated
+                       p.project_path, a.content, a.updated_at as archive_updated
                 FROM sessions s
                 JOIN projects p ON s.project_id = p.id
-                LEFT JOIN archives a ON s.id = a.session_id
+                LEFT JOIN archives a ON s.session_id = a.session_id
                 WHERE s.vector_indexed_at IS NULL
                    OR (a.updated_at IS NOT NULL AND a.updated_at > s.vector_indexed_at)
-                ORDER BY s.created_at DESC
+                ORDER BY s.indexed_at DESC
                 LIMIT %s
             """, (BATCH_SIZE,))
 
