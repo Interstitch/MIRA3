@@ -16,7 +16,7 @@ on:
     types: [published]
 
 env:
-  IMAGE_NAME: interstitch/mira-server
+  IMAGE_NAME: drxelanull/mira-server
 
 jobs:
   build-and-push:

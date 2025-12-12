@@ -41,7 +41,7 @@ services:
   # ===========================================
 
   embedding-service:
-    image: interstitch/mira-server:latest
+    image: drxelanull/mira-server:latest
     container_name: embedding-service
     restart: unless-stopped
     ports:
