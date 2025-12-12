@@ -416,13 +416,29 @@ def index_session(row: dict) -> bool:
                 )
             )
 
+        # Delete existing vectors for this session before inserting new ones
+        # This ensures we don't accumulate stale vectors from previous indexing runs
+        qdrant.delete(
+            collection_name=QDRANT_COLLECTION,
+            points_selector=qdrant_models.FilterSelector(
+                filter=qdrant_models.Filter(
+                    must=[
+                        qdrant_models.FieldCondition(
+                            key="session_id",
+                            match=qdrant_models.MatchValue(value=session_id)
+                        )
+                    ]
+                )
+            )
+        )
+
         # Batch upsert all chunks
         qdrant.upsert(
             collection_name=QDRANT_COLLECTION,
             points=points
         )
 
-        logger.info(f"Indexed {session_id[:12]}: {len(points)} vectors")
+        logger.info(f"Indexed {session_id[:12]}: {len(points)} vectors (old deleted)")
         return True
 
     except Exception as e:
