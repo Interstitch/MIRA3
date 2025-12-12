@@ -64,7 +64,7 @@ curl http://localhost:6333/collections        # Qdrant
 curl http://localhost:8200/health             # Embedding service
 ```
 
-### 5. Configure your MIRA clients
+## Configure MIRA Clients
 
 On each machine where you use MIRA, create `~/.mira/server.json`:
 
