@@ -404,7 +404,20 @@ class SyncWorker:
 
         try:
             # Look up central session ID from session_uuid
-            session_uuid = payload.get("session_id")  # This is the UUID string
+            # Support both new format (_local_session_id=UUID) and old format (session_id=int)
+            session_uuid = payload.get("_local_session_id")
+            if not session_uuid:
+                # Fallback: look up UUID from local session_id (int)
+                local_session_id = payload.get("session_id")
+                if local_session_id and isinstance(local_session_id, int):
+                    from .local_store import local_store
+                    rows = local_store.execute_read(
+                        "SELECT session_id FROM sessions WHERE id = ?",
+                        (local_session_id,)
+                    )
+                    if rows:
+                        session_uuid = rows[0]["session_id"]
+
             if not session_uuid:
                 return False
 
@@ -556,11 +569,38 @@ class SyncWorker:
 
         try:
             # Look up all session mappings in one query
+            # Support both new format (_local_session_id=UUID) and old format (session_id=int)
             session_uuids = list(set(
                 item["payload"].get("_local_session_id")
                 for item in items
                 if item["payload"].get("_local_session_id")
             ))
+
+            # Fallback: if no UUIDs, try to look up from local session_id (int)
+            if not session_uuids:
+                local_session_ids = list(set(
+                    item["payload"].get("session_id")
+                    for item in items
+                    if item["payload"].get("session_id") and isinstance(item["payload"].get("session_id"), int)
+                ))
+                if local_session_ids:
+                    # Look up UUIDs from local database
+                    from .local_store import local_store
+                    uuid_map = {}  # local_id -> uuid
+                    for local_id in local_session_ids:
+                        rows = local_store.execute_read(
+                            "SELECT session_id FROM sessions WHERE id = ?",
+                            (local_id,)
+                        )
+                        if rows:
+                            uuid_map[local_id] = rows[0]["session_id"]
+                    # Update items with UUIDs
+                    for item in items:
+                        local_id = item["payload"].get("session_id")
+                        if local_id in uuid_map:
+                            item["payload"]["_local_session_id"] = uuid_map[local_id]
+                            session_uuids.append(uuid_map[local_id])
+                    session_uuids = list(set(session_uuids))
 
             if not session_uuids:
                 self.queue.mark_failed(item_ids, "No session IDs")
