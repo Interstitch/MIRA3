@@ -131,6 +131,10 @@ def handle_init(params: dict, collection, storage=None) -> dict:
     # Get artifact stats
     artifact_stats = get_artifact_stats()
 
+    # Get insights stats for guidance (decision count for triggers)
+    decision_stats = get_decision_stats()
+    decision_count = decision_stats.get('total', 0)
+
     # Calculate storage sizes (simplified)
     storage_stats = _get_simplified_storage_stats(mira_path)
 
@@ -228,7 +232,8 @@ def handle_init(params: dict, collection, storage=None) -> dict:
     # Build guidance for Claude on how to use this context
     guidance = _build_claude_guidance(
         custodian_data, alerts, work_context,
-        artifact_total=artifact_total, error_count=error_count
+        artifact_total=artifact_total, error_count=error_count,
+        decision_count=decision_count
     )
 
     # Get storage mode information
@@ -313,18 +318,143 @@ def handle_init(params: dict, collection, storage=None) -> dict:
 
 def _build_claude_guidance(
     custodian: dict, alerts: list, work_context: dict,
-    artifact_total: int = 0, error_count: int = 0
+    artifact_total: int = 0, error_count: int = 0, decision_count: int = 0
 ) -> dict:
     """
     Build actionable guidance for Claude on how to use the MIRA context.
 
     This tells a future Claude session exactly what to DO with the information,
     not just what the information IS.
+
+    Includes:
+    - mira_usage_triggers: When Claude should pause and consult MIRA
+    - tool_quick_reference: Syntax and examples for each MIRA tool
+    - actions: Specific behavioral guidance for this session
     """
     guidance = {
-        "how_to_use_this": "This context is from past sessions. Use it to personalize your approach.",
+        "how_to_use_this": "This context is from past sessions. Use it to personalize your approach and CONSULT MIRA before reinventing solutions.",
+        "mira_usage_triggers": [],
+        "tool_quick_reference": {},
         "actions": []
     }
+
+    # === BUILD USAGE TRIGGERS ===
+    # These tell Claude WHEN to pause and consult MIRA
+    triggers = []
+
+    # Critical triggers - always include
+    triggers.append({
+        "situation": "Encountering an error, exception, or unexpected failure",
+        "action": "BEFORE attempting to debug, call mira_error_lookup(query='<error message>')",
+        "reason": f"Past solutions exist for {error_count} resolved errors - avoid duplicate debugging work" if error_count > 0 else "Past solutions may exist - check before debugging from scratch",
+        "priority": "critical"
+    })
+
+    triggers.append({
+        "situation": "User asks about unfamiliar system, process, or code area",
+        "action": "PAUSE and call mira_search(query='<topic>') before exploring codebase",
+        "reason": f"{artifact_total} artifacts from past sessions may document this - check memory first" if artifact_total > 0 else "Past sessions may document this - check memory before investigation",
+        "priority": "critical"
+    })
+
+    triggers.append({
+        "situation": "Making architectural, technology, or design decisions",
+        "action": "Call mira_decisions(query='<decision topic>') to check precedents",
+        "reason": f"{decision_count} past decisions with reasoning are logged - maintain project consistency" if decision_count > 0 else "Past decisions may be logged - check for precedents",
+        "priority": "critical"
+    })
+
+    triggers.append({
+        "situation": "User references past work ('we did this before', 'like last time', 'remember when')",
+        "action": "Call mira_search(query='<referenced topic>') immediately",
+        "reason": "User expects continuity across sessions - search before asking them to repeat context",
+        "priority": "critical"
+    })
+
+    # Danger zone trigger - dynamic based on custodian data
+    danger_zones = custodian.get('danger_zones', [])
+    if danger_zones:
+        paths = [dz.get('path', '') for dz in danger_zones if dz.get('path')]
+        if paths:
+            total_issues = sum(dz.get('issue_count', 0) for dz in danger_zones)
+            triggers.append({
+                "situation": f"About to modify: {', '.join(paths[:4])}",
+                "action": "Call mira_search(query='<filename>') to understand past issues with these files",
+                "reason": f"These danger_zone files have {total_issues} combined recorded issues - learn from history before editing" if total_issues > 0 else "These files have caused issues before - learn from history before editing",
+                "priority": "critical"
+            })
+
+    # Recommended triggers
+    triggers.append({
+        "situation": "Implementing a feature similar to existing functionality",
+        "action": "Call mira_search(query='<feature type>') to find established patterns",
+        "reason": "Maintain consistency with patterns already established in this codebase",
+        "priority": "recommended"
+    })
+
+    triggers.append({
+        "situation": "User seems frustrated or mentions something not working as expected",
+        "action": "Call mira_error_lookup or mira_search for the problematic area",
+        "reason": "This may be a recurring issue with known context and workarounds",
+        "priority": "recommended"
+    })
+
+    # Optional trigger
+    triggers.append({
+        "situation": "Starting implementation of a multi-step or complex task",
+        "action": "Call mira_search(query='<task description>') for prior attempts or related work",
+        "reason": "Avoid repeating failed approaches or reinventing existing solutions",
+        "priority": "optional"
+    })
+
+    guidance["mira_usage_triggers"] = triggers
+
+    # === BUILD TOOL QUICK REFERENCE ===
+    guidance["tool_quick_reference"] = {
+        "mira_search": {
+            "purpose": "Semantic search across all conversation history",
+            "when": "Looking for past discussions, implementations, decisions, or any historical context",
+            "syntax": "mira_search(query='<search terms>', limit=10, project_path='<optional>')",
+            "examples": [
+                "mira_search(query='authentication implementation')",
+                "mira_search(query='how we handled caching')",
+                "mira_search(query='WebSocket connection issues')"
+            ]
+        },
+        "mira_error_lookup": {
+            "purpose": "Find past solutions to similar errors - searches error-specific index",
+            "when": "Encountering ANY error, exception, stack trace, or unexpected failure",
+            "syntax": "mira_error_lookup(query='<error message or description>', limit=5)",
+            "examples": [
+                "mira_error_lookup(query='TypeError: Cannot read property of undefined')",
+                "mira_error_lookup(query='connection refused postgres')",
+                "mira_error_lookup(query='CORS policy blocked')"
+            ]
+        },
+        "mira_decisions": {
+            "purpose": "Search architectural and design decisions with their reasoning and context",
+            "when": "Making technology choices, architectural decisions, or wondering 'why was it done this way?'",
+            "syntax": "mira_decisions(query='<decision topic>', category='<optional>', limit=10)",
+            "categories": ["architecture", "technology", "implementation", "testing", "security", "performance", "workflow"],
+            "examples": [
+                "mira_decisions(query='state management')",
+                "mira_decisions(query='database schema', category='architecture')",
+                "mira_decisions(query='testing strategy')"
+            ]
+        },
+        "mira_recent": {
+            "purpose": "View summaries of recent conversation sessions",
+            "when": "Starting a new session, need to understand recent work context, or user asks 'what were we working on?'",
+            "syntax": "mira_recent(limit=10)"
+        },
+        "mira_status": {
+            "purpose": "Check MIRA system health, ingestion progress, storage stats, and sync status",
+            "when": "Debugging MIRA itself, checking if data is available, or verifying sync status",
+            "syntax": "mira_status(project_path='<optional>')"
+        }
+    }
+
+    # === BUILD ACTIONS (existing logic) ===
 
     # Artifact guidance - tell Claude there's searchable history
     if artifact_total > 100:
