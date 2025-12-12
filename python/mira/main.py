@@ -17,7 +17,6 @@ from .utils import log, get_mira_path
 from .bootstrap import ensure_venv_and_deps, reexec_in_venv
 from .config import get_config
 from .storage import get_storage, Storage
-from .embedding import get_embedding_function
 from .handlers import handle_rpc_request
 from .watcher import run_file_watcher
 from .ingestion import run_full_ingestion
@@ -143,27 +142,40 @@ def run_backend():
     health = storage.health_check()
     if storage.using_central:
         log(f"Storage: CENTRAL (Qdrant={health['qdrant_healthy']}, Postgres={health['postgres_healthy']})")
+
+        # Check embedding service health
+        from .embedding_client import get_embedding_client
+        embed_client = get_embedding_client()
+        if embed_client:
+            embed_health = embed_client.health_check()
+            if embed_health.get("status") == "healthy":
+                log(f"Embedding service: HEALTHY (model={embed_health.get('model', 'unknown')})")
+            else:
+                log(f"Embedding service: UNHEALTHY ({embed_health.get('error', 'unknown error')})")
+        else:
+            log("Embedding service: NOT CONFIGURED")
     else:
         log("Storage: LOCAL (SQLite with FTS - keyword search only)")
         log("To enable semantic search, configure ~/.mira/server.json")
 
-    # Initialize embedding function (local - generates vectors to send to Qdrant)
-    log("Initializing embedding model...")
-    embed_fn = get_embedding_function()
-    # Force model load now
-    embed_fn._ensure_model()
+    # Run initial ingestion in background with watchdog
+    ingestion_thread = [None]  # Use list to allow mutation in nested functions
+    ingestion_complete = [False]
+    last_ingestion_stats = [None]
 
-    # Run initial ingestion in background
     def initial_ingestion():
         try:
             # Pass storage explicitly (collection param is deprecated/ignored)
             stats = run_full_ingestion(collection=None, mira_path=mira_path, storage=storage)
+            last_ingestion_stats[0] = stats
             log(f"Initial ingestion: {stats['ingested']} new conversations indexed")
         except Exception as e:
             log(f"Initial ingestion error: {e}")
+        finally:
+            ingestion_complete[0] = True
 
-    ingestion_thread = threading.Thread(target=initial_ingestion, daemon=True)
-    ingestion_thread.start()
+    ingestion_thread[0] = threading.Thread(target=initial_ingestion, daemon=True, name="InitialIngestion")
+    ingestion_thread[0].start()
 
     # Send ready signal to Node.js
     send_notification("ready", {})
@@ -182,9 +194,70 @@ def run_backend():
     try:
         from .sync_worker import start_sync_worker
         sync_worker = start_sync_worker(storage)
-        log("Sync worker started")
     except Exception as e:
         log(f"Failed to start sync worker: {e}")
+
+    # Watchdog: restart ingestion if stuck (pending > 0, no active jobs, thread dead)
+    def ingestion_watchdog():
+        import time
+        from .ingestion import get_active_ingestions, discover_conversations
+
+        WATCHDOG_INTERVAL = 60  # Check every 60 seconds
+        RESTART_DELAY = 30      # Wait 30s after thread dies before restarting
+
+        while True:
+            time.sleep(WATCHDOG_INTERVAL)
+
+            try:
+                # Skip if ingestion is still running
+                if ingestion_thread[0] and ingestion_thread[0].is_alive():
+                    continue
+
+                # Skip if there are active ingestions (watcher might be processing)
+                active = get_active_ingestions()
+                if active:
+                    continue
+
+                # Check if there are pending files
+                conversations = discover_conversations()
+                if not conversations:
+                    continue
+
+                # Count how many are actually pending (not in central)
+                pending_count = 0
+                for conv in conversations:
+                    session_id = conv['session_id']
+                    meta_file = mira_path / "metadata" / f"{session_id}.json"
+
+                    if not meta_file.exists():
+                        # No metadata = needs processing (might have no messages, but worth checking)
+                        pending_count += 1
+                    elif storage.using_central:
+                        # Has metadata but check if in central
+                        if not storage.session_exists_in_central(session_id):
+                            pending_count += 1
+
+                if pending_count > 0:
+                    log(f"[Watchdog] Detected {pending_count} pending sessions, ingestion thread dead. Restarting...")
+                    time.sleep(RESTART_DELAY)
+
+                    # Double-check nothing started in the meantime
+                    if not get_active_ingestions():
+                        ingestion_complete[0] = False
+                        ingestion_thread[0] = threading.Thread(
+                            target=initial_ingestion,
+                            daemon=True,
+                            name="WatchdogIngestion"
+                        )
+                        ingestion_thread[0].start()
+                        log("[Watchdog] Ingestion restarted")
+
+            except Exception as e:
+                log(f"[Watchdog] Error: {e}")
+
+    watchdog_thread = threading.Thread(target=ingestion_watchdog, daemon=True, name="IngestionWatchdog")
+    watchdog_thread.start()
+    log("Ingestion watchdog started")
 
     # Main JSON-RPC loop
     for line in sys.stdin:

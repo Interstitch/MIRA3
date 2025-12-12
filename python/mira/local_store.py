@@ -682,6 +682,43 @@ def search_decisions(
     return result
 
 
+# ==================== Session Lookup and Update ====================
+
+def get_session_by_uuid(session_uuid: str) -> Optional[Dict[str, Any]]:
+    """Get a session by its UUID (session_id string)."""
+    init_local_db()
+    db = get_db_manager()
+
+    row = db.execute_read_one(
+        LOCAL_DB,
+        """SELECT s.*, p.path as project_path FROM sessions s
+           JOIN projects p ON s.project_id = p.id
+           WHERE s.session_id = ?""",
+        (session_uuid,)
+    )
+    return _session_row_to_dict(row) if row else None
+
+
+def update_session_metadata(
+    session_uuid: str,
+    summary: str,
+    keywords: List[str],
+) -> bool:
+    """Update session metadata by UUID."""
+    init_local_db()
+    db = get_db_manager()
+
+    keywords_json = json.dumps(keywords or [])
+
+    result = db.execute_write(
+        LOCAL_DB,
+        """UPDATE sessions SET summary = ?, keywords = ?
+           WHERE session_id = ?""",
+        (summary, keywords_json, session_uuid)
+    )
+    return result > 0 if result else False
+
+
 # ==================== Helpers ====================
 
 def _session_row_to_dict(row) -> Dict[str, Any]:

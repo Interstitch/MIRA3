@@ -208,12 +208,20 @@ def extract_errors_from_conversation(
 
     errors_found = 0
 
+    # CONSERVATIVE error patterns - only match actual errors, not markdown headers
     error_patterns = [
-        r'((?:Error|Exception|Traceback|Failed|Panic)[^\n]*(?:\n[^\n]*){0,5})',
-        r'((?:\w+Error|\w+Exception):\s*[^\n]+)',
-        r'(npm ERR![^\n]+)',
-        r'(error\[E\d+\]:[^\n]+)',
-        r'(fatal:[^\n]+)',
+        # Python tracebacks and errors - require specific error format
+        r'(Traceback \(most recent call last\):[^\n]*(?:\n[^\n]*){1,10})',
+        r'((?:\w+Error|\w+Exception):\s+[^\n]{10,200})',  # Require content after colon
+        # JavaScript/Node errors
+        r'(npm ERR! [A-Z][^\n]{10,150})',  # npm errors with content
+        r'(TypeError:|ReferenceError:|SyntaxError:)\s+([^\n]{10,150})',
+        # Rust errors
+        r'(error\[E\d{4}\]:[^\n]{10,150})',  # Rust errors with code
+        # Git errors
+        r'(fatal: [^\n]{10,150})',
+        # Generic but require specific formats
+        r'(Error: [A-Z][^\n]{15,150})',  # Error with capital letter start and content
     ]
 
     try:
@@ -313,15 +321,27 @@ def extract_errors_from_conversation(
 
 
 def _extract_solution_summary(solution_text: str) -> Optional[str]:
-    """Extract a brief summary of the solution from assistant response."""
-    if not solution_text:
+    """Extract a brief summary of the solution from assistant response.
+
+    Only extracts if the response actually contains solution-like content.
+    Returns None if no clear solution is found.
+    """
+    if not solution_text or len(solution_text) < 50:
         return None
 
+    # Must contain solution-indicating words
+    solution_indicators = ['fix', 'solve', 'resolv', 'chang', 'updat', 'replac', 'add', 'remov', 'correct']
+    text_lower = solution_text.lower()
+    if not any(ind in text_lower for ind in solution_indicators):
+        return None
+
+    # CONSERVATIVE solution patterns - require clear fix language
     solution_patterns = [
-        r"(?:The (?:fix|solution|issue|problem) is)[:\s]+([^.!?\n]+[.!?])",
-        r"(?:To fix this|To solve this|To resolve this)[,:\s]+([^.!?\n]+[.!?])",
-        r"(?:You need to|You should|Try)[:\s]+([^.!?\n]+[.!?])",
-        r"(?:The error (?:occurs|happens|is caused) because)[:\s]+([^.!?\n]+[.!?])",
+        r"(?:The (?:fix|solution) (?:is|was))[:\s]+([^.!?\n]{20,200}[.!?])",
+        r"(?:I (?:fixed|resolved|corrected) (?:this|it|the error) by)[:\s]+([^.!?\n]{20,200}[.!?])",
+        r"(?:To fix this)[,:\s]+([^.!?\n]{20,200}[.!?])",
+        r"(?:The (?:issue|problem) was)[:\s]+([^.!?\n]{20,200}[.!?])",
+        r"(?:Changed|Updated|Fixed|Replaced|Added|Removed)\s+([^.!?\n]{20,150}[.!?])",
     ]
 
     for pattern in solution_patterns:
@@ -331,12 +351,7 @@ def _extract_solution_summary(solution_text: str) -> Optional[str]:
             if 20 < len(summary) < 200:
                 return summary
 
-    sentences = re.split(r'(?<=[.!?])\s+', solution_text)
-    for sent in sentences[:3]:
-        sent = sent.strip()
-        if 20 < len(sent) < 200 and not sent.lower().startswith(('i ', 'let me', 'sure', 'okay')):
-            return sent
-
+    # Don't fall back to arbitrary sentences - too noisy
     return None
 
 
@@ -511,11 +526,15 @@ def extract_decisions_from_conversation(
     decisions_found = 0
     seen_hashes = set()  # Dedupe within this conversation
 
+    # CONSERVATIVE decision patterns - require clear decision indicators
+    # Only capture actual architectural/design decisions, not casual explanations
     decision_patterns = [
-        (r"(?:I (?:decided|chose|went with|selected)|We should use|Let's use|The best approach is)\s+([^.!?\n]{10,150}[.!?])", 'explicit'),
-        (r"(?:I recommend|I suggest|My recommendation is)\s+([^.!?\n]{10,150}[.!?])", 'recommendation'),
-        (r"(?:because|since|the reason is)\s+([^.!?\n]{10,100})", 'reasoning'),
-        (r"(?:instead of|rather than|over)\s+(\w+[^.!?\n]{10,100})", 'alternative'),
+        # Explicit decisions with architectural terms
+        (r"(?:I (?:decided|chose|went with)|We (?:decided|chose) to use|The (?:best|chosen) approach is)\s+([^.!?\n]{15,150}(?:architecture|pattern|approach|design|structure|framework|library|database|api|storage)[^.!?\n]{0,50}[.!?])", 'explicit'),
+        # Recommendations with specific tech/design terms
+        (r"(?:I recommend|I suggest|My recommendation is)\s+(using [^.!?\n]{10,100}|to use [^.!?\n]{10,100})", 'recommendation'),
+        # Explicit "instead of" with tech terms (not casual usage)
+        (r"(?:instead of|rather than)\s+(using \w+[^.!?\n]{10,60}(?:because|since|for)[^.!?\n]{10,60})", 'alternative'),
     ]
 
     try:

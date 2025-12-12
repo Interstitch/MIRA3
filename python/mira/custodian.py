@@ -187,64 +187,299 @@ def _learn_identity(db, user_messages: list, session_id: str, now: str) -> int:
     """Learn identity information from user messages."""
     learned = 0
 
-    # Patterns to extract name
+    # CONSERVATIVE name patterns - only explicit first-person introductions
+    # These require the user to directly state their name
     name_patterns = [
-        r"(?:my name is|i'm|i am|call me|this is)\s+([A-Z][a-z]+)",
-        r"(?:^|\s)([A-Z][a-z]+)\s+here(?:\s|$|\.)",
-        r"(?:regards|cheers|thanks),?\s*\n?\s*([A-Z][a-z]+)",
+        # Highest confidence: explicit "my name is" (allow word boundary, not just sentence start)
+        (r"(?:^|\s)my name is\s+([A-Z][a-z]{2,15})(?:\s|[.,!?]|$)", 0.95),
+        # High confidence: "I'm [Name]" at start of message or after greeting
+        (r"(?:^|[.!?]\s*|,\s*)(?:hi,?\s+)?i'?m\s+([A-Z][a-z]{2,15})(?:\s|[.,!?]|$)", 0.9),
+        # Medium confidence: "call me [Name]"
+        (r"(?:^|\s)(?:you can |please )?call me\s+([A-Z][a-z]{2,15})(?:\s|[.,!?]|$)", 0.85),
+        # Medium confidence: "I am [Name]" (explicit statement)
+        (r"(?:^|\s)i am\s+([A-Z][a-z]{2,15})(?:\s|[.,!?]|$)", 0.85),
+        # Lower confidence: sign-off at END of message only (last 100 chars)
+        # This is handled specially below
     ]
 
-    # Common words that aren't names - expanded blocklist
+    # Comprehensive blocklist - tech products, tools, frameworks, common words
     name_blocklist = {
         # Greetings and conversation
         'claude', 'hello', 'please', 'thanks', 'help', 'just', 'the', 'this', 'that',
         'if', 'when', 'what', 'how', 'where', 'why', 'yes', 'no', 'okay', 'sure',
-        'now', 'then', 'here', 'there', 'which', 'who', 'whom',
-        # Common sentence starters
+        'now', 'then', 'here', 'there', 'which', 'who', 'whom', 'hey', 'hi',
+
+        # Common sentence starters and fillers
         'well', 'also', 'actually', 'basically', 'honestly', 'really', 'maybe',
-        'perhaps', 'probably', 'certainly', 'definitely', 'absolutely',
-        # Game/content words that might appear capitalized
+        'perhaps', 'probably', 'certainly', 'definitely', 'absolutely', 'anyway',
+
+        # Tech products and services (CRITICAL - prevents "Tailscale" etc.)
+        'tailscale', 'docker', 'kubernetes', 'redis', 'postgres', 'postgresql',
+        'mongodb', 'mysql', 'sqlite', 'elasticsearch', 'nginx', 'apache',
+        'github', 'gitlab', 'bitbucket', 'vercel', 'netlify', 'heroku', 'aws',
+        'azure', 'gcp', 'cloudflare', 'digitalocean', 'linode', 'vultr',
+        'slack', 'discord', 'notion', 'linear', 'jira', 'asana', 'trello',
+        'stripe', 'twilio', 'sendgrid', 'mailgun', 'auth0', 'okta', 'clerk',
+        'supabase', 'firebase', 'planetscale', 'neon', 'turso', 'upstash',
+        'openai', 'anthropic', 'cohere', 'huggingface', 'replicate', 'modal',
+        'sentry', 'datadog', 'grafana', 'prometheus', 'kibana', 'splunk',
+        'terraform', 'pulumi', 'ansible', 'vagrant', 'packer', 'consul',
+        'chromadb', 'chroma', 'pinecone', 'weaviate', 'milvus', 'qdrant', 'faiss',
+
+        # Programming languages and runtimes
+        'python', 'javascript', 'typescript', 'golang', 'rust', 'java', 'kotlin',
+        'swift', 'ruby', 'php', 'perl', 'scala', 'elixir', 'clojure', 'haskell',
+        'node', 'nodejs', 'deno', 'bun', 'dotnet',
+
+        # Frameworks and libraries
+        'react', 'vue', 'angular', 'svelte', 'solid', 'qwik', 'astro', 'remix',
+        'next', 'nuxt', 'gatsby', 'vite', 'webpack', 'rollup', 'esbuild', 'parcel',
+        'express', 'fastapi', 'django', 'flask', 'fastify', 'koa', 'hono', 'rails',
+        'spring', 'laravel', 'phoenix', 'actix', 'axum', 'rocket', 'warp', 'hyper',
+        'prisma', 'drizzle', 'typeorm', 'sequelize', 'knex', 'mongoose',
+        'jest', 'vitest', 'mocha', 'pytest', 'junit', 'rspec', 'cypress', 'playwright',
+
+        # Tools and CLIs
+        'npm', 'pnpm', 'yarn', 'pip', 'cargo', 'maven', 'gradle', 'brew', 'apt',
+        'git', 'vim', 'neovim', 'emacs', 'vscode', 'cursor', 'zed', 'sublime',
+
+        # Game/content words
         'planet', 'sector', 'ship', 'trade', 'port', 'warp', 'credits', 'player',
         'game', 'level', 'score', 'item', 'quest', 'mission', 'world', 'server',
-        # Tech words
+        'guild', 'clan', 'team', 'alliance', 'faction', 'empire', 'kingdom',
+
+        # Tech/code terms
         'file', 'code', 'function', 'class', 'method', 'error', 'warning', 'test',
+        'api', 'sdk', 'cli', 'gui', 'url', 'uri', 'json', 'yaml', 'xml', 'html',
+        'css', 'sql', 'graphql', 'rest', 'grpc', 'websocket', 'http', 'https',
+        'backend', 'frontend', 'fullstack', 'devops', 'sre', 'mlops', 'dataops',
+        'component', 'module', 'package', 'library', 'framework', 'runtime',
+        'database', 'cache', 'queue', 'worker', 'service', 'daemon', 'process',
+        'container', 'pod', 'cluster', 'node', 'instance', 'replica', 'shard',
+    }
+
+    # Map patterns to their types for tracking
+    pattern_types = {
+        0: 'my_name_is',  # "my name is X"
+        1: 'im_introduction',  # "I'm X"
+        2: 'call_me',  # "call me X"
     }
 
     for msg in user_messages:
         content = msg.get('content', '')
+        if not content or len(content) < 10:
+            continue
 
-        for pattern in name_patterns:
-            match = re.search(pattern, content)
+        # Check main patterns
+        for idx, (pattern, confidence) in enumerate(name_patterns):
+            match = re.search(pattern, content, re.IGNORECASE)
             if match:
                 name = match.group(1)
-                # Avoid false positives
-                if name.lower() not in name_blocklist:
-                    # Store in local SQLite
-                    db.execute_write(
-                        CUSTODIAN_DB,
-                        """INSERT OR REPLACE INTO identity (key, value, confidence, source_session, learned_at)
-                           VALUES (?, ?, ?, ?, ?)""",
-                        ('name', name, 0.8, session_id, now)
-                    )
+                # Validate: not in blocklist, reasonable length, looks like a name
+                if (name.lower() not in name_blocklist and
+                    3 <= len(name) <= 15 and
+                    name[0].isupper() and
+                    name[1:].islower() and
+                    not any(c.isdigit() for c in name)):
 
-                    # Also store in central Postgres
-                    storage = _get_custodian_storage()
-                    if storage and storage.using_central:
-                        try:
-                            storage.postgres.upsert_custodian(
-                                key='identity:name',
-                                value=name,
-                                category='identity',
-                                confidence=0.8,
-                                source_session=session_id,
-                            )
-                        except Exception as e:
-                            log(f"Central identity storage failed: {e}")
+                    # Get surrounding context for debugging
+                    start = max(0, match.start() - 20)
+                    end = min(len(content), match.end() + 20)
+                    context = content[start:end]
 
+                    pattern_type = pattern_types.get(idx, 'unknown')
+                    _store_name(db, name, confidence, session_id, now, pattern_type, context)
                     learned += 1
                     break
 
+        # Check sign-off pattern at end of message only
+        if not learned:
+            # Only check last 100 chars for sign-offs
+            tail = content[-100:] if len(content) > 100 else content
+            signoff_match = re.search(
+                r"(?:regards|cheers|thanks|best),?\s*\n\s*([A-Z][a-z]{2,15})\s*$",
+                tail
+            )
+            if signoff_match:
+                name = signoff_match.group(1)
+                if (name.lower() not in name_blocklist and
+                    3 <= len(name) <= 15 and
+                    name[0].isupper() and
+                    name[1:].islower()):
+                    _store_name(db, name, 0.75, session_id, now, 'signoff', tail[-50:])
+                    learned += 1
+
     return learned
+
+
+def _store_name(db, name: str, confidence: float, session_id: str, now: str, pattern_type: str = 'unknown', context: str = ''):
+    """
+    Store a name candidate for later scoring.
+
+    Instead of directly storing THE name, we store all candidates and
+    compute the best one when retrieving the profile.
+    """
+    # Store as candidate in local SQLite (name_candidates table)
+    try:
+        db.execute_write(
+            CUSTODIAN_DB,
+            """INSERT INTO name_candidates (name, confidence, pattern_type, source_session, context, extracted_at)
+               VALUES (?, ?, ?, ?, ?, ?)
+               ON CONFLICT(name, source_session) DO UPDATE SET
+                   confidence = MAX(name_candidates.confidence, excluded.confidence),
+                   pattern_type = excluded.pattern_type,
+                   context = excluded.context,
+                   extracted_at = excluded.extracted_at""",
+            (name, confidence, pattern_type, session_id, context[:200] if context else '', now)
+        )
+    except Exception as e:
+        # Table might not exist yet (pre-migration), fall back to old behavior
+        log(f"name_candidates insert failed (migration pending?): {e}")
+        db.execute_write(
+            CUSTODIAN_DB,
+            """INSERT OR REPLACE INTO identity (key, value, confidence, source_session, learned_at)
+               VALUES (?, ?, ?, ?, ?)""",
+            ('name', name, confidence, session_id, now)
+        )
+
+    # Also store in central Postgres
+    storage = _get_custodian_storage()
+    if storage and storage.using_central:
+        try:
+            storage.postgres.upsert_name_candidate(
+                name=name,
+                confidence=confidence,
+                pattern_type=pattern_type,
+                source_session=session_id,
+                context=context[:200] if context else '',
+            )
+        except Exception as e:
+            # Fall back to old custodian storage if new method doesn't exist
+            try:
+                storage.postgres.upsert_custodian(
+                    key='identity:name',
+                    value=name,
+                    category='identity',
+                    confidence=confidence,
+                    source_session=session_id,
+                )
+            except Exception as e2:
+                log(f"Central identity storage failed: {e2}")
+
+
+def compute_best_name() -> Optional[tuple]:
+    """
+    Compute the best name from all candidates using a scoring function.
+
+    Scoring considers:
+    - Total confidence across all extractions for this name
+    - Number of sessions that extracted this name (frequency bonus)
+    - Pattern quality: my_name_is > im_introduction > call_me > signoff
+    - Recency: recent extractions weighted more
+
+    Returns:
+        Tuple of (name, score, confidence, num_sessions) or None if no candidates
+    """
+    db = get_db_manager()
+
+    # Pattern quality weights (higher = more trustworthy)
+    pattern_weights = {
+        'my_name_is': 1.5,       # Explicit "my name is" - very reliable
+        'im_introduction': 1.2,  # "I'm X" - fairly reliable
+        'call_me': 1.1,          # "call me X" - reliable
+        'signoff': 0.8,          # Sign-offs - less reliable
+        'unknown': 0.7,          # Unknown pattern - treat cautiously
+    }
+
+    try:
+        # Get all candidates with scoring components
+        rows = db.execute_read(CUSTODIAN_DB, """
+            SELECT
+                name,
+                SUM(confidence) as total_conf,
+                COUNT(DISTINCT source_session) as num_sessions,
+                MAX(confidence) as max_conf,
+                GROUP_CONCAT(DISTINCT pattern_type) as patterns,
+                MAX(extracted_at) as last_seen
+            FROM name_candidates
+            GROUP BY name
+        """)
+
+        if not rows:
+            return None
+
+        best_name = None
+        best_score = -1
+
+        for row in rows:
+            name = row['name']
+            total_conf = row['total_conf'] or 0
+            num_sessions = row['num_sessions'] or 1
+            max_conf = row['max_conf'] or 0
+            patterns = (row['patterns'] or 'unknown').split(',')
+
+            # Calculate pattern quality bonus (use best pattern seen)
+            pattern_bonus = max(pattern_weights.get(p.strip(), 0.7) for p in patterns)
+
+            # Frequency bonus: more sessions = more confidence
+            # log(n+1) gives diminishing returns: 1→0.69, 2→1.1, 5→1.79, 10→2.4
+            import math
+            freq_bonus = math.log(num_sessions + 1)
+
+            # Final score: combines confidence, frequency, and pattern quality
+            # total_conf * pattern_bonus gives base score
+            # freq_bonus adds value for repeated extractions
+            score = (total_conf * pattern_bonus) + freq_bonus
+
+            if score > best_score:
+                best_score = score
+                best_name = (name, round(score, 2), max_conf, num_sessions)
+
+        return best_name
+
+    except Exception as e:
+        log(f"Error computing best name: {e}")
+        return None
+
+
+def get_all_name_candidates() -> list:
+    """
+    Get all name candidates with their details for debugging/display.
+
+    Returns:
+        List of dicts with name, confidence, sessions, score
+    """
+    db = get_db_manager()
+
+    try:
+        rows = db.execute_read(CUSTODIAN_DB, """
+            SELECT
+                name,
+                SUM(confidence) as total_conf,
+                COUNT(DISTINCT source_session) as num_sessions,
+                MAX(confidence) as max_conf,
+                GROUP_CONCAT(DISTINCT pattern_type) as patterns
+            FROM name_candidates
+            GROUP BY name
+            ORDER BY SUM(confidence) DESC
+            LIMIT 10
+        """)
+
+        candidates = []
+        for row in rows:
+            candidates.append({
+                'name': row['name'],
+                'total_confidence': round(row['total_conf'] or 0, 2),
+                'sessions': row['num_sessions'] or 0,
+                'max_confidence': round(row['max_conf'] or 0, 2),
+                'patterns': (row['patterns'] or '').split(','),
+            })
+
+        return candidates
+
+    except Exception as e:
+        log(f"Error getting name candidates: {e}")
+        return []
 
 
 def _learn_preferences(db, user_messages: list, session_id: str, now: str) -> int:
@@ -659,6 +894,19 @@ def _learn_work_patterns(db, messages: list, session_id: str, now: str) -> int:
 
         learned += db.execute_write_func(CUSTODIAN_DB, upsert_pattern)
 
+        # Sync lifecycle patterns to central Postgres
+        if pattern_type == 'lifecycle' and initial_confidence >= 0.5:
+            storage = _get_custodian_storage()
+            if storage and storage.using_central:
+                try:
+                    storage.postgres.upsert_lifecycle_pattern(
+                        pattern=description,
+                        confidence=initial_confidence,
+                        source_session=session_id,
+                    )
+                except Exception as e:
+                    log(f"Central lifecycle pattern storage failed: {e}")
+
     return learned
 
 
@@ -686,9 +934,26 @@ def get_full_custodian_profile() -> dict:
         'summary': '',
     }
 
-    # First, try to get key preferences from central Postgres
+    # First, try to compute best name from candidates (new confidence-weighted approach)
+    try:
+        best_name_result = compute_best_name()
+        if best_name_result:
+            name, score, confidence, num_sessions = best_name_result
+            profile['name'] = name
+            profile['identity']['name'] = {
+                'value': name,
+                'confidence': confidence,
+                'score': score,
+                'sessions': num_sessions,
+            }
+            # Also include all candidates for transparency
+            profile['identity']['name_candidates'] = get_all_name_candidates()
+    except Exception as e:
+        log(f"Error computing best name: {e}")
+
+    # Fallback: try to get from central Postgres custodian table (old approach)
     storage = _get_custodian_storage()
-    if storage and storage.using_central:
+    if storage and storage.using_central and not profile.get('name'):
         try:
             central_prefs = storage.postgres.get_all_custodian()
             for pref in central_prefs:
@@ -696,12 +961,13 @@ def get_full_custodian_profile() -> dict:
                 value = pref.get('value', '')
                 category = pref.get('category', '')
 
-                # Handle identity from central
-                if key == 'identity:name' and value:
+                # Handle identity from central (only if not already set)
+                if key == 'identity:name' and value and not profile.get('name'):
                     profile['name'] = value
                     profile['identity']['name'] = {
                         'value': value,
-                        'confidence': pref.get('confidence', 0.5)
+                        'confidence': pref.get('confidence', 0.5),
+                        'source': 'central_legacy'
                     }
 
                 # Handle preferences from central
@@ -717,12 +983,13 @@ def get_full_custodian_profile() -> dict:
             log(f"Error reading central custodian: {e}")
 
     try:
-        # Get identity
-        rows = db.execute_read(CUSTODIAN_DB, "SELECT key, value, confidence FROM identity ORDER BY confidence DESC")
-        for row in rows:
-            profile['identity'][row['key']] = {'value': row['value'], 'confidence': row['confidence']}
-            if row['key'] == 'name':
-                profile['name'] = row['value']
+        # Fallback: Get identity from old SQLite table (only if not already set)
+        if not profile.get('name'):
+            rows = db.execute_read(CUSTODIAN_DB, "SELECT key, value, confidence FROM identity ORDER BY confidence DESC")
+            for row in rows:
+                profile['identity'][row['key']] = {'value': row['value'], 'confidence': row['confidence']}
+                if row['key'] == 'name' and not profile.get('name'):
+                    profile['name'] = row['value']
 
         # Get preferences by category
         generic_approval_words = {
@@ -797,7 +1064,7 @@ def get_full_custodian_profile() -> dict:
                 'confidence': row['confidence']
             })
 
-        # Get the most common development lifecycle
+        # Get the most common development lifecycle (try local first, then central)
         row = db.execute_read_one(CUSTODIAN_DB, """
             SELECT pattern_description, frequency, confidence, last_seen,
                    (frequency * confidence *
@@ -818,6 +1085,22 @@ def get_full_custodian_profile() -> dict:
                 'frequency': row['frequency'],
                 'confidence': row['confidence']
             }
+        else:
+            # Fallback to central Postgres if local has no lifecycle data
+            storage = _get_custodian_storage()
+            if storage and storage.using_central:
+                try:
+                    patterns = storage.postgres.get_lifecycle_patterns(min_confidence=0.5)
+                    if patterns:
+                        # Get highest confidence pattern
+                        best = max(patterns, key=lambda p: p.get('confidence', 0) * p.get('occurrences', 1))
+                        profile['development_lifecycle'] = {
+                            'sequence': best['pattern'],
+                            'frequency': best.get('occurrences', 1),
+                            'confidence': best['confidence']
+                        }
+                except Exception as e:
+                    log(f"Central lifecycle pattern retrieval failed: {e}")
 
         # Build summary
         profile['summary'] = _build_profile_summary(profile)

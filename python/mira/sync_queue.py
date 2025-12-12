@@ -161,6 +161,48 @@ class SyncQueue:
             log(f"Failed to enqueue {data_type}: {e}")
             return False
 
+    def batch_enqueue(
+        self,
+        items: List[tuple],  # List of (data_type, item_hash, payload)
+    ) -> int:
+        """
+        Add multiple items to the sync queue in a single transaction.
+
+        Args:
+            items: List of (data_type, item_hash, payload) tuples
+
+        Returns:
+            Number of items enqueued
+        """
+        if not items:
+            return 0
+
+        db = get_db_manager()
+
+        try:
+            # Prepare batch data
+            batch_data = [
+                (data_type, item_hash, json.dumps(payload, default=str))
+                for data_type, item_hash, payload in items
+            ]
+
+            db.execute_write_many(
+                SYNC_QUEUE_DB,
+                """
+                INSERT INTO sync_queue (data_type, item_hash, payload, status)
+                VALUES (?, ?, ?, 'pending')
+                ON CONFLICT (data_type, item_hash) DO UPDATE SET
+                    payload = EXCLUDED.payload,
+                    updated_at = CURRENT_TIMESTAMP
+                    WHERE sync_queue.status = 'failed'
+                """,
+                batch_data
+            )
+            return len(items)
+        except Exception as e:
+            log(f"Failed to batch enqueue: {e}")
+            return 0
+
     def get_pending(
         self,
         data_type: Optional[str] = None,

@@ -109,10 +109,13 @@ class ConceptExtractor:
         (r"([\w\-]+)\s+(?:database|library|framework|package)\s+(?:provides?|enables?|handles?)\s+([^.!?\n]{15,80})", 0.7),
     ]
 
-    # Integration/communication patterns
+    # Integration/communication patterns - CONSERVATIVE to avoid garbage
+    # Only match when BOTH components look like actual component names
     INTEGRATION_PATTERNS = [
-        (r"(\w+(?:\s+(?:backend|frontend|server|client|layer))?)\s+communicates?\s+with\s+(\w+(?:\s+(?:backend|frontend|server|client|layer))?)\s+(?:via|using|over)\s+([^.!?\n]{5,60})", 0.8),
-        (r"(\w+(?:\s+server)?)\s+(?:spawns|calls|invokes)\s+(\w+(?:\s+(?:backend|process|daemon))?)", 0.75),
+        # Explicit "X communicates with Y via Z" - require component-like terms
+        (r"(?:The\s+)?(\w+\s+(?:backend|frontend|server|client|layer|service|daemon|process))\s+communicates?\s+with\s+(?:the\s+)?(\w+\s+(?:backend|frontend|server|client|layer|service|daemon|process))\s+(?:via|using|over)\s+([^.!?\n]{5,60})", 0.85),
+        # "MCP server spawns Python backend" - require full component names
+        (r"(?:The\s+)?(\w+\s+(?:server|service|layer))\s+(?:spawns?|starts?|launches?)\s+(?:the\s+)?(\w+\s+(?:backend|daemon|process|worker))", 0.8),
     ]
 
     # Design pattern patterns
@@ -286,10 +289,22 @@ class ConceptExtractor:
     def _extract_integrations(self, content: str, session_id: str, confidence_boost: float) -> List[Dict]:
         """Extract integration/communication pattern concepts."""
         candidates = []
+        # Comprehensive skip list to filter garbage integrations
         skip_words = {
+            # Articles and conjunctions
             'the', 'a', 'an', 'and', 'or', 'to', 'in', 'on', 'at', 'for', 'with',
-            'it', 'this', 'that', 'any', 'all', 'needed', 'work', 'tool', 'api',
-            'never', 'always', 'extraction', 'rpc', 'js', 'py',
+            'it', 'this', 'that', 'any', 'all', 'of', 'by', 'as', 'if', 'so',
+            # Pronouns
+            'i', 'we', 'you', 'they', 'he', 'she', 'who', 'what', 'which',
+            # Common verbs that get falsely matched
+            'needed', 'work', 'make', 'get', 'set', 'run', 'use', 'call', 'spawn',
+            'parallel', 'shutdown', 'before', 'after', 'where', 'when', 'how',
+            # Code/tech terms
+            'extraction', 'rpc', 'js', 'py', 'ts', 'go', 'tool', 'api', 'sdk',
+            'file', 'code', 'data', 'type', 'class', 'function', 'method',
+            # Other common false positives
+            'never', 'always', 'should', 'would', 'could', 'might', 'must',
+            'just', 'only', 'also', 'then', 'now', 'here', 'there',
         }
 
         for pattern, base_confidence in self.INTEGRATION_PATTERNS:
@@ -312,10 +327,26 @@ class ConceptExtractor:
                 else:
                     continue
 
-                if from_component.lower() in skip_words or to_component.lower() in skip_words:
+                # Validate component names
+                from_lower = from_component.lower()
+                to_lower = to_component.lower()
+
+                # Skip if any word in the component is in skip_words
+                from_words = from_lower.split()
+                to_words = to_lower.split()
+                if any(w in skip_words for w in from_words) or any(w in skip_words for w in to_words):
                     continue
 
-                if len(from_component) < 3 or len(to_component) < 3:
+                # Require minimum length for each component
+                if len(from_component) < 8 or len(to_component) < 8:
+                    continue
+
+                # Require at least 2 words per component (e.g., "Python backend")
+                if len(from_words) < 2 or len(to_words) < 2:
+                    continue
+
+                # Skip if components look like code or garbage
+                if any(c in from_component for c in '{}[]()=<>') or any(c in to_component for c in '{}[]()=<>'):
                     continue
 
                 candidates.append({

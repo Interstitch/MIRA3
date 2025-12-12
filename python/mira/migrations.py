@@ -2,7 +2,7 @@
 MIRA3 Schema Migration Framework
 
 Manages database schema versioning and migrations for:
-- Local SQLite databases (artifacts, custodian, insights, concepts, local_store, audit)
+- Local SQLite databases (artifacts, custodian, insights, concepts, local_store)
 - Central Postgres database
 
 Migrations are idempotent and can be safely re-run.
@@ -17,7 +17,7 @@ from .utils import log, get_mira_path
 from .db_manager import get_db_manager
 
 # Current schema version
-CURRENT_VERSION = 2
+CURRENT_VERSION = 3
 
 # Migration registry
 MIGRATIONS_DB = "migrations.db"
@@ -71,41 +71,65 @@ def migrate_v1(db_manager):
     from .insights import init_insights_db
     from .concepts import init_concepts_db
     from .local_store import init_local_db
-    from .audit import init_audit_db
 
     init_artifact_db()
     init_custodian_db()
     init_insights_db()
     init_concepts_db()
     init_local_db()
-    init_audit_db()
 
     return True
 
 
 @migration(2, "add_audit_indexes")
 def migrate_v2(db_manager):
-    """Add additional indexes to audit log for better query performance."""
-    log("Migration v2: Adding audit log indexes")
+    """No-op: audit.db has been removed."""
+    log("Migration v2: Skipped (audit.db removed)")
+    return True
 
-    from .audit import AUDIT_DB
 
-    # Add composite index for common query pattern
+@migration(3, "add_name_candidates")
+def migrate_v3(db_manager):
+    """Add name_candidates table for confidence-weighted name selection."""
+    log("Migration v3: Adding name_candidates table to custodian.db")
+
+    from .custodian import CUSTODIAN_DB
+
     try:
+        # Create name_candidates table for tracking all name extractions
         db_manager.execute_write(
-            AUDIT_DB,
-            """CREATE INDEX IF NOT EXISTS idx_audit_action_status
-               ON audit_log(action, status)""",
+            CUSTODIAN_DB,
+            """CREATE TABLE IF NOT EXISTS name_candidates (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                confidence REAL NOT NULL,
+                pattern_type TEXT NOT NULL,
+                source_session TEXT NOT NULL,
+                context TEXT,
+                extracted_at TEXT NOT NULL,
+                UNIQUE(name, source_session)
+            )""",
+            ()
+        )
+
+        # Add indexes for efficient querying
+        db_manager.execute_write(
+            CUSTODIAN_DB,
+            "CREATE INDEX IF NOT EXISTS idx_name_candidates_name ON name_candidates(name)",
             ()
         )
         db_manager.execute_write(
-            AUDIT_DB,
-            """CREATE INDEX IF NOT EXISTS idx_audit_machine_timestamp
-               ON audit_log(machine_id, timestamp DESC)""",
+            CUSTODIAN_DB,
+            "CREATE INDEX IF NOT EXISTS idx_name_candidates_conf ON name_candidates(confidence DESC)",
             ()
         )
+
+        log("  Created name_candidates table")
+
     except Exception as e:
-        log(f"Migration v2 index creation: {e}")
+        log(f"Migration v3 error: {e}")
+        # Don't fail - table might already exist
+        pass
 
     return True
 
@@ -398,6 +422,60 @@ def run_postgres_migrations(postgres_backend) -> Dict[str, Any]:
                     conn.commit()
                     results["migrations_run"].append({"version": 3, "name": "dedupe_and_indexes"})
                     pg_version = 3
+
+                # Postgres migration v4: Add name_candidates table
+                if pg_version < 4:
+                    log("Postgres migration v4: Adding name_candidates table")
+                    cur.execute("""
+                        CREATE TABLE IF NOT EXISTS name_candidates (
+                            id SERIAL PRIMARY KEY,
+                            name TEXT NOT NULL,
+                            confidence REAL NOT NULL,
+                            pattern_type TEXT NOT NULL,
+                            source_session TEXT NOT NULL,
+                            context TEXT,
+                            extracted_at TIMESTAMPTZ DEFAULT NOW(),
+                            UNIQUE(name, source_session)
+                        )
+                    """)
+                    cur.execute("CREATE INDEX IF NOT EXISTS idx_name_candidates_name ON name_candidates(name)")
+                    cur.execute("CREATE INDEX IF NOT EXISTS idx_name_candidates_conf ON name_candidates(confidence DESC)")
+                    cur.execute("INSERT INTO schema_version (version, description) VALUES (4, 'Add name_candidates table for confidence-weighted name selection')")
+                    conn.commit()
+                    results["migrations_run"].append({"version": 4, "name": "add_name_candidates"})
+                    pg_version = 4
+                    log("  Created name_candidates table in Postgres")
+
+                # Postgres migration v5: Add LLM extraction tracking columns
+                if pg_version < 5:
+                    log("Postgres migration v5: Adding LLM extraction tracking columns")
+
+                    # Add llm_processed_at column to sessions table
+                    cur.execute("""
+                        ALTER TABLE sessions
+                        ADD COLUMN IF NOT EXISTS llm_processed_at TIMESTAMPTZ
+                    """)
+                    cur.execute("""
+                        CREATE INDEX IF NOT EXISTS idx_sessions_llm_processed
+                        ON sessions(llm_processed_at)
+                    """)
+                    log("  Added llm_processed_at to sessions")
+
+                    # Add source column to decisions table to track regex vs llm extraction
+                    cur.execute("""
+                        ALTER TABLE decisions
+                        ADD COLUMN IF NOT EXISTS source TEXT DEFAULT 'regex'
+                    """)
+                    cur.execute("""
+                        CREATE INDEX IF NOT EXISTS idx_decisions_source
+                        ON decisions(source)
+                    """)
+                    log("  Added source column to decisions")
+
+                    cur.execute("INSERT INTO schema_version (version, description) VALUES (5, 'Add llm_processed_at to sessions and source to decisions')")
+                    conn.commit()
+                    results["migrations_run"].append({"version": 5, "name": "llm_extraction_tracking"})
+                    pg_version = 5
 
                 results["current_version"] = pg_version
 

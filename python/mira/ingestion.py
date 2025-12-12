@@ -11,6 +11,7 @@ Archives are stored in the available storage backend.
 
 import hashlib
 import json
+import os
 import shutil
 import time
 from datetime import datetime
@@ -24,7 +25,6 @@ from .artifacts import extract_file_operations_from_messages, extract_artifacts_
 from .custodian import extract_custodian_learnings
 from .insights import extract_insights_from_conversation
 from .concepts import extract_concepts_from_conversation
-from .audit import audit_log
 
 import threading
 
@@ -117,10 +117,11 @@ def ingest_conversation(file_info: dict, collection, mira_path: Path = None, sto
                 # File hasn't changed - but check if we need to sync to central
                 if storage.using_central:
                     if not storage.session_exists_in_central(session_id):
-                        log(f"[{session_id[:12]}] Local session not in central, will sync")
+                        log(f"[{session_id[:12]}] Local metadata exists but not in central, will sync")
                         # Continue with full processing for central sync
                     else:
-                        return False  # Already in central, skip
+                        # Already in central and unchanged - skip silently
+                        return False
                 else:
                     return False  # Local only mode, already processed
             else:
@@ -168,11 +169,9 @@ def ingest_conversation(file_info: dict, collection, mira_path: Path = None, sto
         log(f"[{short_id}] Failed to read file: {e}")
         return False
 
-    # Add incremental tracking to metadata
+    # NOTE: metadata is saved AFTER successful indexing to prevent data loss on crash
+    # Add incremental tracking to metadata (will be saved at the end)
     metadata['last_indexed_message_count'] = msg_count
-
-    # Save metadata
-    meta_file.write_text(json.dumps(metadata, indent=2))
 
     # Read raw messages for extraction
     raw_messages = []
@@ -199,7 +198,10 @@ def ingest_conversation(file_info: dict, collection, mira_path: Path = None, sto
     project_path_normalized = ''
     if project_path_encoded:
         # Convert from "-workspaces-MIRA3" to "/workspaces/MIRA3"
-        project_path_normalized = '/' + project_path_encoded.replace('-', '/')
+        # The encoded path starts with '-', so replace('-', '/') handles the leading slash
+        project_path_normalized = project_path_encoded.replace('-', '/')
+        # Ensure exactly one leading slash (avoid // from edge cases)
+        project_path_normalized = '/' + project_path_normalized.lstrip('/')
 
     # Get git remote for cross-machine project identification
     from .utils import get_git_remote_for_claude_path
@@ -342,51 +344,29 @@ def ingest_conversation(file_info: dict, collection, mira_path: Path = None, sto
             except Exception as e:
                 log(f"[{short_id}] Concepts failed: {e}")
 
-        # Vector indexing (central only - local uses FTS instead)
-        if storage.using_central:
-            try:
-                t0 = time.time()
-                from .embedding import get_embedding_function
-                embed_fn = get_embedding_function()
-                doc_vector = embed_fn([doc_content])[0]
-
-                storage.vector_upsert(
-                    vector=doc_vector,
-                    content=doc_content[:2000],  # Truncate for storage efficiency
-                    session_id=session_id,
-                    project_path=project_path_normalized,
-                    chunk_type="session",
-                )
-                t_vector = (time.time() - t0) * 1000
-                log(f"[{short_id}] Indexed to central storage ({t_vector:.0f}ms)")
-            except Exception as e:
-                log(f"[{short_id}] Vector indexing failed: {e}")
+        # NOTE: Vector indexing happens automatically on the GCP embedding service
+        # The service polls Postgres for new sessions and indexes them to Qdrant
+        # Client does NOT call the embedding service - it just writes to Postgres
 
         t_total = (time.time() - t_start) * 1000
         log(f"[{short_id}] Ingestion complete ({storage_mode} mode) - TOTAL: {t_total:.0f}ms")
 
-        # Audit log successful ingestion
-        audit_log(
-            action="ingest",
-            resource_type="session",
-            resource_id=session_id,
-            parameters={"project_path": project_path_normalized, "message_count": msg_count},
-            result_summary={"storage_mode": storage_mode, "db_session_id": db_session_id},
-            status="success",
-        )
+        # Save metadata AFTER successful indexing to prevent data loss on crash
+        # If we crash before this point, the session will be re-indexed on restart
+        meta_file.write_text(json.dumps(metadata, indent=2))
+
+        # Optionally trigger LLM extraction (async, fire-and-forget)
+        # Only runs if MIRA_LLM_EXTRACTION=true and service is available
+        if os.environ.get("MIRA_LLM_EXTRACTION", "").lower() in ("true", "1", "yes"):
+            try:
+                from .llm_extractor import trigger_llm_extraction
+                trigger_llm_extraction(session_id)
+            except Exception as e:
+                log(f"[{short_id}] LLM extraction trigger failed (non-fatal): {e}")
+
         return True
     except Exception as e:
         log(f"[{short_id}] Ingestion failed: {e}")
-
-        # Audit log failed ingestion
-        audit_log(
-            action="ingest",
-            resource_type="session",
-            resource_id=session_id,
-            parameters={"project_path": project_path_normalized},
-            status="failure",
-            error_message=str(e),
-        )
         return False
 
 
@@ -487,28 +467,10 @@ def sync_active_session(
         except Exception as e:
             log(f"[{short_id}] Metadata update failed: {e}")
 
-        # Audit log
-        audit_log(
-            action="active_sync",
-            resource_type="session",
-            resource_id=session_id,
-            parameters={"project_path": project_path},
-            result_summary={"size_bytes": file_size, "line_count": line_count},
-            status="success",
-        )
-
         return True
 
     except Exception as e:
         log(f"[{short_id}] Active sync failed: {e}")
-        audit_log(
-            action="active_sync",
-            resource_type="session",
-            resource_id=session_id,
-            parameters={"project_path": project_path},
-            status="failure",
-            error_message=str(e),
-        )
         return False
 
 
@@ -531,11 +493,8 @@ def discover_conversations(claude_path: Path = None) -> list:
     conversations = []
 
     for jsonl_file in claude_path.rglob("*.jsonl"):
-        # Skip agent files (subagent task logs)
-        if jsonl_file.name.startswith("agent-"):
-            continue
-
         session_id = jsonl_file.stem
+        is_agent_file = jsonl_file.name.startswith("agent-")
 
         # Extract project path from directory structure
         # e.g., ~/.claude/projects/-workspaces-MIRA3/session.jsonl
@@ -552,7 +511,8 @@ def discover_conversations(claude_path: Path = None) -> list:
             'session_id': session_id,
             'file_path': str(jsonl_file),
             'project_path': project_dir,
-            'last_modified': last_modified
+            'last_modified': last_modified,
+            'is_agent': is_agent_file,
         })
 
     return conversations
@@ -597,12 +557,24 @@ def run_full_ingestion(collection, mira_path: Path = None, max_workers: int = 4,
     t_discover_start = time.time()
     conversations = discover_conversations()
     t_discover = (time.time() - t_discover_start) * 1000
+
+    # Group by project for visibility
+    by_project = {}
+    for c in conversations:
+        proj = c.get('project_path', 'unknown')
+        by_project[proj] = by_project.get(proj, 0) + 1
+
     log(f"Discovered {len(conversations)} conversation files ({t_discover:.0f}ms)")
+    for proj, count in sorted(by_project.items(), key=lambda x: -x[1])[:5]:
+        log(f"  - {proj}: {count} files")
 
     stats = {
         'discovered': len(conversations),
         'ingested': 0,
         'skipped': 0,
+        'skipped_in_central': 0,
+        'skipped_no_messages': 0,
+        'skipped_unchanged': 0,
         'failed': 0
     }
     stats_lock = threading.Lock()
@@ -636,7 +608,18 @@ def run_full_ingestion(collection, mira_path: Path = None, max_workers: int = 4,
                 cnt = processed_count[0]
             if result:
                 log(f"[{cnt}/{len(conversations)}] [{worker_id}] Ingested: {session_id[:12]}...")
-            return ('ingested' if result else 'skipped', session_id)
+                return ('ingested', session_id)
+            else:
+                # Determine skip reason by checking conditions
+                meta_file = Path(mira_path) / "metadata" / f"{session_id}.json"
+                if meta_file.exists():
+                    # Has local metadata - either in central or unchanged
+                    if storage.using_central and storage.session_exists_in_central(session_id):
+                        return ('skipped_in_central', session_id)
+                    else:
+                        return ('skipped_unchanged', session_id)
+                else:
+                    return ('skipped_no_messages', session_id)
         except Exception as e:
             with stats_lock:
                 processed_count[0] += 1
@@ -655,14 +638,21 @@ def run_full_ingestion(collection, mira_path: Path = None, max_workers: int = 4,
         for future in as_completed(futures):
             result_type, session_id = future.result()
             with stats_lock:
-                stats[result_type] += 1
+                if result_type in stats:
+                    stats[result_type] += 1
+                if result_type.startswith('skipped'):
+                    stats['skipped'] += 1
 
     t_total = (time.time() - t_ingestion_start) * 1000
     rate = stats['ingested'] * 1000 / max(1, t_total) * 60  # sessions per minute
 
     log(f"╔══════════════════════════════════════════════════════════════╗")
     log(f"║ INGESTION COMPLETE")
-    log(f"║   New: {stats['ingested']}, Skipped: {stats['skipped']}, Failed: {stats['failed']}")
+    log(f"║   Ingested: {stats['ingested']}, Failed: {stats['failed']}")
+    log(f"║   Skipped: {stats['skipped']} total")
+    log(f"║     - Already in central: {stats['skipped_in_central']}")
+    log(f"║     - No messages: {stats['skipped_no_messages']}")
+    log(f"║     - Unchanged (local only): {stats['skipped_unchanged']}")
     log(f"║   Time: {t_total:.0f}ms, Rate: {rate:.1f} sessions/min")
     log(f"║   Peak concurrency: {max_concurrent[0]} workers")
     log(f"╚══════════════════════════════════════════════════════════════╝")

@@ -773,6 +773,92 @@ class PostgresBackend:
                     (key, value, category, confidence, source_session, source_session)
                 )
 
+    def upsert_name_candidate(
+        self,
+        name: str,
+        confidence: float,
+        pattern_type: str,
+        source_session: str,
+        context: Optional[str] = None,
+    ):
+        """
+        Insert or update a name candidate.
+
+        All candidates are stored, and the best name is computed at read time.
+        """
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO name_candidates (name, confidence, pattern_type, source_session, context)
+                    VALUES (%s, %s, %s, %s, %s)
+                    ON CONFLICT (name, source_session) DO UPDATE SET
+                        confidence = GREATEST(name_candidates.confidence, EXCLUDED.confidence),
+                        pattern_type = EXCLUDED.pattern_type,
+                        context = EXCLUDED.context,
+                        extracted_at = NOW()
+                    """,
+                    (name, confidence, pattern_type, source_session, context)
+                )
+
+    def get_best_name(self) -> Optional[Dict[str, Any]]:
+        """
+        Compute the best name from all candidates using a scoring function.
+
+        Returns the name with highest combined score from confidence + frequency.
+        """
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT
+                        name,
+                        SUM(confidence) as total_conf,
+                        COUNT(DISTINCT source_session) as num_sessions,
+                        MAX(confidence) as max_conf,
+                        array_agg(DISTINCT pattern_type) as patterns
+                    FROM name_candidates
+                    GROUP BY name
+                    ORDER BY SUM(confidence) DESC
+                    LIMIT 10
+                """)
+
+                rows = cur.fetchall()
+                if not rows:
+                    return None
+
+                # Pattern quality weights
+                pattern_weights = {
+                    'my_name_is': 1.5,
+                    'im_introduction': 1.2,
+                    'call_me': 1.1,
+                    'signoff': 0.8,
+                    'unknown': 0.7,
+                }
+
+                best = None
+                best_score = -1
+
+                for row in rows:
+                    name, total_conf, num_sessions, max_conf, patterns = row
+                    patterns = patterns or ['unknown']
+
+                    import math
+                    pattern_bonus = max(pattern_weights.get(p, 0.7) for p in patterns)
+                    freq_bonus = math.log(num_sessions + 1)
+                    score = (total_conf * pattern_bonus) + freq_bonus
+
+                    if score > best_score:
+                        best_score = score
+                        best = {
+                            'name': name,
+                            'score': round(score, 2),
+                            'confidence': max_conf,
+                            'sessions': num_sessions,
+                            'patterns': patterns,
+                        }
+
+                return best
+
     # ==================== Error Patterns ====================
 
     def upsert_error_pattern(

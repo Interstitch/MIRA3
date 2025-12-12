@@ -115,8 +115,21 @@ class SyncWorker:
         """Sync a batch of items from the queue. Returns count synced."""
         total_synced = 0
 
-        # Sync each data type
-        for data_type in ["artifact", "session", "error", "decision", "custodian"]:
+        # Sync each data type (in dependency order: projects first)
+        data_types = [
+            "project",           # Projects must sync first (sessions depend on them)
+            "session",           # Sessions depend on projects
+            "archive",           # Archives depend on sessions
+            "archive_update",    # Archive updates depend on archives
+            "session_metadata",  # Metadata updates depend on sessions
+            "artifact",          # Artifacts depend on sessions
+            "file_operation",    # File operations depend on sessions
+            "error",             # Errors depend on projects
+            "decision",          # Decisions depend on projects
+            "custodian",         # Custodian is global
+        ]
+
+        for data_type in data_types:
             items = self.queue.get_pending(data_type, limit=SYNC_BATCH_SIZE)
             if not items:
                 continue
@@ -148,6 +161,12 @@ class SyncWorker:
         item_ids = [item["id"] for item in items]
         self.queue.mark_syncing(item_ids)
 
+        # For batch-optimized types, process all items together
+        if data_type == "file_operation":
+            return self._sync_file_operations_batch(items)
+        if data_type == "artifact":
+            return self._sync_artifacts_batch(items)
+
         synced_ids = []
         failed_ids = []
         error_msg = None
@@ -175,6 +194,9 @@ class SyncWorker:
         """
         Sync a single item to central storage.
 
+        IMPORTANT: Calls postgres backend directly, NOT through storage.py
+        to avoid infinite recursion (storage.py queues for sync).
+
         Args:
             data_type: Type of data (artifact, session, etc.)
             payload: The data payload to sync
@@ -182,10 +204,20 @@ class SyncWorker:
         Returns:
             True if synced successfully
         """
-        if data_type == "artifact":
-            return self._sync_artifact(payload)
+        if data_type == "project":
+            return self._sync_project(payload)
         elif data_type == "session":
             return self._sync_session(payload)
+        elif data_type == "archive":
+            return self._sync_archive(payload)
+        elif data_type == "archive_update":
+            return self._sync_archive_update(payload)
+        elif data_type == "session_metadata":
+            return self._sync_session_metadata(payload)
+        elif data_type == "artifact":
+            return self._sync_artifact(payload)
+        elif data_type == "file_operation":
+            return self._sync_file_operation(payload)
         elif data_type == "error":
             return self._sync_error(payload)
         elif data_type == "decision":
@@ -196,35 +228,38 @@ class SyncWorker:
             log(f"Unknown data type for sync: {data_type}")
             return False
 
-    def _sync_artifact(self, payload: Dict[str, Any]) -> bool:
-        """Sync an artifact to central Postgres."""
+    def _sync_project(self, payload: Dict[str, Any]) -> bool:
+        """Sync a project to central Postgres."""
         if not self.storage or not self.storage.postgres:
             return False
 
         try:
-            self.storage.postgres.insert_artifact(
-                session_id=payload.get("postgres_session_id"),
-                artifact_type=payload.get("artifact_type"),
-                content=payload.get("content"),
-                language=payload.get("language"),
-                line_count=payload.get("line_count"),
-                metadata=payload.get("metadata"),
+            self.storage.postgres.get_or_create_project(
+                path=payload.get("path"),
+                slug=payload.get("slug"),
+                git_remote=payload.get("git_remote"),
             )
             return True
         except Exception as e:
-            # Duplicate is OK - already synced
             if 'duplicate' in str(e).lower() or 'unique' in str(e).lower():
                 return True
             raise
 
     def _sync_session(self, payload: Dict[str, Any]) -> bool:
-        """Sync a session to central storage."""
-        if not self.storage:
+        """Sync a session to central Postgres (directly, not through storage)."""
+        if not self.storage or not self.storage.postgres:
             return False
 
         try:
-            self.storage.upsert_session(
-                project_path=payload.get("project_path"),
+            # Get or create project in central first
+            project_id = self.storage.postgres.get_or_create_project(
+                path=payload.get("project_path"),
+                git_remote=payload.get("git_remote"),
+            )
+
+            # Upsert session directly to postgres
+            self.storage.postgres.upsert_session(
+                project_id=project_id,
                 session_id=payload.get("session_id"),
                 summary=payload.get("summary"),
                 keywords=payload.get("keywords"),
@@ -241,6 +276,322 @@ class SyncWorker:
             if 'duplicate' in str(e).lower() or 'unique' in str(e).lower():
                 return True
             raise
+
+    def _sync_archive(self, payload: Dict[str, Any]) -> bool:
+        """Sync an archive to central Postgres."""
+        if not self.storage or not self.storage.postgres:
+            return False
+
+        try:
+            # Need to find the central session ID from the local session ID
+            # For now, we'll store using the session_db_id which should be looked up
+            self.storage.postgres.upsert_archive(
+                session_id=payload.get("session_db_id"),
+                content=payload.get("content"),
+                content_hash=payload.get("content_hash"),
+            )
+            return True
+        except Exception as e:
+            if 'duplicate' in str(e).lower() or 'unique' in str(e).lower():
+                return True
+            raise
+
+    def _sync_archive_update(self, payload: Dict[str, Any]) -> bool:
+        """Sync an archive update to central Postgres."""
+        if not self.storage or not self.storage.postgres:
+            return False
+
+        try:
+            import hashlib
+            session_id = payload.get("session_id")
+            content = payload.get("content")
+            content_hash = hashlib.sha256(content.encode()).hexdigest()
+
+            with self.storage.postgres._get_connection() as conn:
+                with conn.cursor() as cur:
+                    # Get the internal session ID
+                    cur.execute(
+                        "SELECT id FROM sessions WHERE session_id = %s",
+                        (session_id,)
+                    )
+                    row = cur.fetchone()
+                    if not row:
+                        return False  # Session not synced yet, will retry
+
+                    postgres_session_id = row[0]
+
+                    # Update archive
+                    cur.execute(
+                        """
+                        INSERT INTO archives (session_id, content, content_hash, size_bytes, line_count)
+                        VALUES (%s, %s, %s, %s, %s)
+                        ON CONFLICT (session_id) DO UPDATE SET
+                            content = EXCLUDED.content,
+                            content_hash = EXCLUDED.content_hash,
+                            size_bytes = EXCLUDED.size_bytes,
+                            line_count = EXCLUDED.line_count,
+                            updated_at = NOW()
+                        """,
+                        (postgres_session_id, content, content_hash,
+                         payload.get("size_bytes", 0), payload.get("line_count", 0))
+                    )
+                    conn.commit()
+            return True
+        except Exception as e:
+            if 'duplicate' in str(e).lower() or 'unique' in str(e).lower():
+                return True
+            raise
+
+    def _sync_session_metadata(self, payload: Dict[str, Any]) -> bool:
+        """Sync session metadata update to central Postgres."""
+        if not self.storage or not self.storage.postgres:
+            return False
+
+        try:
+            session_id = payload.get("session_id")
+            summary = payload.get("summary")
+            keywords = payload.get("keywords")
+
+            with self.storage.postgres._get_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        UPDATE sessions
+                        SET summary = %s, keywords = %s
+                        WHERE session_id = %s
+                        """,
+                        (summary, keywords, session_id)
+                    )
+                    conn.commit()
+            return True
+        except Exception as e:
+            raise
+
+    def _sync_artifact(self, payload: Dict[str, Any]) -> bool:
+        """Sync an artifact to central Postgres."""
+        if not self.storage or not self.storage.postgres:
+            return False
+
+        try:
+            # Look up central session ID from session_uuid
+            session_uuid = payload.get("session_id")  # This is the UUID string
+            if not session_uuid:
+                return False
+
+            with self.storage.postgres._get_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT id FROM sessions WHERE session_id = %s",
+                        (session_uuid,)
+                    )
+                    row = cur.fetchone()
+                    if not row:
+                        return False  # Session not synced yet, will retry
+
+                    postgres_session_id = row[0]
+
+            self.storage.postgres.insert_artifact(
+                session_id=postgres_session_id,
+                artifact_type=payload.get("artifact_type"),
+                content=payload.get("content"),
+                language=payload.get("language"),
+                line_count=payload.get("line_count"),
+                metadata=payload.get("metadata"),
+            )
+            return True
+        except Exception as e:
+            # Duplicate is OK - already synced
+            if 'duplicate' in str(e).lower() or 'unique' in str(e).lower():
+                return True
+            raise
+
+    def _sync_file_operation(self, payload: Dict[str, Any]) -> bool:
+        """Sync a file operation to central Postgres."""
+        if not self.storage or not self.storage.postgres:
+            return False
+
+        try:
+            # Look up central session ID from local session ID
+            local_session_id = payload.get("_local_session_id")  # UUID string
+            if not local_session_id:
+                return False
+
+            with self.storage.postgres._get_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT id FROM sessions WHERE session_id = %s",
+                        (local_session_id,)
+                    )
+                    row = cur.fetchone()
+                    if not row:
+                        return False  # Session not synced yet, will retry
+
+                    postgres_session_id = row[0]
+
+            # Update payload with correct session ID
+            payload['session_id'] = postgres_session_id
+
+            self.storage.postgres.batch_insert_file_operations([payload])
+            return True
+        except Exception as e:
+            if 'duplicate' in str(e).lower() or 'unique' in str(e).lower():
+                return True
+            raise
+
+    def _sync_file_operations_batch(self, items: List[Dict[str, Any]]) -> tuple:
+        """
+        Batch sync file operations to central Postgres.
+
+        Returns:
+            (synced_count, failed_count)
+        """
+        if not self.storage or not self.storage.postgres:
+            self.queue.mark_failed([item["id"] for item in items], "No postgres connection")
+            return 0, len(items)
+
+        item_ids = [item["id"] for item in items]
+
+        try:
+            # Look up all session mappings in one query
+            session_uuids = list(set(
+                item["payload"].get("_local_session_id")
+                for item in items
+                if item["payload"].get("_local_session_id")
+            ))
+
+            if not session_uuids:
+                self.queue.mark_failed(item_ids, "No session IDs")
+                return 0, len(items)
+
+            # Batch lookup session mappings
+            session_map = {}  # uuid -> postgres_id
+            with self.storage.postgres._get_connection() as conn:
+                with conn.cursor() as cur:
+                    placeholders = ",".join(["%s"] * len(session_uuids))
+                    cur.execute(
+                        f"SELECT session_id, id FROM sessions WHERE session_id IN ({placeholders})",
+                        tuple(session_uuids)
+                    )
+                    for row in cur.fetchall():
+                        session_map[row[0]] = row[1]
+
+            # Separate items into ready (session synced) and not ready
+            ready_items = []
+            not_ready_ids = []
+
+            for item in items:
+                uuid = item["payload"].get("_local_session_id")
+                if uuid in session_map:
+                    # Update payload with postgres session ID
+                    payload = item["payload"].copy()
+                    payload["session_id"] = session_map[uuid]
+                    ready_items.append((item["id"], payload))
+                else:
+                    not_ready_ids.append(item["id"])
+
+            # Batch insert all ready items
+            synced_ids = []
+            if ready_items:
+                payloads = [p for _, p in ready_items]
+                self.storage.postgres.batch_insert_file_operations(payloads)
+                synced_ids = [id for id, _ in ready_items]
+
+            # Mark statuses
+            if synced_ids:
+                self.queue.mark_synced(synced_ids)
+            if not_ready_ids:
+                self.queue.mark_failed(not_ready_ids, "Session not synced yet")
+
+            return len(synced_ids), len(not_ready_ids)
+
+        except Exception as e:
+            if 'duplicate' in str(e).lower() or 'unique' in str(e).lower():
+                self.queue.mark_synced(item_ids)
+                return len(items), 0
+            self.queue.mark_failed(item_ids, str(e))
+            return 0, len(items)
+
+    def _sync_artifacts_batch(self, items: List[Dict[str, Any]]) -> tuple:
+        """
+        Batch sync artifacts to central Postgres.
+
+        Returns:
+            (synced_count, failed_count)
+        """
+        if not self.storage or not self.storage.postgres:
+            self.queue.mark_failed([item["id"] for item in items], "No postgres connection")
+            return 0, len(items)
+
+        item_ids = [item["id"] for item in items]
+
+        try:
+            # Look up all session mappings in one query
+            session_uuids = list(set(
+                item["payload"].get("_local_session_id")
+                for item in items
+                if item["payload"].get("_local_session_id")
+            ))
+
+            if not session_uuids:
+                self.queue.mark_failed(item_ids, "No session IDs")
+                return 0, len(items)
+
+            # Batch lookup session mappings
+            session_map = {}  # uuid -> postgres_id
+            with self.storage.postgres._get_connection() as conn:
+                with conn.cursor() as cur:
+                    placeholders = ",".join(["%s"] * len(session_uuids))
+                    cur.execute(
+                        f"SELECT session_id, id FROM sessions WHERE session_id IN ({placeholders})",
+                        tuple(session_uuids)
+                    )
+                    for row in cur.fetchall():
+                        session_map[row[0]] = row[1]
+
+            # Separate items into ready (session synced) and not ready
+            ready_items = []
+            not_ready_ids = []
+
+            for item in items:
+                uuid = item["payload"].get("_local_session_id")
+                if uuid in session_map:
+                    ready_items.append((item["id"], item["payload"], session_map[uuid]))
+                else:
+                    not_ready_ids.append(item["id"])
+
+            # Insert all ready items
+            synced_ids = []
+            for item_id, payload, postgres_session_id in ready_items:
+                try:
+                    self.storage.postgres.insert_artifact(
+                        session_id=postgres_session_id,
+                        artifact_type=payload.get("artifact_type"),
+                        content=payload.get("content"),
+                        language=payload.get("language"),
+                        line_count=payload.get("line_count"),
+                        metadata=payload.get("metadata"),
+                    )
+                    synced_ids.append(item_id)
+                except Exception as e:
+                    if 'duplicate' in str(e).lower() or 'unique' in str(e).lower():
+                        synced_ids.append(item_id)  # Already exists, count as success
+                    else:
+                        not_ready_ids.append(item_id)
+
+            # Mark statuses
+            if synced_ids:
+                self.queue.mark_synced(synced_ids)
+            if not_ready_ids:
+                self.queue.mark_failed(not_ready_ids, "Session not synced yet or insert failed")
+
+            return len(synced_ids), len(not_ready_ids)
+
+        except Exception as e:
+            if 'duplicate' in str(e).lower() or 'unique' in str(e).lower():
+                self.queue.mark_synced(item_ids)
+                return len(items), 0
+            self.queue.mark_failed(item_ids, str(e))
+            return 0, len(items)
 
     def _sync_error(self, payload: Dict[str, Any]) -> bool:
         """Sync an error pattern to central storage."""

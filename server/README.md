@@ -1,0 +1,223 @@
+# MIRA Server Setup
+
+Deploy MIRA's central storage services on a Linux server using Docker.
+
+## What You Get
+
+| Service | Port | Purpose |
+|---------|------|---------|
+| PostgreSQL | 5432 | Stores all session data |
+| Qdrant | 6333 | Vector search for semantic queries |
+| Embedding Service | 8200 | Computes embeddings automatically |
+
+## Prerequisites
+
+- Linux server with Docker and Docker Compose installed
+- At least 2GB RAM (embedding model needs ~500MB)
+- Network access from your development machines
+
+## Step 1: Copy Files to Server
+
+Copy the `server/` directory to your server:
+
+```bash
+# From your local machine
+scp -r server/ user@your-server:/opt/mira/
+```
+
+Or clone the repo directly on the server:
+
+```bash
+ssh user@your-server
+git clone https://github.com/anthropics/MIRA3.git /tmp/mira
+cp -r /tmp/mira/server /opt/mira
+cd /opt/mira
+```
+
+## Step 2: Configure Environment
+
+```bash
+cd /opt/mira
+cp .env.example .env
+```
+
+Edit `.env` and set:
+
+```bash
+# Required: set a strong password
+POSTGRES_PASSWORD=your_secure_password_here
+
+# Required: your server's IP address (LAN IP, Tailscale IP, etc.)
+# This controls which network interface the services bind to
+TAILSCALE_IP=192.168.1.100
+```
+
+**Note:** If you want services accessible only from localhost, leave `TAILSCALE_IP` unset or set to `127.0.0.1`.
+
+## Step 3: Start Services
+
+```bash
+docker compose up -d
+```
+
+First run will:
+- Pull PostgreSQL and Qdrant images
+- Build the embedding service container
+- Download the embedding model (~90MB)
+
+This takes 2-5 minutes depending on your connection.
+
+## Step 4: Verify Everything Works
+
+Check containers are running:
+
+```bash
+docker compose ps
+```
+
+Expected output:
+```
+NAME                STATUS
+embedding-service   Up (healthy)
+postgres            Up (healthy)
+qdrant              Up
+```
+
+Test each service:
+
+```bash
+# Qdrant - should return {"result":{"collections":[]}}
+curl http://localhost:6333/collections
+
+# Embedding service - should return {"status":"healthy",...}
+curl http://localhost:8200/health
+
+# Postgres - check it accepts connections
+docker compose exec postgres psql -U mira -c "SELECT 1"
+```
+
+## Step 5: Connect MIRA Clients
+
+On each development machine, create `~/.mira/server.json`:
+
+```json
+{
+  "version": 1,
+  "central": {
+    "enabled": true,
+    "qdrant": {
+      "host": "YOUR_SERVER_IP",
+      "port": 6333,
+      "collection": "mira",
+      "timeout_seconds": 30
+    },
+    "postgres": {
+      "host": "YOUR_SERVER_IP",
+      "port": 5432,
+      "database": "mira",
+      "user": "mira",
+      "password": "your_secure_password_here",
+      "pool_size": 3,
+      "timeout_seconds": 30
+    }
+  },
+  "fallback": {
+    "enabled": true,
+    "warn_on_fallback": true
+  }
+}
+```
+
+Set secure permissions:
+
+```bash
+chmod 600 ~/.mira/server.json
+```
+
+---
+
+## Common Commands
+
+```bash
+# View logs (all services)
+docker compose logs -f
+
+# View logs (specific service)
+docker compose logs -f embedding-service
+
+# Restart all services
+docker compose restart
+
+# Stop all services
+docker compose down
+
+# Stop and remove volumes (DELETES ALL DATA)
+docker compose down -v
+```
+
+## Backup & Restore
+
+### Backup PostgreSQL
+
+```bash
+docker compose exec postgres pg_dump -U mira mira > backup_$(date +%Y%m%d).sql
+```
+
+### Restore PostgreSQL
+
+```bash
+cat backup.sql | docker compose exec -T postgres psql -U mira mira
+```
+
+### Backup Qdrant
+
+```bash
+curl -X POST "http://localhost:6333/collections/mira_sessions/snapshots"
+# Snapshots saved to /opt/mira/qdrant/snapshots/
+```
+
+## Troubleshooting
+
+### Services won't start
+
+```bash
+# Check what's wrong
+docker compose logs
+
+# Common issue: port already in use
+sudo lsof -i :5432  # Check what's using the port
+```
+
+### Embedding service unhealthy
+
+```bash
+# Check logs
+docker compose logs embedding-service
+
+# Common issue: out of memory (need 2GB+ RAM)
+free -h
+```
+
+### Can't connect from client
+
+1. Check firewall allows ports 5432, 6333, 8200
+2. Verify `TAILSCALE_IP` in `.env` matches your server's IP
+3. Test connectivity: `curl http://YOUR_SERVER_IP:8200/health`
+
+### Reset everything
+
+```bash
+docker compose down -v
+rm -rf /opt/mira/postgres/data /opt/mira/qdrant/storage
+docker compose up -d
+```
+
+## Resource Usage
+
+| Service | RAM | Disk |
+|---------|-----|------|
+| PostgreSQL | 128-300MB | Grows with data |
+| Qdrant | 50-100MB | Grows with vectors |
+| Embedding Service | ~500MB | ~200MB (model) |
+
+**Total:** ~1GB RAM minimum, 2GB recommended

@@ -39,6 +39,10 @@ const DecisionsSchema = z.object({
   limit: z.number().optional().default(10).describe("Maximum number of results"),
 });
 
+const StatusSchema = z.object({
+  project_path: z.string().optional().describe("Optional: filter statistics to a specific project path. Returns both project-specific and global stats."),
+});
+
 export async function startServer(): Promise<void> {
   const server = new McpServer({
     name: "claude-mira3",
@@ -128,16 +132,16 @@ export async function startServer(): Promise<void> {
 
   server.tool(
     "mira_status",
-    "Show ingestion statistics and system health.",
-    {},
-    async () => {
+    "Show ingestion statistics and system health. Optionally filter by project path for project-specific stats.",
+    StatusSchema.shape,
+    async ({ project_path }) => {
       if (!backendReady) {
         return {
           content: [{ type: "text", text: "Error: Python backend not ready. Ensure Python 3.8+ is installed." }],
         };
       }
       try {
-        const result = await callRpc("status", {});
+        const result = await callRpc("status", { project_path });
         return {
           content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
         };

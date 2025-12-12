@@ -20,7 +20,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'python'))
 from mira.utils import (
     get_mira_path, extract_text_content, parse_timestamp, get_custodian
 )
-from mira.constants import EMBEDDING_MODEL_NAME, DEPENDENCIES
+from mira.constants import DEPENDENCIES
 from mira.artifacts import (
     init_artifact_db, store_file_operation, get_file_operations,
     reconstruct_file, get_artifact_stats, detect_language,
@@ -646,16 +646,23 @@ class TestIngestion:
         assert len(content) <= 900  # Should respect token limit
 
 
-class TestEmbedding:
-    """Test embedding functionality (without loading model)."""
+class TestEmbeddingClient:
+    """Test remote embedding client functionality."""
 
-    def test_embedding_function_interface(self):
-        from mira.embedding import MiraEmbeddingFunction
-        ef = MiraEmbeddingFunction()
-        # Model loading is lazy, so we can create the object without loading
-        assert ef.model is None  # Not loaded yet
-        assert hasattr(ef, 'embed_query')
-        assert hasattr(ef, 'embed_documents')
+    def test_embedding_client_interface(self):
+        """Test that embedding_client module has expected interface."""
+        from mira.embedding_client import EmbeddingClient, get_embedding_client
+
+        # Test EmbeddingClient class exists and has expected methods
+        from mira.config import EmbeddingConfig
+        config = EmbeddingConfig(host="localhost", port=8200)
+        client = EmbeddingClient(config)
+
+        # Client only does search - embedding happens automatically on GCP
+        assert hasattr(client, 'search')
+        assert hasattr(client, 'health_check')
+        assert hasattr(client, 'stats')
+        assert client.base_url == "http://localhost:8200"
 
 
 class TestWatcher:
@@ -765,11 +772,14 @@ class TestHandlers:
             # Initialize artifact db for status call
             init_artifact_db()
 
-            # Collection is deprecated, storage is optional
-            result = handle_status(None, storage=None)
-            assert 'total_files' in result
-            assert 'indexed' in result
-            assert 'archived' in result
+            # params, collection (deprecated), storage
+            result = handle_status({}, None, storage=None)
+            # Global stats are now nested under 'global' key
+            assert 'global' in result
+            assert 'files' in result['global']
+            assert 'total' in result['global']['files']
+            assert 'ingestion' in result['global']
+            assert 'archived' in result['global']
             assert 'storage_path' in result
             assert 'last_sync' in result
         finally:
@@ -1459,11 +1469,11 @@ class TestUserExperienceScenarios:
         # Result is False without central storage but the function shouldn't crash
         assert result in [True, False]
 
-    def test_scenario_skip_agent_files(self):
+    def test_scenario_include_agent_files(self):
         """
-        SCENARIO: MIRA should skip agent-*.jsonl subagent task logs.
+        SCENARIO: MIRA should include agent-*.jsonl subagent task logs.
 
-        When discovering conversations, agent files should be filtered out.
+        Agent files contain valuable work done by subagents and should be indexed.
         """
         from mira.ingestion import discover_conversations
 
@@ -1477,10 +1487,14 @@ class TestUserExperienceScenarios:
         # Action: Discover conversations
         conversations = discover_conversations(self.claude_path.parent)
 
-        # Verify: Should include regular file but not agent file
+        # Verify: Should include both regular and agent files
         session_ids = [c['session_id'] for c in conversations]
         assert 'regular-session' in session_ids
-        assert 'agent-task-123' not in session_ids
+        assert 'agent-task-123' in session_ids
+
+        # Verify agent file is marked correctly
+        agent_conv = [c for c in conversations if c['session_id'] == 'agent-task-123'][0]
+        assert agent_conv.get('is_agent') == True
 
     def test_scenario_long_conversation_sampling(self):
         """
@@ -1698,15 +1712,19 @@ sqlalchemy.exc.IntegrityError: duplicate key value
         """
         from mira.handlers import handle_status
 
-        # Collection is deprecated, storage is optional
-        result = handle_status(None, storage=None)
+        # params, collection (deprecated), storage
+        result = handle_status({}, None, storage=None)
 
-        # Verify: Should return system overview
-        assert 'indexed' in result
+        # Verify: Should return system overview with global stats
+        assert 'global' in result
+        assert 'ingestion' in result['global']
         assert 'storage_path' in result
         assert 'last_sync' in result
-        # Without central storage, indexed will be 0
-        assert result['indexed'] >= 0
+        # Ingestion progress fields
+        assert 'indexed' in result['global']['ingestion']
+        assert 'pending' in result['global']['ingestion']
+        assert 'percent' in result['global']['ingestion']
+        assert 'complete' in result['global']['ingestion']
 
 
 class TestLocalStore:
@@ -1935,29 +1953,28 @@ class TestStorageFallback:
         results = storage.search_sessions_fts('test')
         assert isinstance(results, list)
 
-    def test_vector_operations_skip_in_local_mode(self):
-        """Test that vector operations don't crash in local mode."""
+    def test_local_first_writes(self):
+        """Test that writes always go to local SQLite first."""
         from mira.storage import Storage, reset_storage
 
         reset_storage()
         storage = Storage()
 
-        # Vector search should return empty list, not raise
-        results = storage.vector_search([0.1] * 384)
-        assert results == []
-
-        # Vector upsert should return None, not raise
-        result = storage.vector_upsert(
-            vector=[0.1] * 384,
-            content='test',
-            session_id='test',
-            project_path='/test',
+        # Upsert session should succeed even without central
+        result = storage.upsert_session(
+            project_path='/test/project',
+            session_id='test-session-local-first',
+            summary='Test summary',
+            keywords=['test', 'local'],
         )
-        assert result is None
+        # Should return local ID (not None)
+        assert result is not None
 
-        # Batch upsert should return 0, not raise
-        result = storage.vector_batch_upsert([])
-        assert result == 0
+        # Should be able to get it back from local
+        from mira import local_store
+        session = local_store.get_session_by_uuid('test-session-local-first')
+        assert session is not None
+        assert session['summary'] == 'Test summary'
 
     def test_storage_health_check_local_mode(self):
         """Test health check in local mode."""
@@ -2567,18 +2584,19 @@ class TestMiraStatusArtifacts:
         """Test that handle_status includes artifact count."""
         from mira.handlers import handle_status
 
-        result = handle_status(None, storage=None)
+        result = handle_status({}, None, storage=None)
 
-        # Should include artifact stats
-        assert 'artifacts' in result
-        artifacts = result['artifacts']
+        # Should include artifact stats under global
+        assert 'global' in result
+        assert 'artifacts' in result['global']
+        artifacts = result['global']['artifacts']
         assert 'total' in artifacts
 
     def test_status_includes_sync_queue(self):
         """Test that handle_status includes sync queue stats."""
         from mira.handlers import handle_status
 
-        result = handle_status(None, storage=None)
+        result = handle_status({}, None, storage=None)
 
         # Should include sync_queue stats
         assert 'sync_queue' in result
@@ -2587,7 +2605,7 @@ class TestMiraStatusArtifacts:
         """Test that handle_status includes active ingestions list."""
         from mira.handlers import handle_status
 
-        result = handle_status(None, storage=None)
+        result = handle_status({}, None, storage=None)
 
         # Should include active_ingestions list (empty when nothing ingesting)
         assert 'active_ingestions' in result
@@ -2597,14 +2615,38 @@ class TestMiraStatusArtifacts:
         """Test that handle_status includes file operations stats."""
         from mira.handlers import handle_status
 
-        result = handle_status(None, storage=None)
+        result = handle_status({}, None, storage=None)
 
-        # Should include file_operations stats
-        assert 'file_operations' in result
-        file_ops = result['file_operations']
+        # Should include file_operations stats under global
+        assert 'global' in result
+        assert 'file_operations' in result['global']
+        file_ops = result['global']['file_operations']
         assert 'total_operations' in file_ops
         assert 'unique_files' in file_ops
-        assert 'storage' in file_ops
+
+    def test_status_with_project_path(self):
+        """Test that handle_status returns project-scoped stats when project_path is provided."""
+        from mira.handlers import handle_status
+
+        # Call with project_path - should include 'project' section in response
+        result = handle_status({'project_path': '/workspaces/MIRA3'}, None, storage=None)
+
+        # Should have global stats
+        assert 'global' in result
+        assert 'files' in result['global']
+        assert 'total' in result['global']['files']
+        assert 'ingestion' in result['global']
+
+        # Should have project-specific stats when project_path is provided
+        assert 'project' in result
+        project_stats = result['project']
+        assert 'path' in project_stats
+        assert project_stats['path'] == '/workspaces/MIRA3'
+        assert 'files' in project_stats
+        assert 'ingestion' in project_stats
+
+        # Should have storage mode info
+        assert 'storage_mode' in result
 
 
 class TestActiveIngestionTracking:
@@ -2641,6 +2683,22 @@ class TestActiveIngestionTracking:
         # Should be empty again
         active = get_active_ingestions()
         assert len(active) == 0
+
+    def test_watcher_tracks_active_ingestions(self):
+        """Test that file watcher tracks active ingestions via _mark_ingestion_active."""
+        from mira.watcher import _mark_ingestion_active, _mark_ingestion_done
+        from mira.ingestion import get_active_ingestions
+
+        # Verify the watcher imports can mark ingestions
+        _mark_ingestion_active('watcher-test-session', '/test/path.jsonl', 'test-project', 'Watcher')
+
+        active = get_active_ingestions()
+        assert len(active) == 1
+        assert active[0]['session_id'] == 'watcher-test-session'
+        assert active[0]['worker'] == 'Watcher'
+
+        _mark_ingestion_done('watcher-test-session')
+        assert len(get_active_ingestions()) == 0
 
 
 class TestDeduplicationConstraints:

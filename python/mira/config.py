@@ -19,6 +19,14 @@ log = logging.getLogger(__name__)
 
 
 @dataclass
+class EmbeddingConfig:
+    """Embedding service connection settings."""
+    host: str
+    port: int = 8200
+    timeout_seconds: int = 60  # Embedding can take time
+
+
+@dataclass
 class QdrantConfig:
     """Qdrant vector database connection settings."""
     host: str
@@ -64,6 +72,7 @@ class CentralConfig:
     enabled: bool
     qdrant: QdrantConfig
     postgres: PostgresConfig
+    embedding: Optional[EmbeddingConfig] = None
 
 
 @dataclass
@@ -214,15 +223,33 @@ def load_config() -> ServerConfig:
             postgres.password = env_password
             log.debug("Using MIRA_POSTGRES_PASSWORD from environment")
 
+        # Parse Embedding service config (uses same host as qdrant by default)
+        embed_data = central_data.get("embedding", {})
+        embedding = None
+        if embed_data:
+            embedding = EmbeddingConfig(
+                host=embed_data.get("host", qdrant_data.get("host", "")),
+                port=embed_data.get("port", 8200),
+                timeout_seconds=embed_data.get("timeout_seconds", 60),
+            )
+        elif qdrant_data.get("host"):
+            # Default: embedding service runs on same host as qdrant
+            embedding = EmbeddingConfig(
+                host=qdrant_data.get("host"),
+                port=8200,
+            )
+
         central = CentralConfig(
             enabled=True,
             qdrant=qdrant,
             postgres=postgres,
+            embedding=embedding,
         )
 
         # Log connection info (without password)
+        embed_info = f", Embedding={embedding.host}:{embedding.port}" if embedding else ""
         log.info(f"Central storage configured: Qdrant={qdrant.host}:{qdrant.port}, "
-                 f"Postgres={postgres.connection_string(mask_password=True)}")
+                 f"Postgres={postgres.connection_string(mask_password=True)}{embed_info}")
 
     # Environment variable override for enabled state
     env_enabled = os.environ.get("MIRA_CENTRAL_ENABLED")

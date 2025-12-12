@@ -218,24 +218,35 @@ def _search_central_parallel(
     Search central storage using parallel vector + FTS queries.
 
     Merges and deduplicates results from both search types.
+    Vector search uses remote embedding service.
     """
-    from .embedding import get_embedding_function
-
-    # Get query embedding
-    embed_fn = get_embedding_function()
-    query_vector = embed_fn([query])[0]
+    from .embedding_client import get_embedding_client
 
     vector_results = []
     fts_results = []
 
+    # Get embedding client for semantic search
+    embed_client = get_embedding_client()
+
     # Run vector and FTS searches in parallel
     with ThreadPoolExecutor(max_workers=2) as executor:
-        vector_future = executor.submit(
-            storage.vector_search,
-            query_vector,
-            project_path,
-            limit
-        )
+        # Vector search via remote embedding service
+        if embed_client:
+            # Get project_id if filtering by project
+            project_id = None
+            if project_path:
+                project_id = storage.postgres.get_project_id(project_path)
+
+            vector_future = executor.submit(
+                embed_client.search,
+                query,
+                project_id,
+                project_path,
+                limit
+            )
+        else:
+            vector_future = None
+
         fts_future = executor.submit(
             storage.search_sessions_fts,
             query,
@@ -243,10 +254,18 @@ def _search_central_parallel(
             limit
         )
 
-        try:
-            vector_results = vector_future.result(timeout=30)
-        except Exception as e:
-            log(f"Vector search failed: {e}")
+        if vector_future:
+            try:
+                result = vector_future.result(timeout=60)
+                # Transform embedding service results to match expected format
+                for r in result.get("results", []):
+                    vector_results.append({
+                        "session_id": r.get("session_id"),
+                        "score": r.get("score", 0),
+                        "metadata": r.get("metadata", {}),
+                    })
+            except Exception as e:
+                log(f"Vector search failed: {e}")
 
         try:
             fts_results = fts_future.result(timeout=30)

@@ -297,16 +297,7 @@ def extract_file_operations_from_messages(
     if not operations:
         return 0
 
-    # Try central storage first
-    if storage and storage.using_central and storage.postgres and postgres_session_id:
-        try:
-            count = storage.postgres.batch_insert_file_operations(operations)
-            log(f"Batch inserted {count} file_ops to central storage")
-            return count
-        except Exception as e:
-            log(f"Central file_ops insert failed, falling back to local: {e}")
-
-    # Fallback to local SQLite
+    # LOCAL-FIRST: Store file operations locally first (always)
     ops_stored = 0
     for op in operations:
         try:
@@ -324,6 +315,17 @@ def extract_file_operations_from_messages(
             ops_stored += 1
         except Exception as e:
             log(f"Local file_op store failed: {e}")
+
+    # Queue for central sync if configured
+    if storage and storage.central_configured:
+        try:
+            from .sync_queue import get_sync_queue
+            queue = get_sync_queue()
+
+            for op in operations:
+                queue.enqueue("file_operation", op.get('operation_hash', ''), op)
+        except Exception as e:
+            log(f"Failed to queue file_ops for sync: {e}")
 
     return ops_stored
 
@@ -1058,38 +1060,22 @@ def extract_artifacts_from_messages(messages: list, session_id: str,
     if not all_artifacts:
         return 0
 
-    # Get storage if not provided
-    if storage is None:
-        try:
-            from .storage import get_storage
-            storage = get_storage()
-        except ImportError:
-            storage = None
-
-    # Try batch insert to central
-    if storage and storage.using_central and storage.postgres:
-        try:
-            count = storage.postgres.batch_insert_artifacts(all_artifacts)
-            log(f"Batch inserted {count} artifacts to central storage")
-            return count
-        except Exception as e:
-            log(f"Batch insert failed, falling back to queue: {e}")
-
-    # Fallback: queue for later sync
+    # LOCAL-FIRST: Always queue artifacts for sync (batch for performance)
+    # Artifacts depend on sessions, which are synced first by sync_worker
+    # Direct central insert would fail if session hasn't synced yet
     try:
         from .sync_queue import get_sync_queue
         queue = get_sync_queue()
         import hashlib
 
-        queued = 0
+        # Prepare batch of (data_type, item_hash, payload) tuples
+        batch_items = []
         for artifact in all_artifacts:
             hash_input = f"artifact:{artifact.get('metadata', {}).get('content_hash', '')}"
             item_hash = hashlib.sha256(hash_input.encode()).hexdigest()[:32]
-            if queue.enqueue("artifact", item_hash, artifact):
-                queued += 1
+            batch_items.append(("artifact", item_hash, artifact))
 
-        log(f"Queued {queued} artifacts for later sync")
-        return queued
+        return queue.batch_enqueue(batch_items)
     except Exception as e:
         log(f"Failed to queue artifacts: {e}")
         return 0

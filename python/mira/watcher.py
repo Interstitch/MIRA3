@@ -13,7 +13,7 @@ from pathlib import Path
 
 from .utils import log
 from .constants import WATCHER_DEBOUNCE_SECONDS, ACTIVE_SESSION_SYNC_INTERVAL
-from .ingestion import ingest_conversation, sync_active_session
+from .ingestion import ingest_conversation, sync_active_session, _mark_ingestion_active, _mark_ingestion_done
 
 # TTL for pending files - entries older than this are cleaned up
 # This prevents memory leaks if files are queued but never processed
@@ -58,14 +58,11 @@ class ConversationWatcher:
 
     def queue_file(self, file_path: str):
         """Queue a file for ingestion after debounce period."""
-        # Skip agent files from active tracking
-        if Path(file_path).name.startswith("agent-"):
-            return
-
         with self.lock:
             self.pending_files[file_path] = time.time()
-            # Track as active session (most recently modified)
-            self.active_session_path = file_path
+            # Track as active session (most recently modified, excluding agent files)
+            if not Path(file_path).name.startswith("agent-"):
+                self.active_session_path = file_path
 
     def _debounce_worker(self):
         """Background thread that processes debounced files."""
@@ -112,13 +109,10 @@ class ConversationWatcher:
         """Process a single file for ingestion."""
         path = Path(file_path)
 
-        # Skip agent files
-        if path.name.startswith("agent-"):
-            return
-
         # Build file_info
         session_id = path.stem
         project_dir = path.parent.name
+        is_agent_file = path.name.startswith("agent-")
 
         try:
             mtime = path.stat().st_mtime
@@ -130,15 +124,20 @@ class ConversationWatcher:
             'session_id': session_id,
             'file_path': str(path),
             'project_path': project_dir,
-            'last_modified': last_modified
+            'last_modified': last_modified,
+            'is_agent': is_agent_file,
         }
 
+        # Track as active ingestion
+        _mark_ingestion_active(session_id, file_path, project_dir, "Watcher")
         try:
             # Pass None for collection (deprecated), use storage
             if ingest_conversation(file_info, None, self.mira_path, self.storage):
                 log(f"Ingested: {session_id}")
         except Exception as e:
             log(f"Failed to ingest {session_id}: {e}")
+        finally:
+            _mark_ingestion_done(session_id)
 
     def _active_sync_worker(self):
         """

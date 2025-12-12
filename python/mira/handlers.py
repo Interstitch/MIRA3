@@ -2,7 +2,6 @@
 MIRA3 RPC Request Handlers Module
 
 Handles JSON-RPC requests from the Node.js MCP server.
-All handlers are audit-logged for tracking and debugging.
 """
 
 import json
@@ -16,7 +15,6 @@ from .artifacts import get_artifact_stats, get_journey_stats
 from .custodian import get_full_custodian_profile, get_danger_zones_for_files
 from .insights import search_error_solutions, search_decisions, get_error_stats, get_decision_stats
 from .concepts import get_codebase_knowledge, ConceptStore
-from .audit import AuditContext, audit_log, get_recent_audit_logs, get_audit_stats
 
 
 def _format_project_path(encoded_path: str) -> str:
@@ -1402,38 +1400,132 @@ def get_current_work_context(project_path: str = "") -> dict:
     return context
 
 
-def handle_status(collection, storage=None) -> dict:
+def handle_status(params: dict, collection, storage=None) -> dict:
     """
     Get system status and statistics.
 
+    Returns both project-scoped and global statistics when project_path is provided.
+
     Args:
+        params: Request parameters (project_path for scoped stats)
         collection: Deprecated - kept for API compatibility, ignored
         storage: Storage instance for central Qdrant + Postgres
     """
+    project_path = params.get("project_path") if params else None
     mira_path = get_mira_path()
     claude_path = Path.home() / ".claude" / "projects"
 
-    # Count source files
-    total_files = 0
+    # Get project_id for scoped queries
+    project_id = None
+    if project_path and storage and storage.using_central:
+        try:
+            project_id = storage.get_project_id(project_path)
+        except Exception:
+            pass
+
+    # Count and categorize source files - global and project-scoped
+    # All files with 3+ user/assistant messages are worth indexing
+    file_categories = {
+        'sessions': 0,         # Main session files with messages
+        'agents': 0,           # Subagent task files with messages
+        'no_messages': 0,      # Files with 0 user/assistant messages (snapshots only)
+        'minimal': 0,          # 1-2 messages (likely abandoned sessions)
+    }
+    project_files = 0
+    project_conversations = 0
+    indexable_session_ids = []  # Track session IDs of indexable files
+    project_session_ids = []    # Track session IDs for this project
+
     if claude_path.exists():
-        total_files = sum(1 for _ in claude_path.rglob("*.jsonl"))
+        encoded_project = project_path.replace('/', '-').lstrip('-') if project_path else None
+
+        for f in claude_path.rglob("*.jsonl"):
+            is_project_file = encoded_project and encoded_project in str(f.parent)
+            is_agent_file = f.name.startswith('agent-')
+            session_id = f.stem
+
+            # Count messages (user/assistant only, not file-history-snapshot etc.)
+            try:
+                msg_count = 0
+                with f.open() as fp:
+                    for line in fp:
+                        try:
+                            data = json.loads(line)
+                            if data.get('type') in ('user', 'assistant'):
+                                msg_count += 1
+                                if msg_count > 2:  # Early exit once we know it's a real conversation
+                                    break
+                        except (json.JSONDecodeError, KeyError):
+                            pass
+
+                if msg_count == 0:
+                    file_categories['no_messages'] += 1
+                elif msg_count <= 2:
+                    file_categories['minimal'] += 1
+                else:
+                    # Worth indexing - categorize by file type
+                    if is_agent_file:
+                        file_categories['agents'] += 1
+                    else:
+                        file_categories['sessions'] += 1
+                    indexable_session_ids.append(session_id)
+                    if is_project_file:
+                        project_conversations += 1
+                        project_session_ids.append(session_id)
+
+                if is_project_file:
+                    project_files += 1
+            except (IOError, OSError):
+                file_categories['no_messages'] += 1
+                if is_project_file:
+                    project_files += 1
+
+    total_files = sum(file_categories.values())
+    indexable_files = file_categories['sessions'] + file_categories['agents']
 
     # Count archived files
     archives_path = mira_path / "archives"
     archived = sum(1 for _ in archives_path.glob("*.jsonl")) if archives_path.exists() else 0
 
-    # Count indexed from central storage
-    indexed = 0
+    # Count indexed from central storage - check which current files are indexed
+    indexed_global = 0
+    indexed_project = 0
+    indexed_of_indexable = 0      # How many of current indexable files are in DB
+    indexed_of_project = 0        # How many of current project files are in DB
     if storage and storage.using_central and storage.postgres:
         try:
             with storage.postgres._get_connection() as conn:
                 with conn.cursor() as cur:
+                    # Total sessions in DB (historical)
                     cur.execute("SELECT COUNT(*) FROM sessions")
-                    indexed = cur.fetchone()[0]
+                    indexed_global = cur.fetchone()[0]
+
+                    # Project-scoped count (historical)
+                    if project_id:
+                        cur.execute("SELECT COUNT(*) FROM sessions WHERE project_id = %s", (project_id,))
+                        indexed_project = cur.fetchone()[0]
+
+                    # Check which of the current indexable files are indexed
+                    if indexable_session_ids:
+                        placeholders = ','.join(['%s'] * len(indexable_session_ids))
+                        cur.execute(
+                            f"SELECT COUNT(*) FROM sessions WHERE session_id IN ({placeholders})",
+                            indexable_session_ids
+                        )
+                        indexed_of_indexable = cur.fetchone()[0]
+
+                    # Check which of the current project files are indexed
+                    if project_session_ids:
+                        placeholders = ','.join(['%s'] * len(project_session_ids))
+                        cur.execute(
+                            f"SELECT COUNT(*) FROM sessions WHERE session_id IN ({placeholders})",
+                            project_session_ids
+                        )
+                        indexed_of_project = cur.fetchone()[0]
         except Exception:
             pass
 
-    # Get insights stats
+    # Get insights stats (local SQLite - always global for now)
     error_stats = get_error_stats()
     decision_stats = get_decision_stats()
 
@@ -1441,13 +1533,6 @@ def handle_status(collection, storage=None) -> dict:
     health = {}
     if storage:
         health = storage.health_check()
-
-    # Get audit stats
-    audit_stats = {}
-    try:
-        audit_stats = get_audit_stats(days=7)
-    except Exception:
-        pass
 
     # Get sync queue stats
     sync_queue_stats = {}
@@ -1466,88 +1551,230 @@ def handle_status(collection, storage=None) -> dict:
     except Exception:
         pass
 
-    # Get artifact stats - central is source of truth, local is fallback cache
-    artifact_stats = {}
+    # Count active ingestions for this project (if project_path specified)
+    project_active_count = 0
+    if project_path:
+        encoded_project = project_path.replace('/', '-').lstrip('-')
+        for job in active_ingestions:
+            job_project = job.get('project_path', '')
+            if encoded_project in job_project or job_project.lstrip('-') == encoded_project:
+                project_active_count += 1
+
+    # Get artifact stats - global and project-scoped
+    artifact_stats = {'global': {}, 'project': {}}
 
     if storage and storage.using_central and storage.postgres:
         try:
             with storage.postgres._get_connection() as conn:
                 with conn.cursor() as cur:
-                    # Total central artifacts
+                    # GLOBAL artifact stats
                     cur.execute("SELECT COUNT(*) FROM artifacts")
-                    artifact_stats['total'] = cur.fetchone()[0]
+                    artifact_stats['global']['total'] = cur.fetchone()[0]
 
-                    # Central artifacts by type
                     cur.execute("""
                         SELECT artifact_type, COUNT(*)
                         FROM artifacts
                         GROUP BY artifact_type
                         ORDER BY COUNT(*) DESC
                     """)
-                    artifact_stats['by_type'] = {
+                    artifact_stats['global']['by_type'] = {
                         row[0]: row[1] for row in cur.fetchall()
                     }
 
-                    # Central artifacts by language (for code blocks)
-                    cur.execute("""
-                        SELECT language, COUNT(*)
-                        FROM artifacts
-                        WHERE language IS NOT NULL
-                        GROUP BY language
-                        ORDER BY COUNT(*) DESC
-                    """)
-                    artifact_stats['by_language'] = {
-                        row[0]: row[1] for row in cur.fetchall()
-                    }
+                    # PROJECT-scoped artifact stats
+                    if project_id:
+                        cur.execute("""
+                            SELECT COUNT(*) FROM artifacts a
+                            JOIN sessions s ON a.session_id = s.id
+                            WHERE s.project_id = %s
+                        """, (project_id,))
+                        artifact_stats['project']['total'] = cur.fetchone()[0]
+
+                        cur.execute("""
+                            SELECT a.artifact_type, COUNT(*)
+                            FROM artifacts a
+                            JOIN sessions s ON a.session_id = s.id
+                            WHERE s.project_id = %s
+                            GROUP BY a.artifact_type
+                            ORDER BY COUNT(*) DESC
+                        """, (project_id,))
+                        artifact_stats['project']['by_type'] = {
+                            row[0]: row[1] for row in cur.fetchall()
+                        }
 
                     artifact_stats['storage'] = 'central'
         except Exception:
             # Fall back to local stats if central query fails
-            artifact_stats = get_artifact_stats()
+            local_stats = get_artifact_stats()
+            artifact_stats['global'] = local_stats
             artifact_stats['storage'] = 'local_fallback'
     else:
         # No central storage - use local stats
-        artifact_stats = get_artifact_stats()
+        local_stats = get_artifact_stats()
+        artifact_stats['global'] = local_stats
         artifact_stats['storage'] = 'local_only'
 
-    # Get file operations stats (for file history tracking)
-    file_ops_stats = {}
+    # Get file operations stats - global and project-scoped
+    file_ops_stats = {'global': {}, 'project': {}}
     if storage and storage.using_central and storage.postgres:
         try:
-            file_ops_stats = storage.postgres.get_file_operations_stats()
-            file_ops_stats['storage'] = 'central'
+            with storage.postgres._get_connection() as conn:
+                with conn.cursor() as cur:
+                    # GLOBAL file operations stats
+                    cur.execute("SELECT COUNT(*) FROM file_operations")
+                    file_ops_stats['global']['total_operations'] = cur.fetchone()[0]
+
+                    cur.execute("SELECT COUNT(DISTINCT file_path) FROM file_operations")
+                    file_ops_stats['global']['unique_files'] = cur.fetchone()[0]
+
+                    # PROJECT-scoped file operations stats
+                    if project_id:
+                        cur.execute("""
+                            SELECT COUNT(*) FROM file_operations fo
+                            JOIN sessions s ON fo.session_id = s.id
+                            WHERE s.project_id = %s
+                        """, (project_id,))
+                        file_ops_stats['project']['total_operations'] = cur.fetchone()[0]
+
+                        cur.execute("""
+                            SELECT COUNT(DISTINCT fo.file_path) FROM file_operations fo
+                            JOIN sessions s ON fo.session_id = s.id
+                            WHERE s.project_id = %s
+                        """, (project_id,))
+                        file_ops_stats['project']['unique_files'] = cur.fetchone()[0]
+
+                    file_ops_stats['storage'] = 'central'
         except Exception:
-            # Table might not exist yet - that's OK
-            file_ops_stats = {'total_operations': 0, 'unique_files': 0, 'storage': 'pending_migration'}
+            file_ops_stats['global'] = {'total_operations': 0, 'unique_files': 0}
+            file_ops_stats['storage'] = 'pending_migration'
     else:
         # Get from local storage
         try:
             from .artifacts import get_journey_stats
             journey = get_journey_stats()
-            file_ops_stats = {
+            file_ops_stats['global'] = {
                 'total_operations': journey.get('files_created', 0) + journey.get('total_edits', 0),
                 'unique_files': journey.get('unique_files', 0),
-                'storage': 'local_only'
             }
+            file_ops_stats['storage'] = 'local_only'
         except Exception:
-            file_ops_stats = {'total_operations': 0, 'unique_files': 0, 'storage': 'error'}
+            file_ops_stats['global'] = {'total_operations': 0, 'unique_files': 0}
+            file_ops_stats['storage'] = 'error'
 
-    return {
-        "total_files": total_files,
-        "archived": archived,
-        "indexed": indexed,
-        "pending": total_files - archived,
+    # Get decision stats from central storage - global and project-scoped
+    decision_stats_central = {'global': {}, 'project': {}}
+    if storage and storage.using_central and storage.postgres:
+        try:
+            with storage.postgres._get_connection() as conn:
+                with conn.cursor() as cur:
+                    # GLOBAL decision stats
+                    cur.execute("SELECT COUNT(*) FROM decisions")
+                    decision_stats_central['global']['total'] = cur.fetchone()[0]
+
+                    cur.execute("""
+                        SELECT category, COUNT(*)
+                        FROM decisions
+                        GROUP BY category
+                        ORDER BY COUNT(*) DESC
+                    """)
+                    decision_stats_central['global']['by_category'] = {
+                        row[0]: row[1] for row in cur.fetchall()
+                    }
+
+                    # PROJECT-scoped decision stats
+                    if project_id:
+                        cur.execute("""
+                            SELECT COUNT(*) FROM decisions d
+                            JOIN sessions s ON d.session_id = s.id
+                            WHERE s.project_id = %s
+                        """, (project_id,))
+                        decision_stats_central['project']['total'] = cur.fetchone()[0]
+
+                        cur.execute("""
+                            SELECT d.category, COUNT(*)
+                            FROM decisions d
+                            JOIN sessions s ON d.session_id = s.id
+                            WHERE s.project_id = %s
+                            GROUP BY d.category
+                            ORDER BY COUNT(*) DESC
+                        """, (project_id,))
+                        decision_stats_central['project']['by_category'] = {
+                            row[0]: row[1] for row in cur.fetchall()
+                        }
+
+                    decision_stats_central['storage'] = 'central'
+        except Exception:
+            decision_stats_central['global'] = decision_stats
+            decision_stats_central['storage'] = 'local_fallback'
+    else:
+        decision_stats_central['global'] = decision_stats
+        decision_stats_central['storage'] = 'local_only'
+
+    # Build response with clear project vs global distinction
+    result = {
         "storage_path": str(mira_path),
         "last_sync": datetime.now().isoformat(),
-        "errors": error_stats,
-        "decisions": decision_stats,
-        "artifacts": artifact_stats,
-        "file_operations": file_ops_stats,
         "storage_health": health,
         "sync_queue": sync_queue_stats,
-        "audit": audit_stats,
-        "active_ingestions": active_ingestions
+        "active_ingestions": active_ingestions,
+        # Global stats
+        "global": {
+            "files": {
+                "total": total_files,
+                "indexable": indexable_files,              # Worth indexing (sessions + agents with 3+ msgs)
+                "sessions": file_categories['sessions'],   # Main conversations (3+ messages)
+                "agents": file_categories['agents'],       # Subagent tasks (3+ messages)
+                "skipped": {
+                    "no_messages": file_categories['no_messages'],  # Empty/snapshots only
+                    "minimal": file_categories['minimal'],          # 1-2 msgs, likely abandoned
+                },
+            },
+            "ingestion": {
+                "indexed": min(indexed_of_indexable, indexable_files),  # Current files that are indexed
+                "pending": max(0, indexable_files - indexed_of_indexable - len(active_ingestions)),  # Not yet started
+                "in_progress": len(active_ingestions),     # Currently being processed
+                "complete": indexed_of_indexable >= indexable_files and len(active_ingestions) == 0,
+                "percent": min(100, round(100 * indexed_of_indexable / indexable_files)) if indexable_files > 0 else 100,
+                "total_in_db": indexed_global,             # Historical: all sessions ever indexed
+            },
+            "archived": archived,
+            "artifacts": artifact_stats['global'],
+            "decisions": decision_stats_central['global'],
+            "file_operations": file_ops_stats['global'],
+            "errors": error_stats,  # Local SQLite, always global
+        },
     }
+
+    # Add project-scoped stats if project_path was provided
+    if project_path:
+        result["project"] = {
+            "path": project_path,
+            "project_id": project_id,
+            "files": {
+                "total": project_files,
+                "conversations": project_conversations,
+            },
+            "ingestion": {
+                "indexed": min(indexed_of_project, project_conversations),
+                "pending": max(0, project_conversations - indexed_of_project - project_active_count),
+                "in_progress": project_active_count,
+                "complete": indexed_of_project >= project_conversations and project_active_count == 0,
+                "percent": min(100, round(100 * indexed_of_project / project_conversations)) if project_conversations > 0 else 100,
+                "total_in_db": indexed_project,
+            },
+            "artifacts": artifact_stats.get('project', {}),
+            "decisions": decision_stats_central.get('project', {}),
+            "file_operations": file_ops_stats.get('project', {}),
+        }
+
+    # Add storage info
+    result["storage_mode"] = {
+        "artifacts": artifact_stats.get('storage', 'unknown'),
+        "decisions": decision_stats_central.get('storage', 'unknown'),
+        "file_operations": file_ops_stats.get('storage', 'unknown'),
+    }
+
+    return result
 
 
 def handle_error_lookup(params: dict, storage=None) -> dict:
@@ -1700,8 +1927,6 @@ def handle_rpc_request(request: dict, collection, storage=None) -> dict:
     """
     Handle a JSON-RPC request and return response.
 
-    All requests are audit-logged for tracking and debugging.
-
     Args:
         request: JSON-RPC request dict
         collection: Deprecated - kept for API compatibility, ignored
@@ -1714,54 +1939,28 @@ def handle_rpc_request(request: dict, collection, storage=None) -> dict:
     result = None
     error = None
 
-    # Determine resource info for audit log
-    resource_type = None
-    resource_id = None
-    if method == "search":
-        resource_type = "search"
-        resource_id = params.get("query", "")[:50] if params.get("query") else None
-    elif method in ("init", "recent", "error_lookup", "decisions"):
-        resource_type = "project"
-        resource_id = params.get("project_path")
-
-    with AuditContext(
-        action=f"rpc:{method}",
-        resource_type=resource_type,
-        resource_id=resource_id,
-        parameters=params,
-    ) as audit:
-        try:
-            if method == "search":
-                # search.py's handle_search uses storage for central, ignores collection
-                result = handle_search(params, collection, storage)
-                audit.set_result(result_count=result.get("total", 0), search_type=result.get("search_type"))
-            elif method == "recent":
-                result = handle_recent(params, storage)
-                audit.set_result(total=result.get("total", 0))
-            elif method == "init":
-                result = handle_init(params, collection, storage)
-                audit.set_result(has_custodian=bool(result.get("core", {}).get("custodian")))
-            elif method == "status":
-                result = handle_status(collection, storage)
-                audit.set_result(indexed=result.get("indexed", 0))
-            elif method == "error_lookup":
-                result = handle_error_lookup(params, storage)
-                audit.set_result(result_count=len(result.get("results", [])))
-            elif method == "decisions":
-                result = handle_decisions(params, storage)
-                audit.set_result(result_count=len(result.get("results", [])))
-            elif method == "shutdown":
-                result = {"status": "shutting_down"}
-            else:
-                error = {"code": -32601, "message": f"Method not found: {method}"}
-                audit.set_failure(f"Unknown method: {method}")
-        except Exception as e:
-            # Log full error for debugging, return sanitized message
-            log(f"RPC handler error for {method}: {e}")
-            import traceback
-            log(f"Traceback: {traceback.format_exc()}")
-            error = {"code": -32603, "message": "Internal error processing request"}
-            audit.set_failure(str(e))
+    try:
+        if method == "search":
+            result = handle_search(params, collection, storage)
+        elif method == "recent":
+            result = handle_recent(params, storage)
+        elif method == "init":
+            result = handle_init(params, collection, storage)
+        elif method == "status":
+            result = handle_status(params, collection, storage)
+        elif method == "error_lookup":
+            result = handle_error_lookup(params, storage)
+        elif method == "decisions":
+            result = handle_decisions(params, storage)
+        elif method == "shutdown":
+            result = {"status": "shutting_down"}
+        else:
+            error = {"code": -32601, "message": f"Method not found: {method}"}
+    except Exception as e:
+        log(f"RPC handler error for {method}: {e}")
+        import traceback
+        log(f"Traceback: {traceback.format_exc()}")
+        error = {"code": -32603, "message": "Internal error processing request"}
 
     response = {"jsonrpc": "2.0", "id": request_id}
     if error:

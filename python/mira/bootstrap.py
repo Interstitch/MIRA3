@@ -84,16 +84,8 @@ def ensure_venv_and_deps() -> bool:
             capture_output=True
         )
 
-        # Install CPU-only PyTorch first to avoid 6GB+ of CUDA libraries
-        # sentence-transformers will use this instead of downloading GPU version
-        log("Installing CPU-only PyTorch (saves ~6GB vs GPU version)...")
-        subprocess.run(
-            [pip, "install", "torch", "--index-url", "https://download.pytorch.org/whl/cpu", "-q"],
-            check=True,
-            capture_output=True
-        )
-
-        # Install all dependencies (Qdrant + Postgres included by default)
+        # Install lightweight dependencies only
+        # No PyTorch or sentence-transformers - embeddings are computed by remote service
         subprocess.run(
             [pip, "install"] + DEPENDENCIES + ["-q"],
             check=True,

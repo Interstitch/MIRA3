@@ -1,6 +1,6 @@
 {
   "name": "claude-mira3",
-  "version": "0.2.9",
+  "version": "0.2.19",
   "description": "MCP server for Claude Code conversation history with semantic search via ChromaDB",
   "type": "module",
   "main": "dist/cli.js",
@@ -9,7 +9,9 @@
   },
   "files": [
     "dist/",
-    "python/"
+    "python/",
+    "docs/",
+    "server/"
   ],
   "scripts": {
     "build": "tsc",

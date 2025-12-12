@@ -41,7 +41,7 @@ Verify connection with `tailscale status` - you should see `mira-server` at `100
 
 ## Project Overview
 
-MIRA3 (Memory Information Retriever and Archiver) is an MCP server that monitors, archives, and provides semantic search over Claude Code conversation history. It uses ChromaDB for vector embeddings with the all-MiniLM-L6-v2 model.
+MIRA3 (Memory Information Retriever and Archiver) is an MCP server that monitors, archives, and provides search over Claude Code conversation history. Uses SQLite FTS5 locally with optional remote storage (Postgres + Qdrant) for semantic search.
 
 ## Build and Development Commands
 
@@ -73,11 +73,11 @@ npx tsx test/integration.ts
    - Registers 6 MCP tools: `mira_search`, `mira_recent`, `mira_init`, `mira_status`, `mira_error_lookup`, `mira_decisions`
    - Spawns and communicates with Python backend via JSON-RPC over stdio
 
-2. **Python Backend Daemon** (`python/mira/`) - Self-installing modular backend:
-   - On first run: Creates `.mira/.venv/`, installs chromadb, sentence-transformers, watchdog
+2. **Python Backend Daemon** (`python/mira/`) - Lightweight self-installing backend:
+   - On first run: Creates `.mira/.venv/`, installs watchdog + psycopg2 (~50MB total)
    - Runs file watcher on `~/.claude/projects/` for new conversations
-   - Manages ChromaDB for semantic search
-   - Uses all-MiniLM-L6-v2 (384-dim) for embeddings
+   - SQLite FTS5 for local keyword search
+   - Remote embedding service for semantic search (optional)
 
 ### Key Files
 
@@ -94,7 +94,7 @@ npx tsx test/integration.ts
 | `python/mira/metadata.py` | Summary, keyword, and fact extraction |
 | `python/mira/artifacts.py` | SQLite FTS5 artifact storage |
 | `python/mira/watcher.py` | File watcher with debouncing |
-| `python/mira/embedding.py` | MiraEmbeddingFunction for ChromaDB |
+| `python/mira/embedding_client.py` | HTTP client for remote embedding service |
 | `python/mira/custodian.py` | Custodian learning and profile management |
 | `python/mira/insights.py` | Error pattern recognition and decision journal |
 | `python/mira/concepts.py` | Codebase concept extraction and tracking |
@@ -111,26 +111,32 @@ The Node.js layer is intentionally thin. All storage, search, and ingestion logi
 
 ```
 .mira/
-├── .venv/           # Auto-created Python virtualenv
+├── .venv/           # Auto-created Python virtualenv (~50MB)
 ├── config.json      # Installation state
-├── chroma/          # ChromaDB persistent storage
-├── artifacts.db     # SQLite database for structured content (code, lists, tables, etc.)
-├── custodian.db     # SQLite database for learned user preferences and patterns
-├── insights.db      # SQLite database for error patterns and architectural decisions
-├── concepts.db      # SQLite database for learned codebase concepts
+├── server.json      # Remote storage credentials (if configured)
+├── local_store.db   # Main SQLite DB with FTS5 search
+├── artifacts.db     # Structured content (code, lists, tables)
+├── custodian.db     # Learned user preferences
+├── insights.db      # Error patterns and decisions
+├── concepts.db      # Codebase concepts
+├── sync_queue.db    # Pending syncs to remote
+├── migrations.db    # Schema version tracking
 ├── archives/        # Conversation copies
 ├── metadata/        # Extracted session metadata (JSON)
-└── models/          # Cached sentence-transformers model
+├── mira.log         # Runtime logs
+├── mira.lock        # Singleton lock file
+└── mira.pid         # Process ID file
 ```
 
 ## Key Design Decisions
 
 - The Python backend re-executes itself inside `.mira/.venv/` after bootstrapping dependencies
 - Backend sends a `{"method": "ready"}` notification when startup completes
-- ChromaDB collection uses custom `MiraEmbeddingFunction` wrapping sentence-transformers
-- ChromaDB uses all-MiniLM-L6-v2 (384-dim) for semantic embeddings
+- Local: SQLite FTS5 for keyword search (no external dependencies)
+- Remote (optional): Postgres for metadata + Qdrant for semantic vectors
+- Embeddings computed by remote embedding-service (no local PyTorch/sentence-transformers)
 - File watcher has 5-second debounce to avoid duplicate ingestion
-- First-run timeout is 10 minutes to allow for dependency installation and model download
+- Singleton lock prevents duplicate MIRA instances
 
 ## Indexing Behavior
 
@@ -233,7 +239,7 @@ MIRA extracts and tracks key concepts about the codebase from conversation analy
 **What MIRA Captures:**
 - **Components**: Major architectural pieces (e.g., "Python backend", "MCP server")
 - **Module purposes**: What each file does (learned from discussion)
-- **Technology roles**: How technologies are used (e.g., "ChromaDB for vector search")
+- **Technology roles**: How technologies are used (e.g., "Qdrant for vector search")
 - **Integration patterns**: How components communicate (e.g., "JSON-RPC over stdio")
 - **Design patterns**: Architectural approaches (e.g., "two-layer architecture")
 - **User-provided facts**: Explicit statements about the codebase
@@ -362,3 +368,4 @@ pool_size: int = 6  # max_workers=4 + headroom for health checks
 ---
 
 Yes, updated both `config.py` and `postgres_backend.py`. Running tests now to verify nothing broke.
+- Any file getting larger than 1,500 lines should trigger an automatic refactor to mutliple files.
