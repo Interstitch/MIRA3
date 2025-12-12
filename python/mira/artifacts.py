@@ -927,7 +927,8 @@ def collect_artifacts_from_content(content: str, session_id: str, role: str = No
         content_hash = hashlib.sha256(hash_input.encode()).hexdigest()[:32]
 
         artifacts.append({
-            "session_id": postgres_session_id,
+            "session_id": postgres_session_id,  # Local postgres ID for local storage
+            "_local_session_id": session_id,    # UUID for central sync lookup
             "artifact_type": artifact_type,
             "content": artifact_content,
             "language": language,
