@@ -16,17 +16,19 @@ Deploy MIRA's central storage services on a Linux server using Docker.
 - At least 2GB RAM (embedding model needs ~500MB)
 - Network access from your development machines
 
-## Quick Install
+## Install
+
+### Step 1: Download Files
+
+**Option A: One-liner script (recommended)**
 
 ```bash
 curl -sL https://raw.githubusercontent.com/Interstitch/MIRA3/master/server/install.sh | bash
 ```
 
-The script prompts for your server IP and PostgreSQL password, then starts everything.
+The script prompts for your server IP and PostgreSQL password, then starts everything. You can skip to [Verify](#verify) after this completes.
 
-## Manual Install
-
-### Step 1: Download Files
+**Option B: Manual download**
 
 ```bash
 mkdir -p /opt/mira && cd /opt/mira
