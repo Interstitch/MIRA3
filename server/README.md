@@ -36,7 +36,7 @@ curl -O https://raw.githubusercontent.com/Interstitch/MIRA3/master/server/docker
 curl -O https://raw.githubusercontent.com/Interstitch/MIRA3/master/server/.env.example
 ```
 
-### Step 2: Configure
+### Step 2: Configure (manual only)
 
 ```bash
 cp .env.example .env
@@ -47,10 +47,11 @@ Set these values:
 
 ```bash
 POSTGRES_PASSWORD=your_secure_password_here
+QDRANT_API_KEY=your_qdrant_api_key_here
 SERVER_IP=192.168.1.100  # Your server's IP address
 ```
 
-### Step 3: Start
+### Step 3: Start (manual only)
 
 ```bash
 docker compose up -d

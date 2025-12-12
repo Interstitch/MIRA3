@@ -56,7 +56,7 @@ else
     read -p "Server IP address [$DEFAULT_IP]: " SERVER_IP
     SERVER_IP="${SERVER_IP:-$DEFAULT_IP}"
 
-    # Get password
+    # Get PostgreSQL password
     read -s -p "PostgreSQL password: " PG_PASSWORD
     echo ""
 
@@ -65,9 +65,19 @@ else
         exit 1
     fi
 
+    # Get Qdrant API key
+    read -s -p "Qdrant API key: " QDRANT_KEY
+    echo ""
+
+    if [ -z "$QDRANT_KEY" ]; then
+        echo "Error: API key cannot be empty"
+        exit 1
+    fi
+
     # Update .env
     sed -i "s/SERVER_IP=.*/SERVER_IP=$SERVER_IP/" .env
     sed -i "s/POSTGRES_PASSWORD=.*/POSTGRES_PASSWORD=$PG_PASSWORD/" .env
+    sed -i "s/QDRANT_API_KEY=.*/QDRANT_API_KEY=$QDRANT_KEY/" .env
 
     echo ""
     echo "Configuration saved to .env"
