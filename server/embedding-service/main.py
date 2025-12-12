@@ -305,36 +305,59 @@ MAX_CHUNKS = 50  # Max chunks per session to avoid runaway indexing
 
 def chunk_content(content: str, chunk_size: int = CHUNK_SIZE, overlap: int = CHUNK_OVERLAP) -> List[str]:
     """
-    Split content into overlapping chunks for embedding.
+    Split content into chunks for embedding.
 
-    Uses a simple character-based chunking with overlap to maintain context
-    across chunk boundaries.
+    For small content: sequential chunks with overlap.
+    For large content: evenly distributed samples to cover the full document.
     """
     if len(content) <= chunk_size:
         return [content]
 
+    # Calculate how many chunks we'd need for full coverage
+    effective_chunk = chunk_size - overlap
+    total_chunks_needed = (len(content) - overlap) // effective_chunk + 1
+
+    if total_chunks_needed <= MAX_CHUNKS:
+        # Small enough - use sequential chunking
+        chunks = []
+        start = 0
+        while start < len(content) and len(chunks) < MAX_CHUNKS:
+            end = min(start + chunk_size, len(content))
+            chunk = content[start:end]
+
+            # Try to break at newline for cleaner chunks
+            if end < len(content):
+                break_zone = chunk[-200:] if len(chunk) > 200 else chunk
+                newline_pos = break_zone.rfind('\n')
+                if newline_pos > 0:
+                    adjust = len(chunk) - len(break_zone) + newline_pos + 1
+                    chunk = content[start:start + adjust]
+
+            chunks.append(chunk)
+            start += effective_chunk
+
+        return chunks
+
+    # Large document - sample evenly across the content
+    # Always include: first chunk, last chunk, and evenly spaced middle chunks
     chunks = []
-    start = 0
-    while start < len(content):
-        end = start + chunk_size
-        chunk = content[start:end]
 
-        # Try to break at a newline or space for cleaner chunks
-        if end < len(content):
-            # Look for a good break point in the last 200 chars
-            break_zone = chunk[-200:]
-            newline_pos = break_zone.rfind('\n')
-            if newline_pos > 0:
-                end = start + (chunk_size - 200) + newline_pos + 1
-                chunk = content[start:end]
+    # First chunk (beginning context)
+    chunks.append(content[:chunk_size])
 
-        chunks.append(chunk)
-        start = end - overlap  # Overlap for context
+    # Calculate positions for middle chunks
+    middle_chunks = MAX_CHUNKS - 2  # Reserve 2 for first and last
+    if middle_chunks > 0:
+        # Evenly distribute across the document
+        step = (len(content) - chunk_size) / (middle_chunks + 1)
+        for i in range(1, middle_chunks + 1):
+            start = int(step * i)
+            chunks.append(content[start:start + chunk_size])
 
-        if len(chunks) >= MAX_CHUNKS:
-            logger.warning(f"Reached max chunks ({MAX_CHUNKS}), truncating")
-            break
+    # Last chunk (most recent content - often most relevant)
+    chunks.append(content[-chunk_size:])
 
+    logger.info(f"Large doc ({len(content)} chars): sampled {len(chunks)} chunks evenly")
     return chunks
 
 
