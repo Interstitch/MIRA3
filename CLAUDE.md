@@ -25,6 +25,23 @@ The `mira_init` tool returns:
 
 **Run `mira_init` again** if the session runs long or context seems stale.
 
+### Use MIRA to Look Up Past Solutions
+
+**Before asking the user or getting stuck, search MIRA for how we've done things before.**
+
+When you encounter:
+- Infrastructure tasks (SSH access, server setup, deployments)
+- Recurring problems (connection issues, permission errors)
+- Project-specific procedures (release process, testing workflows)
+- Anything that feels like "we've probably done this before"
+
+**Use `mira_search` first:**
+```
+mira_search with query like "SSH GCP server access" or "deploy docker compose"
+```
+
+Past conversations contain solutions, commands, usernames, and context that save time. The artifact search is especially useful for finding specific commands and code blocks from previous sessions.
+
 ### Tailscale Requirement (Codespaces)
 
 MIRA uses central storage (Qdrant + PostgreSQL) on GCP, accessed via Tailscale VPN. **Tailscale must be running for MIRA to connect to central storage.**

@@ -65,56 +65,64 @@ CREATE TABLE IF NOT EXISTS schema_version (
 -- Projects
 CREATE TABLE IF NOT EXISTS projects (
     id SERIAL PRIMARY KEY,
-    project_path TEXT UNIQUE NOT NULL,
+    path TEXT UNIQUE NOT NULL,
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
-CREATE INDEX IF NOT EXISTS idx_projects_path ON projects(project_path);
+CREATE INDEX IF NOT EXISTS idx_projects_path ON projects(path);
 
 -- Sessions
 CREATE TABLE IF NOT EXISTS sessions (
     id SERIAL PRIMARY KEY,
-    session_id TEXT UNIQUE NOT NULL,
-    project_id INTEGER REFERENCES projects(id),
-    slug TEXT,
+    project_id INTEGER REFERENCES projects(id) ON DELETE CASCADE,
+    session_id TEXT NOT NULL,
     summary TEXT,
+    keywords TEXT[],
+    facts TEXT[],
     task_description TEXT,
     git_branch TEXT,
-    keywords TEXT[],
+    models_used TEXT[],
+    tools_used TEXT[],
+    files_touched TEXT[],
     message_count INTEGER DEFAULT 0,
-    file_hash TEXT,
-    indexed_at TIMESTAMPTZ DEFAULT NOW(),
+    started_at TIMESTAMPTZ,
+    ended_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    llm_processed_at TIMESTAMPTZ,
     vector_indexed_at TIMESTAMPTZ,
-    llm_processed_at TIMESTAMPTZ
+    UNIQUE(project_id, session_id)
 );
-CREATE INDEX IF NOT EXISTS idx_sessions_session_id ON sessions(session_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(project_id);
-CREATE INDEX IF NOT EXISTS idx_sessions_indexed ON sessions(indexed_at DESC);
+CREATE INDEX IF NOT EXISTS idx_sessions_started ON sessions(started_at DESC);
+CREATE INDEX IF NOT EXISTS idx_sessions_llm_processed ON sessions(llm_processed_at);
 
 -- Archives (conversation content)
 CREATE TABLE IF NOT EXISTS archives (
     id SERIAL PRIMARY KEY,
-    session_id TEXT UNIQUE NOT NULL REFERENCES sessions(session_id) ON DELETE CASCADE,
-    content TEXT,
-    archived_at TIMESTAMPTZ DEFAULT NOW(),
-    updated_at TIMESTAMPTZ
+    session_id INTEGER UNIQUE REFERENCES sessions(id) ON DELETE CASCADE,
+    content TEXT NOT NULL,
+    content_hash TEXT NOT NULL,
+    size_bytes INTEGER,
+    line_count INTEGER,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW()
 );
+CREATE INDEX IF NOT EXISTS idx_archives_session ON archives(session_id);
 
 -- Artifacts
 CREATE TABLE IF NOT EXISTS artifacts (
     id SERIAL PRIMARY KEY,
-    project_id INTEGER REFERENCES projects(id),
-    session_id TEXT REFERENCES sessions(session_id) ON DELETE CASCADE,
+    session_id INTEGER REFERENCES sessions(id) ON DELETE CASCADE,
     artifact_type TEXT NOT NULL,
     content TEXT NOT NULL,
     language TEXT,
-    context TEXT,
     line_count INTEGER,
-    created_at TIMESTAMPTZ DEFAULT NOW(),
-    UNIQUE(session_id, artifact_type, content)
+    metadata JSONB DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ DEFAULT NOW()
 );
-CREATE INDEX IF NOT EXISTS idx_artifacts_project ON artifacts(project_id);
 CREATE INDEX IF NOT EXISTS idx_artifacts_session ON artifacts(session_id);
 CREATE INDEX IF NOT EXISTS idx_artifacts_type ON artifacts(artifact_type);
+CREATE INDEX IF NOT EXISTS idx_artifacts_session_type_content ON artifacts(session_id, artifact_type, md5(content));
+CREATE INDEX IF NOT EXISTS idx_artifacts_fts ON artifacts USING gin(to_tsvector('english', content));
 
 -- Decisions
 CREATE TABLE IF NOT EXISTS decisions (
@@ -361,13 +369,13 @@ def poll_and_index():
             # - Archive updated after vector_indexed_at
             cur.execute("""
                 SELECT s.id, s.session_id, s.project_id, s.summary, s.keywords,
-                       p.project_path, a.content, a.updated_at as archive_updated
+                       p.path as project_path, a.content, a.updated_at as archive_updated
                 FROM sessions s
                 JOIN projects p ON s.project_id = p.id
-                LEFT JOIN archives a ON s.session_id = a.session_id
+                LEFT JOIN archives a ON s.id = a.session_id
                 WHERE s.vector_indexed_at IS NULL
                    OR (a.updated_at IS NOT NULL AND a.updated_at > s.vector_indexed_at)
-                ORDER BY s.indexed_at DESC
+                ORDER BY s.created_at DESC
                 LIMIT %s
             """, (BATCH_SIZE,))
 
@@ -477,14 +485,26 @@ async def startup():
         cursor_factory=RealDictCursor
     )
 
-    # Initialize database schema (creates tables if they don't exist)
+    # Initialize database schema (skip if tables already exist)
     try:
         with get_db_connection() as conn:
             cur = conn.cursor()
-            cur.execute(SCHEMA_SQL)
-            conn.commit()
+            # Check if sessions table exists (core table)
+            cur.execute("""
+                SELECT EXISTS (
+                    SELECT FROM information_schema.tables
+                    WHERE table_schema = 'public' AND table_name = 'sessions'
+                )
+            """)
+            tables_exist = cur.fetchone()['exists']
+
+            if tables_exist:
+                logger.info("Database schema already exists, skipping initialization")
+            else:
+                cur.execute(SCHEMA_SQL)
+                conn.commit()
+                logger.info("Database schema initialized")
             cur.close()
-            logger.info("Database schema initialized")
     except Exception as e:
         logger.error(f"Failed to initialize schema: {e}")
 
