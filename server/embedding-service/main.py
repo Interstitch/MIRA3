@@ -297,51 +297,111 @@ def get_db_connection():
 # Background Indexer
 # ===========================================
 
-def index_session(row: dict) -> bool:
-    """Index a single session to Qdrant. Returns True on success."""
-    try:
-        # Get text to embed (prefer archive content, fall back to summary)
-        # For archives, use LAST 8KB (recent messages) + summary for context
-        text = ""
-        if row.get('content'):
-            content = row['content']
-            # Use last 8KB of content (recent messages are more relevant)
-            # Prepend summary for context
-            summary = row.get('summary', '') or ''
-            recent_content = content[-7500:] if len(content) > 7500 else content
-            text = f"{summary}\n\n{recent_content}"
-        elif row.get('summary'):
-            text = row['summary']
+# Chunking configuration
+CHUNK_SIZE = 4000  # Characters per chunk
+CHUNK_OVERLAP = 500  # Overlap between chunks for context continuity
+MAX_CHUNKS = 50  # Max chunks per session to avoid runaway indexing
 
-        if not text:
-            logger.debug(f"Skipping {row['session_id'][:12]}: no content")
+
+def chunk_content(content: str, chunk_size: int = CHUNK_SIZE, overlap: int = CHUNK_OVERLAP) -> List[str]:
+    """
+    Split content into overlapping chunks for embedding.
+
+    Uses a simple character-based chunking with overlap to maintain context
+    across chunk boundaries.
+    """
+    if len(content) <= chunk_size:
+        return [content]
+
+    chunks = []
+    start = 0
+    while start < len(content):
+        end = start + chunk_size
+        chunk = content[start:end]
+
+        # Try to break at a newline or space for cleaner chunks
+        if end < len(content):
+            # Look for a good break point in the last 200 chars
+            break_zone = chunk[-200:]
+            newline_pos = break_zone.rfind('\n')
+            if newline_pos > 0:
+                end = start + (chunk_size - 200) + newline_pos + 1
+                chunk = content[start:end]
+
+        chunks.append(chunk)
+        start = end - overlap  # Overlap for context
+
+        if len(chunks) >= MAX_CHUNKS:
+            logger.warning(f"Reached max chunks ({MAX_CHUNKS}), truncating")
+            break
+
+    return chunks
+
+
+def index_session(row: dict) -> bool:
+    """
+    Index a session to Qdrant.
+
+    For sessions with archive content, creates multiple vectors (one per chunk)
+    to enable semantic search across the entire conversation history.
+    """
+    try:
+        session_id = row['session_id']
+        summary = row.get('summary', '') or ''
+        content = row.get('content', '')
+
+        # Determine chunks to embed
+        if content:
+            chunks = chunk_content(content)
+            logger.debug(f"Session {session_id[:12]}: {len(content)} chars -> {len(chunks)} chunks")
+        elif summary:
+            chunks = [summary]
+        else:
+            logger.debug(f"Skipping {session_id[:12]}: no content")
             return False
 
-        # Compute embedding
-        embedding = model.encode(text).tolist()
+        # Create points for all chunks
+        points = []
+        for i, chunk_text in enumerate(chunks):
+            # Prepend summary to first chunk for context
+            if i == 0 and content and summary:
+                embed_text = f"{summary}\n\n{chunk_text}"
+            else:
+                embed_text = chunk_text
 
-        # Generate stable ID from session_id
-        point_id = hash(row['session_id']) & 0x7FFFFFFFFFFFFFFF
+            # Compute embedding
+            embedding = model.encode(embed_text).tolist()
 
-        # Upsert to Qdrant
-        qdrant.upsert(
-            collection_name=QDRANT_COLLECTION,
-            points=[
+            # Generate stable ID from session_id + chunk_index
+            point_id = hash(f"{session_id}:{i}") & 0x7FFFFFFFFFFFFFFF
+
+            points.append(
                 qdrant_models.PointStruct(
                     id=point_id,
                     vector=embedding,
                     payload={
-                        "session_id": row['session_id'],
+                        "session_id": session_id,
                         "project_id": row['project_id'],
                         "project_path": row.get('project_path', ''),
-                        "summary": row.get('summary', ''),
+                        "summary": summary,
                         "keywords": row.get('keywords', []),
+                        "chunk_index": i,
+                        "total_chunks": len(chunks),
+                        "chunk_preview": chunk_text[:200],  # Preview for debugging
                         "indexed_at": datetime.utcnow().isoformat()
                     }
                 )
-            ]
+            )
+
+        # Batch upsert all chunks
+        qdrant.upsert(
+            collection_name=QDRANT_COLLECTION,
+            points=points
         )
+
+        logger.info(f"Indexed {session_id[:12]}: {len(points)} vectors")
         return True
+
     except Exception as e:
         logger.error(f"Failed to index {row.get('session_id', 'unknown')}: {e}")
         return False
