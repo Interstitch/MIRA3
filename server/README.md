@@ -16,58 +16,47 @@ Deploy MIRA's central storage services on a Linux server using Docker.
 - At least 2GB RAM (embedding model needs ~500MB)
 - Network access from your development machines
 
-## Step 1: Copy Files to Server
-
-Copy the `server/` directory to your server:
+## Quick Install
 
 ```bash
-# From your local machine
-scp -r server/ user@your-server:/opt/mira/
+curl -sL https://raw.githubusercontent.com/Interstitch/MIRA3/master/server/install.sh | bash
 ```
 
-Or clone the repo directly on the server:
+The script prompts for your server IP and PostgreSQL password, then starts everything.
+
+## Manual Install
+
+### Step 1: Download Files
 
 ```bash
-ssh user@your-server
-git clone https://github.com/anthropics/MIRA3.git /tmp/mira
-cp -r /tmp/mira/server /opt/mira
-cd /opt/mira
+mkdir -p /opt/mira && cd /opt/mira
+curl -O https://raw.githubusercontent.com/Interstitch/MIRA3/master/server/docker-compose.yml
+curl -O https://raw.githubusercontent.com/Interstitch/MIRA3/master/server/.env.example
 ```
 
-## Step 2: Configure Environment
+### Step 2: Configure
 
 ```bash
-cd /opt/mira
 cp .env.example .env
+nano .env
 ```
 
-Edit `.env` and set:
+Set these values:
 
 ```bash
-# Required: set a strong password
 POSTGRES_PASSWORD=your_secure_password_here
-
-# Required: your server's IP address (LAN IP, Tailscale IP, etc.)
-# This controls which network interface the services bind to
-TAILSCALE_IP=192.168.1.100
+TAILSCALE_IP=192.168.1.100  # Your server's IP address
 ```
 
-**Note:** If you want services accessible only from localhost, leave `TAILSCALE_IP` unset or set to `127.0.0.1`.
-
-## Step 3: Start Services
+### Step 3: Start
 
 ```bash
 docker compose up -d
 ```
 
-First run will:
-- Pull PostgreSQL and Qdrant images
-- Build the embedding service container
-- Download the embedding model (~90MB)
+First run pulls images from Docker Hub (~1GB). Takes 1-2 minutes.
 
-This takes 2-5 minutes depending on your connection.
-
-## Step 4: Verify Everything Works
+## Verify
 
 Check containers are running:
 
@@ -96,7 +85,7 @@ curl http://localhost:8200/health
 docker compose exec postgres psql -U mira -c "SELECT 1"
 ```
 
-## Step 5: Connect MIRA Clients
+## Connect MIRA Clients
 
 On each development machine, create `~/.mira/server.json`:
 

@@ -161,11 +161,7 @@ Run your own server to unlock:
 - **Persistent memory** - Rebuild a Codespace and your full history is already there
 
 ```bash
-# On your server
-mkdir -p /opt/mira && cd /opt/mira
-curl -O https://raw.githubusercontent.com/Interstitch/MIRA3/master/server/{docker-compose.yml,init.sql,.env.example}
-cp .env.example .env && nano .env  # Set POSTGRES_PASSWORD and your IP
-docker compose up -d
+curl -sL https://raw.githubusercontent.com/Interstitch/MIRA3/master/server/install.sh | bash
 ```
 
 Then create `~/.mira/server.json` on your dev machines pointing to the server.

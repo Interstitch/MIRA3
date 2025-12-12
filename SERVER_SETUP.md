@@ -27,42 +27,33 @@ Without a server, MIRA uses local SQLite with keyword search. Adding a server en
 
 ## Quick Start
 
-### 1. Get the server files
+### One-liner install
+
+```bash
+curl -sL https://raw.githubusercontent.com/Interstitch/MIRA3/master/server/install.sh | bash
+```
+
+The script will:
+1. Download `docker-compose.yml` and `.env.example`
+2. Prompt for your server IP and PostgreSQL password
+3. Start all services
+
+### Manual install
+
+If you prefer to configure manually:
 
 ```bash
 mkdir -p /opt/mira && cd /opt/mira
-
-# Download the required files
 curl -O https://raw.githubusercontent.com/Interstitch/MIRA3/master/server/docker-compose.yml
-curl -O https://raw.githubusercontent.com/Interstitch/MIRA3/master/server/init.sql
 curl -O https://raw.githubusercontent.com/Interstitch/MIRA3/master/server/.env.example
-```
-
-That's it - just 3 files. The embedding service image is pulled automatically from Docker Hub.
-
-### 2. Configure
-
-```bash
 cp .env.example .env
-nano .env  # or vim, whatever you prefer
-```
-
-Set these two values:
-
-```bash
-POSTGRES_PASSWORD=pick_a_strong_password
-TAILSCALE_IP=192.168.1.100  # Your server's IP address
-```
-
-### 3. Start
-
-```bash
+nano .env  # Set POSTGRES_PASSWORD and TAILSCALE_IP
 docker compose up -d
 ```
 
-First run downloads images and builds the embedding service (~2-5 min).
+First run pulls images from Docker Hub (~1-2 min).
 
-### 4. Verify
+## Verify
 
 ```bash
 # All containers running?

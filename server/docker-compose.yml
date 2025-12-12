@@ -25,7 +25,6 @@ services:
     volumes:
       - ${DATA_DIR:-/opt/mira}/postgres/data:/var/lib/postgresql/data
       - ${DATA_DIR:-/opt/mira}/postgres/backups:/backups
-      - ./init.sql:/docker-entrypoint-initdb.d/init.sql:ro
     environment:
       - POSTGRES_USER=${POSTGRES_USER:-mira}
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
@@ -42,11 +41,7 @@ services:
   # ===========================================
 
   embedding-service:
-    image: ${MIRA_IMAGE:-interstitch/mira-server:latest}
-    # To build locally instead, comment out 'image' above and uncomment:
-    # build:
-    #   context: ./embedding-service
-    #   dockerfile: Dockerfile
+    image: interstitch/mira-server:latest
     container_name: embedding-service
     restart: unless-stopped
     ports:
