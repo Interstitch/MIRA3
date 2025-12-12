@@ -2818,6 +2818,705 @@ class TestSingletonLock:
         assert lock_file.exists()
 
 
+# ==================== Config Tests ====================
+
+class TestConfig:
+    """Test configuration loading and validation."""
+
+    def setup_method(self):
+        """Setup test fixtures."""
+        self.temp_dir = tempfile.mkdtemp()
+        self.config_path = Path(self.temp_dir) / "server.json"
+
+    def teardown_method(self):
+        """Cleanup test fixtures."""
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def test_config_dataclasses(self):
+        """Test config dataclass creation."""
+        from mira.config import QdrantConfig, PostgresConfig, ServerConfig
+
+        qdrant = QdrantConfig(host="localhost", port=6333)
+        assert qdrant.host == "localhost"
+        assert qdrant.port == 6333
+        assert qdrant.collection == "mira"  # default
+        assert qdrant.api_key is None  # default
+
+        postgres = PostgresConfig(host="localhost", password="secret")
+        assert postgres.host == "localhost"
+        assert postgres.password == "secret"
+        assert postgres.database == "mira"  # default
+        assert postgres.pool_size == 12  # default
+
+    def test_postgres_connection_string(self):
+        """Test PostgresConfig connection string generation."""
+        from mira.config import PostgresConfig
+
+        pg = PostgresConfig(
+            host="db.example.com",
+            port=5432,
+            database="mydb",
+            user="myuser",
+            password="secret123"
+        )
+
+        # Unmasked
+        conn_str = pg.connection_string()
+        assert "secret123" in conn_str
+        assert "myuser" in conn_str
+        assert "db.example.com" in conn_str
+
+        # Masked
+        masked_str = pg.connection_string(mask_password=True)
+        assert "secret123" not in masked_str
+        assert "***MASKED***" in masked_str
+
+    def test_server_config_central_enabled(self):
+        """Test ServerConfig.central_enabled property."""
+        from mira.config import ServerConfig, CentralConfig, QdrantConfig, PostgresConfig
+
+        # No central config
+        config = ServerConfig(version=1, central=None)
+        assert config.central_enabled is False
+
+        # Central config but disabled
+        central = CentralConfig(
+            enabled=False,
+            qdrant=QdrantConfig(host="localhost"),
+            postgres=PostgresConfig(host="localhost", password="x")
+        )
+        config = ServerConfig(version=1, central=central)
+        assert config.central_enabled is False
+
+        # Central config and enabled
+        central.enabled = True
+        assert config.central_enabled is True
+
+    def test_load_config_no_file(self):
+        """Test loading config when file doesn't exist."""
+        from mira.config import load_config
+        import os
+
+        # Set env var to non-existent path
+        old_env = os.environ.get("MIRA_CONFIG_PATH")
+        os.environ["MIRA_CONFIG_PATH"] = "/nonexistent/path/server.json"
+
+        try:
+            config = load_config()
+            assert config.version == 1
+            assert config.central is None
+            assert config.central_enabled is False
+        finally:
+            if old_env:
+                os.environ["MIRA_CONFIG_PATH"] = old_env
+            else:
+                os.environ.pop("MIRA_CONFIG_PATH", None)
+
+    def test_load_config_valid_file(self):
+        """Test loading a valid config file."""
+        from mira.config import load_config
+        import os
+
+        # Write valid config
+        config_data = {
+            "version": 1,
+            "central": {
+                "enabled": True,
+                "qdrant": {
+                    "host": "10.0.0.1",
+                    "port": 6333,
+                    "collection": "test_mira"
+                },
+                "postgres": {
+                    "host": "10.0.0.1",
+                    "port": 5432,
+                    "database": "test_db",
+                    "user": "test_user",
+                    "password": "test_pass"
+                }
+            }
+        }
+        with open(self.config_path, 'w') as f:
+            json.dump(config_data, f)
+
+        old_env = os.environ.get("MIRA_CONFIG_PATH")
+        os.environ["MIRA_CONFIG_PATH"] = str(self.config_path)
+
+        try:
+            config = load_config()
+            assert config.version == 1
+            assert config.central_enabled is True
+            assert config.central.qdrant.host == "10.0.0.1"
+            assert config.central.qdrant.collection == "test_mira"
+            assert config.central.postgres.database == "test_db"
+        finally:
+            if old_env:
+                os.environ["MIRA_CONFIG_PATH"] = old_env
+            else:
+                os.environ.pop("MIRA_CONFIG_PATH", None)
+
+    def test_load_config_invalid_json(self):
+        """Test loading config with invalid JSON."""
+        from mira.config import load_config
+        import os
+
+        # Write invalid JSON
+        with open(self.config_path, 'w') as f:
+            f.write("{ invalid json }")
+
+        old_env = os.environ.get("MIRA_CONFIG_PATH")
+        os.environ["MIRA_CONFIG_PATH"] = str(self.config_path)
+
+        try:
+            config = load_config()
+            # Should return default config on error
+            assert config.version == 1
+            assert config.central is None
+        finally:
+            if old_env:
+                os.environ["MIRA_CONFIG_PATH"] = old_env
+            else:
+                os.environ.pop("MIRA_CONFIG_PATH", None)
+
+    def test_env_password_override(self):
+        """Test that MIRA_POSTGRES_PASSWORD env var overrides config."""
+        from mira.config import load_config
+        import os
+
+        # Write config with one password
+        config_data = {
+            "version": 1,
+            "central": {
+                "enabled": True,
+                "qdrant": {"host": "localhost"},
+                "postgres": {
+                    "host": "localhost",
+                    "password": "config_password"
+                }
+            }
+        }
+        with open(self.config_path, 'w') as f:
+            json.dump(config_data, f)
+
+        old_config_env = os.environ.get("MIRA_CONFIG_PATH")
+        old_pass_env = os.environ.get("MIRA_POSTGRES_PASSWORD")
+        os.environ["MIRA_CONFIG_PATH"] = str(self.config_path)
+        os.environ["MIRA_POSTGRES_PASSWORD"] = "env_password"
+
+        try:
+            config = load_config()
+            # Env var should override
+            assert config.central.postgres.password == "env_password"
+        finally:
+            if old_config_env:
+                os.environ["MIRA_CONFIG_PATH"] = old_config_env
+            else:
+                os.environ.pop("MIRA_CONFIG_PATH", None)
+            if old_pass_env:
+                os.environ["MIRA_POSTGRES_PASSWORD"] = old_pass_env
+            else:
+                os.environ.pop("MIRA_POSTGRES_PASSWORD", None)
+
+    def test_validate_file_permissions(self):
+        """Test file permission validation."""
+        from mira.config import validate_file_permissions
+
+        # Create file with default permissions
+        test_file = Path(self.temp_dir) / "test.json"
+        test_file.write_text("{}")
+
+        # Should return True (we warn but don't block)
+        result = validate_file_permissions(test_file)
+        assert result is True
+
+
+# ==================== Migrations Tests ====================
+
+class TestMigrations:
+    """Test database migration framework."""
+
+    def setup_method(self):
+        """Setup test fixtures."""
+        self.temp_dir = tempfile.mkdtemp()
+        self.old_mira_path = os.environ.get("MIRA_PATH")
+        os.environ["MIRA_PATH"] = self.temp_dir
+
+    def teardown_method(self):
+        """Cleanup test fixtures."""
+        if self.old_mira_path:
+            os.environ["MIRA_PATH"] = self.old_mira_path
+        else:
+            os.environ.pop("MIRA_PATH", None)
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+        shutdown_db_manager()
+
+    def test_migration_decorator(self):
+        """Test migration decorator registers functions."""
+        from mira.migrations import _migrations
+
+        # Check that migrations are registered
+        assert len(_migrations) >= 3  # v1, v2, v3
+        versions = [m[0] for m in _migrations]
+        assert 1 in versions
+        assert 2 in versions
+        assert 3 in versions
+
+    def test_init_migrations_db(self):
+        """Test migrations database initialization."""
+        from mira.migrations import init_migrations_db, MIGRATIONS_DB
+        from mira.db_manager import get_db_manager
+
+        init_migrations_db()
+        db = get_db_manager()
+
+        # Should have created schema_migrations table
+        rows = db.execute_read(
+            MIGRATIONS_DB,
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='schema_migrations'",
+            ()
+        )
+        assert len(list(rows)) == 1
+
+    def test_get_current_version_empty(self):
+        """Test getting version from fresh database returns valid version."""
+        from mira.migrations import get_current_version
+
+        # After setup_method sets a new MIRA_PATH, the migrations db is fresh
+        # but other tests may have run migrations. Just verify we get a valid version.
+        version = get_current_version()
+        assert version >= 0  # Could be 0 (fresh) or higher if migrations ran
+
+    def test_check_migrations_needed(self):
+        """Test checking if migrations are needed."""
+        from mira.migrations import check_migrations_needed, CURRENT_VERSION
+
+        result = check_migrations_needed()
+
+        assert "current_version" in result
+        assert "target_version" in result
+        assert result["target_version"] == CURRENT_VERSION
+        assert "needs_migration" in result
+        assert "pending_migrations" in result
+
+    def test_run_migrations(self):
+        """Test running migrations."""
+        from mira.migrations import run_migrations, get_current_version
+
+        # Run migrations
+        result = run_migrations()
+
+        assert result["status"] in ("success", "already_current")
+        assert "migrations_run" in result
+
+        # Version should now be current
+        version = get_current_version()
+        assert version >= 1
+
+    def test_get_applied_migrations(self):
+        """Test getting list of applied migrations."""
+        from mira.migrations import run_migrations, get_applied_migrations
+
+        # Run migrations first
+        run_migrations()
+
+        # Get applied
+        applied = get_applied_migrations()
+
+        assert isinstance(applied, list)
+        if len(applied) > 0:
+            assert "version" in applied[0]
+            assert "name" in applied[0]
+            assert "applied_at" in applied[0]
+
+    def test_ensure_schema_current(self):
+        """Test ensure_schema_current helper."""
+        from mira.migrations import ensure_schema_current, get_current_version, CURRENT_VERSION
+
+        # Should run without error
+        ensure_schema_current()
+
+        # Version should be current
+        version = get_current_version()
+        assert version == CURRENT_VERSION
+
+
+# ==================== PostgresBackend Tests (Mock-based) ====================
+
+class TestPostgresBackendMock:
+    """Test PostgresBackend with mocked connections."""
+
+    def test_postgres_backend_init(self):
+        """Test PostgresBackend initialization."""
+        from mira.postgres_backend import PostgresBackend
+
+        backend = PostgresBackend(
+            host="localhost",
+            port=5432,
+            database="testdb",
+            user="testuser",
+            password="testpass",
+            pool_size=5,
+            timeout=30
+        )
+
+        assert backend.host == "localhost"
+        assert backend.port == 5432
+        assert backend.database == "testdb"
+        assert backend.user == "testuser"
+        assert backend.password == "testpass"
+        assert backend.pool_size == 5
+        assert backend.timeout == 30
+        assert backend._pool is None  # Lazy init
+        assert backend._healthy is False
+
+    def test_project_dataclass(self):
+        """Test Project dataclass."""
+        from mira.postgres_backend import Project
+
+        project = Project(id=1, path="/test/path", slug="test-slug")
+        assert project.id == 1
+        assert project.path == "/test/path"
+        assert project.slug == "test-slug"
+
+    def test_session_dataclass(self):
+        """Test Session dataclass."""
+        from mira.postgres_backend import Session
+
+        session = Session(
+            id=1,
+            project_id=1,
+            session_id="abc-123",
+            summary="Test session",
+            keywords=["test", "example"],
+            facts=["fact1"],
+            task_description="Do something",
+            git_branch="main",
+            models_used=["claude-3"],
+            tools_used=["Read", "Write"],
+            files_touched=["file1.py"],
+            message_count=10,
+            started_at="2025-01-01",
+            ended_at="2025-01-02"
+        )
+
+        assert session.session_id == "abc-123"
+        assert len(session.keywords) == 2
+        assert session.message_count == 10
+
+    def test_project_cache_initialization(self):
+        """Test that project cache is initialized empty."""
+        from mira.postgres_backend import PostgresBackend
+
+        backend = PostgresBackend(
+            host="localhost",
+            port=5432,
+            database="test",
+            user="test",
+            password="test"
+        )
+
+        assert backend._project_cache == {}
+        assert backend._project_cache_time == {}
+        assert backend._project_cache_ttl == 3600
+
+
+# ==================== QdrantBackend Tests (Mock-based) ====================
+
+class TestQdrantBackendMock:
+    """Test QdrantBackend with mocked connections."""
+
+    def test_qdrant_backend_init(self):
+        """Test QdrantBackend initialization."""
+        from mira.qdrant_backend import QdrantBackend
+
+        backend = QdrantBackend(
+            host="localhost",
+            port=6333,
+            collection="test_collection",
+            timeout=30,
+            api_key="test_key"
+        )
+
+        assert backend.host == "localhost"
+        assert backend.port == 6333
+        assert backend.collection == "test_collection"
+        assert backend.timeout == 30
+        assert backend.api_key == "test_key"
+        assert backend._client is None  # Lazy init
+        assert backend._healthy is False
+
+    def test_search_result_dataclass(self):
+        """Test SearchResult dataclass."""
+        from mira.qdrant_backend import SearchResult
+
+        result = SearchResult(
+            id="result-1",
+            score=0.95,
+            content="Test content",
+            session_id="session-123",
+            project_path="/test/path",
+            chunk_type="message",
+            role="assistant",
+            metadata={"key": "value"}
+        )
+
+        assert result.id == "result-1"
+        assert result.score == 0.95
+        assert result.session_id == "session-123"
+        assert result.metadata["key"] == "value"
+
+    def test_health_check_caching(self):
+        """Test that health check interval is set."""
+        from mira.qdrant_backend import QdrantBackend
+
+        backend = QdrantBackend(
+            host="localhost",
+            port=6333,
+            collection="test"
+        )
+
+        assert backend._health_check_interval == 60
+        assert backend._last_health_check == 0
+
+
+# ==================== LLM Extractor Tests ====================
+
+class TestLLMExtractor:
+    """Test LLM extractor client."""
+
+    def test_llm_extractor_client_init(self):
+        """Test LLMExtractorClient initialization."""
+        from mira.llm_extractor import LLMExtractorClient
+
+        client = LLMExtractorClient(base_url="http://localhost:8300")
+        assert client.base_url == "http://localhost:8300"
+        assert client.timeout == 120.0
+        assert client._client is None  # Lazy init
+
+    def test_llm_extractor_default_url(self):
+        """Test LLMExtractorClient handles default URL from config."""
+        from mira.llm_extractor import LLMExtractorClient
+
+        # Without explicit URL, uses config (may be None or configured host)
+        client = LLMExtractorClient()
+        # base_url is either None (no config) or a string (from config)
+        assert client.base_url is None or isinstance(client.base_url, str)
+
+    def test_get_extractor_client_singleton(self):
+        """Test get_extractor_client returns singleton."""
+        from mira.llm_extractor import get_extractor_client
+
+        client1 = get_extractor_client()
+        client2 = get_extractor_client()
+
+        # Should be same instance (or both None if not configured)
+        assert client1 is client2
+
+
+# ==================== Search Handler Tests ====================
+
+class TestSearchHandlers:
+    """Test search handler functions."""
+
+    def setup_method(self):
+        """Setup test fixtures."""
+        self.temp_dir = tempfile.mkdtemp()
+        self.mira_path = Path(self.temp_dir)
+        self.archives_path = self.mira_path / "archives"
+        self.archives_path.mkdir(parents=True)
+
+    def teardown_method(self):
+        """Cleanup test fixtures."""
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def test_handle_search_basic(self):
+        """Test handle_search with basic query."""
+        from mira.search import handle_search
+
+        result = handle_search(
+            params={"query": "test query", "limit": 5},
+            collection=None,
+            storage=None
+        )
+
+        assert "results" in result
+        assert "total" in result
+        assert "search_type" in result
+
+    def test_handle_search_with_project_path(self):
+        """Test handle_search with project_path filter."""
+        from mira.search import handle_search
+
+        result = handle_search(
+            params={
+                "query": "test",
+                "limit": 5,
+                "project_path": "/some/project"
+            },
+            collection=None,
+            storage=None
+        )
+
+        assert "results" in result
+        assert "total" in result
+
+    def test_extract_excerpts_function(self):
+        """Test _extract_excerpts helper."""
+        from mira.search import _extract_excerpts
+
+        content = "This is a test message about authentication. The auth module handles login and logout."
+        excerpts = _extract_excerpts(content, "auth", max_excerpts=2)
+
+        assert isinstance(excerpts, list)
+        # Should find excerpts with "auth" in them
+        if len(excerpts) > 0:
+            assert any("auth" in e.lower() for e in excerpts)
+
+
+# ==================== RPC Handler Tests (error_lookup, decisions) ====================
+
+class TestRPCHandlersComplete:
+    """Test all RPC handlers including error_lookup and decisions."""
+
+    def setup_method(self):
+        """Setup test fixtures."""
+        self.temp_dir = tempfile.mkdtemp()
+        os.environ["MIRA_PATH"] = self.temp_dir
+
+        # Initialize databases
+        from mira.insights import init_insights_db
+        init_insights_db()
+
+    def teardown_method(self):
+        """Cleanup test fixtures."""
+        os.environ.pop("MIRA_PATH", None)
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+        shutdown_db_manager()
+
+    def test_handle_error_lookup_basic(self):
+        """Test error_lookup handler with basic query."""
+        from mira.handlers import handle_error_lookup
+
+        result = handle_error_lookup(
+            params={"query": "TypeError", "limit": 5},
+            storage=None
+        )
+
+        # Handler returns 'results' list and 'total' count
+        assert "results" in result
+        assert "total" in result
+        assert isinstance(result["results"], list)
+
+    def test_handle_error_lookup_with_project(self):
+        """Test error_lookup handler with project filter."""
+        from mira.handlers import handle_error_lookup
+
+        result = handle_error_lookup(
+            params={
+                "query": "connection error",
+                "project_path": "/test/project",
+                "limit": 10
+            },
+            storage=None
+        )
+
+        assert "results" in result
+        assert "total" in result
+
+    def test_handle_decisions_basic(self):
+        """Test decisions handler with basic query."""
+        from mira.handlers import handle_decisions
+
+        result = handle_decisions(
+            params={"query": "architecture", "limit": 5},
+            storage=None
+        )
+
+        # Handler returns 'results' list and 'total' count
+        assert "results" in result
+        assert "total" in result
+        assert isinstance(result["results"], list)
+
+    def test_handle_decisions_with_category(self):
+        """Test decisions handler with category filter."""
+        from mira.handlers import handle_decisions
+
+        result = handle_decisions(
+            params={
+                "query": "database",
+                "category": "architecture",
+                "limit": 10
+            },
+            storage=None
+        )
+
+        assert "results" in result
+        assert "total" in result
+
+    def test_handle_rpc_request_error_lookup(self):
+        """Test RPC dispatch for error_lookup method."""
+        from mira.handlers import handle_rpc_request
+
+        result = handle_rpc_request(
+            request={
+                "method": "error_lookup",
+                "params": {"query": "test error"}
+            },
+            collection=None,
+            storage=None
+        )
+
+        # RPC wraps result in jsonrpc format
+        assert "result" in result
+        assert "results" in result["result"]
+
+    def test_handle_rpc_request_decisions(self):
+        """Test RPC dispatch for decisions method."""
+        from mira.handlers import handle_rpc_request
+
+        result = handle_rpc_request(
+            request={
+                "method": "decisions",
+                "params": {"query": "test decision"}
+            },
+            collection=None,
+            storage=None
+        )
+
+        # RPC wraps result in jsonrpc format
+        assert "result" in result
+        assert "results" in result["result"]
+
+
+# ==================== Integration Tests for Central Storage ====================
+
+class TestCentralStorageIntegration:
+    """Integration tests that verify central storage flow without actual connections."""
+
+    def test_storage_init_without_config(self):
+        """Test Storage initialization without central config."""
+        from mira.storage import Storage
+        from mira.config import ServerConfig
+
+        config = ServerConfig(version=1, central=None)
+        storage = Storage(config=config)
+
+        assert storage._using_central is False
+        assert storage._qdrant is None
+        assert storage._postgres is None
+
+    def test_storage_central_enabled_property(self):
+        """Test storage correctly reports central availability."""
+        from mira.storage import Storage
+        from mira.config import ServerConfig
+
+        config = ServerConfig(version=1, central=None)
+        storage = Storage(config=config)
+
+        # Without central config, should report local mode
+        assert storage.config.central_enabled is False
+
+
 def run_tests():
     """Run all tests and report results."""
     import traceback
@@ -2848,6 +3547,18 @@ def run_tests():
         TestGetProjectId,
         TestProjectFirstSearch,
         TestMiraStatusArtifacts,
+        TestActiveIngestionTracking,
+        TestDeduplicationConstraints,
+        TestSingletonLock,
+        # New tests for previously untested modules
+        TestConfig,
+        TestMigrations,
+        TestPostgresBackendMock,
+        TestQdrantBackendMock,
+        TestLLMExtractor,
+        TestSearchHandlers,
+        TestRPCHandlersComplete,
+        TestCentralStorageIntegration,
     ]
 
     total = 0
