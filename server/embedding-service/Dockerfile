@@ -7,6 +7,9 @@ RUN apt-get update && apt-get upgrade -y && apt-get install -y --no-install-reco
     curl \
     && rm -rf /var/lib/apt/lists/*
 
+# Upgrade pip, setuptools, and wheel to latest (security fix)
+RUN pip install --no-cache-dir --upgrade pip setuptools wheel
+
 # Install CPU-only PyTorch first (saves ~6GB vs GPU version)
 RUN pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu
 

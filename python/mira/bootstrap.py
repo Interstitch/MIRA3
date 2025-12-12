@@ -56,7 +56,8 @@ def ensure_venv_and_deps() -> bool:
 
     # Current dependency version - increment when adding new required packages
     # v1: Added qdrant-client and psycopg2-binary as required (not optional)
-    CURRENT_DEPS_VERSION = 1
+    # v2: Upgrade pip, setuptools, and wheel for security (setuptools vulnerability fix)
+    CURRENT_DEPS_VERSION = 2
 
     # Force reinstall if deps version is outdated
     if deps_version < CURRENT_DEPS_VERSION:
@@ -77,9 +78,9 @@ def ensure_venv_and_deps() -> bool:
         log(f"Installing dependencies: {dep_list}")
         pip = get_venv_pip()
 
-        # Upgrade pip first
+        # Upgrade pip, setuptools, and wheel first (security best practice)
         subprocess.run(
-            [pip, "install", "--upgrade", "pip", "-q"],
+            [pip, "install", "--upgrade", "pip", "setuptools", "wheel", "-q"],
             check=True,
             capture_output=True
         )
