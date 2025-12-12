@@ -78,6 +78,7 @@ class Storage:
                 port=qdrant_cfg.port,
                 collection=qdrant_cfg.collection,
                 timeout=qdrant_cfg.timeout_seconds,
+                api_key=getattr(qdrant_cfg, 'api_key', None),
             )
 
             # Initialize Postgres

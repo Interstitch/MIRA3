@@ -75,11 +75,12 @@ class QdrantBackend:
     - Project-scoped queries
     """
 
-    def __init__(self, host: str, port: int, collection: str, timeout: int = 30):
+    def __init__(self, host: str, port: int, collection: str, timeout: int = 30, api_key: Optional[str] = None):
         self.host = host
         self.port = port
         self.collection = collection
         self.timeout = timeout
+        self.api_key = api_key
         self._client = None
         self._healthy = False
         self._last_health_check = 0
@@ -99,6 +100,7 @@ class QdrantBackend:
             host=self.host,
             port=self.port,
             timeout=self.timeout,
+            api_key=self.api_key,  # None if not set (auth disabled)
         )
 
         # Verify connection and collection exists

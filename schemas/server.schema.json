@@ -45,6 +45,10 @@
               "minimum": 5,
               "maximum": 120,
               "description": "Connection and operation timeout"
+            },
+            "api_key": {
+              "type": "string",
+              "description": "Optional API key for Qdrant authentication"
             }
           }
         },

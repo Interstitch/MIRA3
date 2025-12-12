@@ -76,6 +76,7 @@ On each machine where you use MIRA, create `~/.mira/server.json`:
     "qdrant": {
       "host": "YOUR_SERVER_IP",
       "port": 6333,
+      "api_key": "your_qdrant_api_key_here",
       "collection": "mira"
     },
     "postgres": {

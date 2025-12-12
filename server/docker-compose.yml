@@ -14,6 +14,7 @@ services:
       - ${DATA_DIR:-/opt/mira}/qdrant/storage:/qdrant/storage
       - ${DATA_DIR:-/opt/mira}/qdrant/snapshots:/qdrant/snapshots
     environment:
+      - QDRANT__SERVICE__API_KEY=${QDRANT_API_KEY}
       - QDRANT__LOG_LEVEL=${QDRANT_LOG_LEVEL:-INFO}
 
   postgres:
@@ -49,6 +50,7 @@ services:
     environment:
       - QDRANT_HOST=qdrant
       - QDRANT_PORT=6333
+      - QDRANT_API_KEY=${QDRANT_API_KEY}
       - QDRANT_COLLECTION=${QDRANT_COLLECTION:-mira_sessions}
       - POSTGRES_HOST=postgres
       - POSTGRES_PORT=5432

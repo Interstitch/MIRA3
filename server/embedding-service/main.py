@@ -46,6 +46,7 @@ POSTGRES_PORT = int(os.getenv("POSTGRES_PORT", "5432"))
 POSTGRES_DB = os.getenv("POSTGRES_DB", "mira")
 POSTGRES_USER = os.getenv("POSTGRES_USER", "mira")
 POSTGRES_PASSWORD = os.getenv("POSTGRES_PASSWORD", "")
+QDRANT_API_KEY = os.getenv("QDRANT_API_KEY")  # Optional: enables auth
 MODEL_NAME = os.getenv("MODEL_NAME", "all-MiniLM-L6-v2")
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 
@@ -440,7 +441,11 @@ async def startup():
 
     # Connect to Qdrant
     logger.info(f"Connecting to Qdrant: {QDRANT_HOST}:{QDRANT_PORT}")
-    qdrant = QdrantClient(host=QDRANT_HOST, port=QDRANT_PORT)
+    qdrant = QdrantClient(
+        host=QDRANT_HOST,
+        port=QDRANT_PORT,
+        api_key=QDRANT_API_KEY  # None if not set (auth disabled)
+    )
 
     # Ensure collection exists
     try:

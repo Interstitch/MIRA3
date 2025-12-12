@@ -33,6 +33,7 @@ class QdrantConfig:
     port: int = 6333
     collection: str = "mira"
     timeout_seconds: int = 30
+    api_key: Optional[str] = None  # Optional API key for auth
 
 
 @dataclass
