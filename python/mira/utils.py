@@ -50,12 +50,19 @@ def get_artifact_db_path() -> Path:
 
 
 def log(message: str):
-    """Log a message to stderr and to a log file for monitoring."""
+    """Log a message to stderr and to a log file for monitoring.
+
+    Respects MIRA_QUIET environment variable - when set, suppresses stderr output
+    but still writes to log file.
+    """
     timestamp = datetime.now().strftime("%H:%M:%S")
     formatted = f"[MIRA {timestamp}] {message}"
-    print(formatted, file=sys.stderr, flush=True)
 
-    # Also write to log file for easy monitoring
+    # Only print to stderr if not in quiet mode
+    if not os.environ.get('MIRA_QUIET'):
+        print(formatted, file=sys.stderr, flush=True)
+
+    # Always write to log file for debugging
     try:
         log_path = get_mira_path() / "mira.log"
         with open(log_path, "a", encoding="utf-8") as f:

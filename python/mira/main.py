@@ -3,6 +3,10 @@ MIRA3 Main Entry Point
 
 Initializes all components and runs the main JSON-RPC loop.
 Supports both central storage (Qdrant + Postgres) and local fallback (SQLite).
+
+CLI Modes:
+  - Default: Run MCP JSON-RPC server
+  - --init: Run mira_init and output JSON (for SessionStart hooks)
 """
 
 import sys
@@ -11,13 +15,14 @@ import os
 import signal
 import fcntl
 import threading
+import argparse
 from pathlib import Path
 
 from .utils import log, get_mira_path
 from .bootstrap import ensure_venv_and_deps, reexec_in_venv
 from .config import get_config
 from .storage import get_storage, Storage
-from .handlers import handle_rpc_request
+from .handlers import handle_rpc_request, handle_init
 from .watcher import run_file_watcher
 from .ingestion import run_full_ingestion
 from .migrations import ensure_schema_current, check_migrations_needed
@@ -291,17 +296,126 @@ def run_backend():
                 print(json.dumps(error_response), flush=True)
 
 
+def run_init_cli(project_path: str, quiet: bool = False):
+    """
+    Run mira_init directly and output JSON.
+
+    This is a lightweight mode that:
+    1. Bootstraps venv if needed (already done by main())
+    2. Initializes storage (read-only is fine)
+    3. Runs schema migrations
+    4. Calls handle_init
+    5. Outputs JSON to stdout
+    6. Exits
+
+    Designed for use in SessionStart hooks.
+    """
+    # Suppress logs in quiet mode
+    if quiet:
+        os.environ['MIRA_QUIET'] = '1'
+
+    try:
+        # Ensure directories exist
+        mira_path = get_mira_path()
+        archives_path = mira_path / "archives"
+        metadata_path = mira_path / "metadata"
+        for path in [archives_path, metadata_path]:
+            path.mkdir(parents=True, exist_ok=True)
+
+        # Run schema migrations (lightweight, needed for custodian data)
+        try:
+            ensure_schema_current()
+        except Exception as e:
+            log(f"Schema migration warning: {e}")
+
+        # Initialize storage (lightweight, read-only is fine)
+        storage = get_storage()
+
+        # Call handle_init
+        result = handle_init({'project_path': project_path}, None, storage)
+
+        # Output JSON to stdout
+        print(json.dumps(result, indent=2))
+
+        # Clean exit
+        try:
+            storage.close()
+        except Exception:
+            pass
+
+        sys.exit(0)
+
+    except Exception as e:
+        # Output error as JSON for hook to handle
+        error_response = {
+            "error": str(e),
+            "guidance": {
+                "how_to_use_this": "MIRA init failed - proceeding without context",
+                "mira_usage_triggers": [],
+                "tool_quick_reference": {},
+                "actions": ["MIRA context unavailable - check server logs"]
+            }
+        }
+        print(json.dumps(error_response, indent=2))
+        sys.exit(1)
+
+
+def parse_args():
+    """Parse command line arguments."""
+    parser = argparse.ArgumentParser(
+        description='MIRA3 - Memory Information Retriever and Archiver',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  python -m mira                    Run MCP JSON-RPC server (default)
+  python -m mira --init             Run mira_init and output JSON
+  python -m mira --init --project=/workspaces/MyProject --quiet
+"""
+    )
+
+    parser.add_argument(
+        '--init',
+        action='store_true',
+        help='Run mira_init and output JSON (for SessionStart hooks)'
+    )
+
+    parser.add_argument(
+        '--project',
+        type=str,
+        default='',
+        help='Project path for init context'
+    )
+
+    parser.add_argument(
+        '--quiet', '-q',
+        action='store_true',
+        help='Suppress log output (JSON only)'
+    )
+
+    return parser.parse_args()
+
+
 def main():
     """Main entry point with bootstrap."""
+    # Parse arguments first (before bootstrap might re-exec)
+    args = parse_args()
+
     try:
         # Bootstrap: ensure venv and deps
         if ensure_venv_and_deps():
-            # Need to re-exec in venv
+            # Need to re-exec in venv - preserve args
             log("Re-executing in virtualenv...")
             reexec_in_venv()
 
         # Now running in venv with all deps available
-        run_backend()
+
+        if args.init:
+            # Init mode: run mira_init and output JSON
+            run_init_cli(args.project, quiet=args.quiet)
+        else:
+            # Default: run MCP JSON-RPC server
+            run_backend()
+
     except KeyboardInterrupt:
         log("Shutting down...")
     except Exception as e:
