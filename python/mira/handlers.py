@@ -197,6 +197,7 @@ def handle_init(params: dict, collection, storage=None) -> dict:
         'name': custodian_profile.get('name', 'Unknown'),
         'summary': custodian_profile.get('summary', ''),
         'interaction_tips': custodian_profile.get('interaction_tips', [])[:5],
+        'total_sessions': custodian_profile.get('total_sessions', 0),
     }
 
     # Add development lifecycle if detected (this is key behavioral context)
@@ -503,10 +504,22 @@ def _build_claude_guidance(
                 "Use mira_search for past code, decisions, or patterns."
             )
 
-    # User identity guidance
+    # User identity guidance - include session count to convey shared history
     name = custodian.get('name')
+    total_sessions = custodian.get('total_sessions', 0)
     if name and name != 'Unknown':
-        guidance["actions"].append(f"Address user as {name} naturally (don't announce you know their name)")
+        if total_sessions >= 50:
+            guidance["actions"].append(
+                f"Address user as {name} naturally (don't announce you know their name). "
+                f"You have {total_sessions} sessions of shared history - reference past work when relevant."
+            )
+        elif total_sessions >= 10:
+            guidance["actions"].append(
+                f"Address user as {name} naturally (don't announce you know their name). "
+                f"You have {total_sessions} sessions of shared context."
+            )
+        else:
+            guidance["actions"].append(f"Address user as {name} naturally (don't announce you know their name)")
 
     # Development lifecycle guidance - ENFORCE the user's established workflow
     # This is key: Claude should actively push back if user skips steps

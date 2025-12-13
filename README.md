@@ -2,16 +2,65 @@
 
 An MCP server that gives Claude Code persistent memory across sessions, machines, and projects.
 
-## Overview
+## The Problem
 
-MIRA watches your Claude Code conversations, learns your preferences, indexes errors and solutions, and makes everything searchable. With remote storage, you get semantic search ("that auth conversation") and seamless history across all your machines.
+Every Claude Code session starts fresh. Claude doesn't remember:
+- That you fixed this exact error last Tuesday
+- That `config.py` breaks every time someone touches it
+- That you prefer tests before implementation
+- What you were even working on yesterday
 
-**Key Features:**
-- **Zero-configuration context** - Claude knows who you are the moment a session starts (see below)
-- **Semantic search** - Find conversations by meaning, not just keywords (requires remote storage)
-- **Cross-machine sync** - Your full history follows you across laptop, desktop, Codespaces
-- **Error pattern recognition** - Search past errors before debugging from scratch
-- **Learned prerequisites** - MIRA learns environment-specific setup (e.g., "start tailscaled in Codespaces")
+You end up re-explaining context, re-debugging solved problems, and watching Claude confidently break files that have burned you before.
+
+## The Solution
+
+**MIRA gives Claude a memory.** Ask things like:
+
+> *"What were we working on last week?"*
+> *"How did we fix that authentication bug?"*
+> *"Show me the code we used for the caching layer in the other project"*
+
+And Claude just *knows* - no re-explanation needed.
+
+## What This Actually Looks Like
+
+**Scenario 1: You hit an error you've seen before**
+```
+You: Getting "connection refused" on the database
+Claude: [Searches MIRA first] Last time this happened (Dec 5), it was because
+        the Docker container wasn't running. Want me to check `docker ps`?
+```
+
+**Scenario 2: You're about to touch a cursed file**
+```
+You: Let's refactor ingestion.py
+Claude: ⚠️ Heads up - ingestion.py has caused 51 recorded issues in past sessions.
+        Want me to search what went wrong before to avoid repeating mistakes?
+```
+
+**Scenario 3: You forgot where you left off**
+```
+You: What was I working on Friday?
+Claude: [Calls mira_recent(days=3)] You had 2 sessions Friday:
+        1. Implementing sync worker retry logic - got it working
+        2. Debugging the connection pool - noted you wanted exponential backoff
+```
+
+**Scenario 4: Reusing code from another project**
+```
+You: How did we implement rate limiting in the API project?
+Claude: [Searches across projects] Found it in api-gateway (Dec 2). You used a
+        token bucket algorithm with Redis. Want me to show the implementation?
+```
+
+## Key Features
+
+- **Zero-configuration context** - Claude knows who you are the moment a session starts
+- **Semantic search** - Find "that auth conversation" even if you never used that word
+- **Cross-machine sync** - Your history follows you across laptop, desktop, Codespaces
+- **Error pattern recognition** - Search 88+ past errors before debugging from scratch
+- **Danger zone warnings** - Claude warns before touching files that caused past issues
+- **Workflow enforcement** - MIRA detects your dev pattern (test first? plan first?) and Claude enforces it
 
 ## Claude Knows You From the Start
 
@@ -304,11 +353,31 @@ MIRA detects and indexes structured content: code blocks, commands, configs, tab
 
 **Note:** `mira_init` is called automatically via the SessionStart hook. You don't need to call it manually unless context seems stale.
 
+## FAQ
+
+**How long until MIRA learns my name?**
+
+Usually 1-2 sessions. Just mention it naturally: "I'm Sarah" or sign off with your name. MIRA extracts it automatically - no configuration needed.
+
+**Does MIRA read my code?**
+
+No. MIRA only indexes Claude Code conversation history (the `.jsonl` files Claude creates). It never reads your source code directly. The insights come from what you and Claude discussed, not from scanning your codebase.
+
+**What if I use multiple machines?**
+
+With remote storage configured, your full history syncs automatically. Start a Codespace, and Claude already knows your name, workflow preferences, and past errors - even if you've never used that specific machine before.
+
+**How do I teach MIRA my workflow preference?**
+
+Just work normally. MIRA detects patterns: if you consistently write tests before implementing, it learns "Test → Implement" as your workflow and tells Claude to enforce that sequence.
+
 ## Requirements
 
 - Node.js >= 20.0.0
 - Python >= 3.8
 - Claude Code
+
+**Note:** MIRA has only been tested with Claude Code on Linux (Ubuntu, Debian, Codespaces). macOS and Windows support is untested - contributions welcome.
 
 ## License
 
