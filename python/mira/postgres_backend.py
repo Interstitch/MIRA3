@@ -869,6 +869,33 @@ class PostgresBackend:
 
                 return best
 
+    def get_all_name_candidates(self) -> List[Dict[str, Any]]:
+        """
+        Get all name candidates for syncing to local storage.
+
+        Returns list of candidates with all fields needed for local storage.
+        """
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT name, confidence, pattern_type, source_session, context, extracted_at
+                    FROM name_candidates
+                    ORDER BY confidence DESC
+                    LIMIT 100
+                """)
+                rows = cur.fetchall()
+                return [
+                    {
+                        'name': row[0],
+                        'confidence': row[1],
+                        'pattern_type': row[2],
+                        'source_session': row[3],
+                        'context': row[4],
+                        'extracted_at': row[5].isoformat() if row[5] else None,
+                    }
+                    for row in rows
+                ]
+
     # ==================== Error Patterns ====================
 
     def upsert_error_pattern(

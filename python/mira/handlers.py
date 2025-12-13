@@ -1007,6 +1007,13 @@ def get_custodian_profile() -> dict:
     mira_path = get_mira_path()
     metadata_path = mira_path / "metadata"
 
+    # Sync name candidates from central to local for resilience
+    try:
+        from .custodian import sync_from_central
+        sync_from_central()
+    except Exception as e:
+        log.debug(f"Central sync skipped: {e}")
+
     profile = {
         'name': get_custodian(),
         'tech_stack': [],
@@ -1035,12 +1042,20 @@ def get_custodian_profile() -> dict:
             for kw in keywords[:10]:
                 tech_counter[kw.lower()] += 1
 
-            session_tools = meta.get('tools_used', {})
-            for tool, count in session_tools.items():
-                tools_used[tool] += count
-
-            total_messages += meta.get('message_count', 0)
+            # Increment session count FIRST (before any code that might fail)
             profile['total_sessions'] += 1
+            total_messages += meta.get('message_count', 0)
+
+            # tools_used can be a list OR dict depending on metadata version
+            session_tools = meta.get('tools_used', {})
+            if isinstance(session_tools, dict):
+                for tool, count in session_tools.items():
+                    tools_used[tool] += count
+            elif isinstance(session_tools, list):
+                # Legacy format: list of tool names without counts
+                for tool in session_tools:
+                    if tool:  # Skip null/None entries
+                        tools_used[tool] += 1
 
         except Exception:
             pass

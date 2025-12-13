@@ -263,6 +263,65 @@ def init_custodian_db():
     log("Custodian database initialized")
 
 
+def sync_from_central() -> int:
+    """
+    Pull critical custodian data from central PostgreSQL to local SQLite.
+
+    This ensures local resilience when central is temporarily unavailable.
+    Called during profile building to ensure local cache is populated.
+
+    Returns:
+        Number of name candidates synced
+    """
+    try:
+        from .storage import Storage
+        storage = Storage()
+        if not storage._init_central() or not storage._postgres:
+            return 0
+
+        db = get_db_manager()
+        synced = 0
+
+        # Sync name candidates from central
+        try:
+            candidates = storage._postgres.get_all_name_candidates()
+            for candidate in candidates:
+                try:
+                    db.execute_write(
+                        CUSTODIAN_DB,
+                        """INSERT INTO name_candidates (name, confidence, pattern_type, source_session, context, extracted_at)
+                           VALUES (?, ?, ?, ?, ?, ?)
+                           ON CONFLICT(name, source_session) DO UPDATE SET
+                               confidence = MAX(name_candidates.confidence, excluded.confidence),
+                               pattern_type = COALESCE(excluded.pattern_type, name_candidates.pattern_type),
+                               context = COALESCE(excluded.context, name_candidates.context),
+                               extracted_at = COALESCE(excluded.extracted_at, name_candidates.extracted_at)""",
+                        (
+                            candidate['name'],
+                            candidate['confidence'],
+                            candidate['pattern_type'],
+                            candidate['source_session'],
+                            candidate.get('context', ''),
+                            candidate.get('extracted_at', datetime.now().isoformat())
+                        )
+                    )
+                    synced += 1
+                except Exception as e:
+                    log(f"Failed to sync name candidate {candidate.get('name')}: {e}")
+
+            if synced > 0:
+                log(f"Synced {synced} name candidates from central to local")
+
+        except Exception as e:
+            log(f"Failed to fetch name candidates from central: {e}")
+
+        return synced
+
+    except Exception as e:
+        log(f"Central-to-local sync failed: {e}")
+        return 0
+
+
 def extract_custodian_learnings(conversation: dict, session_id: str) -> dict:
     """
     Extract learnings about the custodian from a conversation.
@@ -379,6 +438,18 @@ def _learn_identity(db, user_messages: list, session_id: str, now: str) -> int:
         'component', 'module', 'package', 'library', 'framework', 'runtime',
         'database', 'cache', 'queue', 'worker', 'service', 'daemon', 'process',
         'container', 'pod', 'cluster', 'node', 'instance', 'replica', 'shard',
+
+        # Action words that appear in "Let me [action]..." or "I'm [action]..." patterns
+        # These get falsely extracted as names from phrases like "Let me pause and think"
+        'pause', 'think', 'thinking', 'check', 'checking', 'look', 'looking',
+        'see', 'seeing', 'try', 'trying', 'start', 'starting', 'stop', 'stopping',
+        'wait', 'waiting', 'continue', 'continuing', 'proceed', 'proceeding',
+        'begin', 'beginning', 'finish', 'finishing', 'review', 'reviewing',
+        'working', 'going', 'doing', 'done', 'done', 'ready', 'reading',
+        'writing', 'running', 'testing', 'building', 'deploying', 'updating',
+        'fixing', 'debugging', 'investigating', 'analyzing', 'processing',
+        'wondering', 'curious', 'confused', 'stuck', 'lost', 'back',
+        'sorry', 'glad', 'happy', 'excited', 'afraid', 'worried', 'concerned',
     }
 
     # Map patterns to their types for tracking
@@ -503,6 +574,7 @@ def compute_best_name() -> Optional[tuple]:
     Returns:
         Tuple of (name, score, confidence, num_sessions) or None if no candidates
     """
+    import math
     db = get_db_manager()
 
     # Pattern quality weights (higher = more trustworthy)
@@ -514,8 +586,43 @@ def compute_best_name() -> Optional[tuple]:
         'unknown': 0.7,          # Unknown pattern - treat cautiously
     }
 
+    def _score_rows(rows, from_postgres=False):
+        """Score name candidates from either local or central storage."""
+        best_name = None
+        best_score = -1
+
+        for row in rows:
+            if from_postgres:
+                # PostgreSQL returns tuples
+                name, total_conf, num_sessions, max_conf, patterns = row[:5]
+                patterns = patterns or ['unknown']
+            else:
+                # SQLite returns dicts
+                name = row['name']
+                total_conf = row['total_conf'] or 0
+                num_sessions = row['num_sessions'] or 1
+                max_conf = row['max_conf'] or 0
+                patterns = (row['patterns'] or 'unknown').split(',')
+
+            # Calculate pattern quality bonus (use best pattern seen)
+            if isinstance(patterns, str):
+                patterns = patterns.split(',')
+            pattern_bonus = max(pattern_weights.get(p.strip() if isinstance(p, str) else p, 0.7) for p in patterns)
+
+            # Frequency bonus: more sessions = more confidence
+            freq_bonus = math.log((num_sessions or 1) + 1)
+
+            # Final score: combines confidence, frequency, and pattern quality
+            score = ((total_conf or 0) * pattern_bonus) + freq_bonus
+
+            if score > best_score:
+                best_score = score
+                best_name = (name, round(score, 2), max_conf or 0, num_sessions or 1)
+
+        return best_name
+
+    # Try local first (fast)
     try:
-        # Get all candidates with scoring components
         rows = db.execute_read(CUSTODIAN_DB, """
             SELECT
                 name,
@@ -528,41 +635,32 @@ def compute_best_name() -> Optional[tuple]:
             GROUP BY name
         """)
 
-        if not rows:
-            return None
-
-        best_name = None
-        best_score = -1
-
-        for row in rows:
-            name = row['name']
-            total_conf = row['total_conf'] or 0
-            num_sessions = row['num_sessions'] or 1
-            max_conf = row['max_conf'] or 0
-            patterns = (row['patterns'] or 'unknown').split(',')
-
-            # Calculate pattern quality bonus (use best pattern seen)
-            pattern_bonus = max(pattern_weights.get(p.strip(), 0.7) for p in patterns)
-
-            # Frequency bonus: more sessions = more confidence
-            # log(n+1) gives diminishing returns: 1→0.69, 2→1.1, 5→1.79, 10→2.4
-            import math
-            freq_bonus = math.log(num_sessions + 1)
-
-            # Final score: combines confidence, frequency, and pattern quality
-            # total_conf * pattern_bonus gives base score
-            # freq_bonus adds value for repeated extractions
-            score = (total_conf * pattern_bonus) + freq_bonus
-
-            if score > best_score:
-                best_score = score
-                best_name = (name, round(score, 2), max_conf, num_sessions)
-
-        return best_name
+        if rows:
+            result = _score_rows(rows, from_postgres=False)
+            if result:
+                return result
 
     except Exception as e:
-        log(f"Error computing best name: {e}")
-        return None
+        log(f"Error reading local name candidates: {e}")
+
+    # Fallback: Try central PostgreSQL
+    try:
+        from .storage import Storage
+        storage = Storage()
+        if storage._init_central() and storage._postgres:
+            result = storage._postgres.get_best_name()
+            if result:
+                # Convert dict to tuple format (name, score, confidence, num_sessions)
+                return (
+                    result['name'],
+                    round(result.get('score', 0), 2),
+                    result.get('confidence', 0),  # postgres returns 'confidence'
+                    result.get('sessions', 1)     # postgres returns 'sessions'
+                )
+    except Exception as e:
+        log(f"Error reading central name candidates: {e}")
+
+    return None
 
 
 def get_all_name_candidates() -> list:
