@@ -7,6 +7,10 @@ Primary: Central Qdrant (vector) + Postgres (FTS) for hybrid search
 Fallback: Local SQLite with FTS5 (keyword search only)
 
 In local mode, only FTS search is available (no semantic/vector search).
+
+Response Format:
+- compact=True (default): Optimized for Claude context (~79% smaller)
+- compact=False: Full verbose format for debugging
 """
 
 import json
@@ -17,6 +21,177 @@ from typing import Dict, List, Any, Optional
 
 from .utils import log, get_mira_path, extract_text_content, extract_query_terms
 from .artifacts import search_artifacts_for_query
+
+
+# =============================================================================
+# COMPACT RESPONSE OPTIMIZATION
+# =============================================================================
+
+# Stopwords to filter from keywords/topics
+SEARCH_STOPWORDS = {
+    'the', 'a', 'an', 'is', 'are', 'was', 'were', 'be', 'been', 'being',
+    'have', 'has', 'had', 'do', 'does', 'did', 'will', 'would', 'could',
+    'should', 'may', 'might', 'must', 'shall', 'this', 'that', 'these',
+    'those', 'it', 'its', 'and', 'or', 'but', 'if', 'then', 'else',
+    'when', 'where', 'why', 'how', 'all', 'each', 'every', 'both', 'few',
+    'more', 'most', 'other', 'some', 'such', 'no', 'nor', 'not', 'only',
+    'own', 'same', 'so', 'than', 'too', 'very', 'just', 'also', 'now',
+    'here', 'there', 'please', 'check', 'look', 'see', 'run', 'use',
+    'can', 'get', 'got', 'make', 'made', 'want', 'need', 'try', 'let',
+    'like', 'know', 'think', 'going', 'want', 'file', 'files', 'code',
+    'work', 'working', 'works', 'error', 'errors', 'using', 'used',
+}
+
+
+def _select_best_excerpt(excerpts: List[Dict], query_terms: List[str]) -> str:
+    """
+    Select the single most relevant excerpt (full length preserved).
+
+    Scoring:
+    - Prefer assistant responses (more informative)
+    - Count query term matches
+    - Prefer longer excerpts (more context)
+    """
+    if not excerpts:
+        return ""
+
+    query_terms_set = set(t.lower() for t in query_terms)
+    scored = []
+
+    for exc in excerpts:
+        score = 0
+        # Prefer assistant responses (more informative)
+        if exc.get('role') == 'assistant':
+            score += 2
+        # Count query term matches
+        matched = set(t.lower() for t in exc.get('matched_terms', []))
+        score += len(matched & query_terms_set)
+        # Prefer longer excerpts (more context) - up to 2 points
+        excerpt_len = len(exc.get('excerpt', ''))
+        score += min(excerpt_len / 150, 2)
+
+        scored.append((score, exc))
+
+    best = max(scored, key=lambda x: x[0])[1]
+    return best.get('excerpt', '')
+
+
+def _filter_keywords_to_topics(keywords: List[str], query_terms: List[str], limit: int = 5) -> List[str]:
+    """
+    Filter keywords to most relevant topics.
+
+    - Remove stopwords
+    - Prioritize query term matches
+    - Limit to top N
+    """
+    if not keywords:
+        return []
+
+    query_terms_lower = set(t.lower() for t in query_terms)
+
+    # Filter out stopwords and very short words
+    filtered = [kw for kw in keywords
+                if kw.lower() not in SEARCH_STOPWORDS and len(kw) > 2]
+
+    # Prioritize query term matches
+    query_matches = [kw for kw in filtered if kw.lower() in query_terms_lower]
+    others = [kw for kw in filtered if kw.lower() not in query_terms_lower]
+
+    return (query_matches + others)[:limit]
+
+
+def _consolidate_summary(summary: str, task_description: str = "", max_length: int = 100) -> str:
+    """
+    Merge summary and task_description into concise form.
+
+    If summary has "Task: X | Outcome: Y" format, extract outcome.
+    Otherwise prefer shorter of the two.
+    """
+    if not summary and not task_description:
+        return ""
+
+    # If summary has structured format, extract the outcome
+    if summary and ' | Outcome: ' in summary:
+        outcome = summary.split(' | Outcome: ')[1]
+        if len(outcome) <= max_length:
+            return outcome
+        return outcome[:max_length - 3] + "..."
+
+    # Prefer task_description if it's shorter and non-empty
+    if task_description and (not summary or len(task_description) < len(summary)):
+        text = task_description
+    else:
+        text = summary or ""
+
+    if len(text) <= max_length:
+        return text
+    return text[:max_length - 3] + "..."
+
+
+def _compact_result(result: Dict[str, Any], query_terms: List[str]) -> Dict[str, Any]:
+    """
+    Transform a verbose search result into compact format.
+
+    Removes: slug, git_branch, search_source, has_archive_matches, task_description
+    Transforms: session_id (8 chars), keywords->topics (5 max), excerpts->excerpt (single)
+    Consolidates: summary + task_description
+    """
+    # Shorten session_id to first 8 chars (still unique enough)
+    session_id = result.get('session_id', '')
+    short_id = session_id[:8] if session_id else ''
+
+    # Consolidate summary
+    summary = _consolidate_summary(
+        result.get('summary', ''),
+        result.get('task_description', '')
+    )
+
+    # Extract date from timestamp
+    timestamp = result.get('timestamp', '')
+    date = ''
+    if timestamp:
+        # Handle ISO format: 2025-12-07T21:22:48.586Z
+        date = timestamp[:10] if len(timestamp) >= 10 else timestamp
+
+    # Filter keywords to topics
+    keywords = result.get('keywords', [])
+    if isinstance(keywords, str):
+        keywords = keywords.split(',') if keywords else []
+    topics = _filter_keywords_to_topics(keywords, query_terms)
+
+    # Select best excerpt (full length)
+    excerpts = result.get('excerpts', [])
+    excerpt = _select_best_excerpt(excerpts, query_terms) if excerpts else ''
+
+    # Message count
+    msg_count = result.get('message_count', 0)
+    if isinstance(msg_count, str):
+        try:
+            msg_count = int(msg_count)
+        except ValueError:
+            msg_count = 0
+
+    compact = {
+        'id': short_id,
+        'summary': summary,
+        'date': date,
+        'topics': topics,
+        'excerpt': excerpt,
+        'messages': msg_count,
+    }
+
+    # Only include score if high relevance
+    relevance = result.get('relevance', 0)
+    if relevance and relevance > 0.7:
+        compact['score'] = round(relevance, 2)
+
+    return compact
+
+
+def _compact_results(results: List[Dict], query: str) -> List[Dict]:
+    """Transform all results to compact format."""
+    query_terms = extract_query_terms(query)
+    return [_compact_result(r, query_terms) for r in results]
 
 
 def handle_search(params: dict, collection, storage=None) -> dict:
@@ -32,16 +207,21 @@ def handle_search(params: dict, collection, storage=None) -> dict:
     Always attempts to return results by trying each tier.
 
     Args:
-        params: Search parameters (query, limit, project_path)
+        params: Search parameters
+            - query: Search query string
+            - limit: Max results (default 10)
+            - project_path: Optional project filter
+            - compact: Return compact format (default True, ~79% smaller)
         collection: Deprecated - kept for API compatibility, ignored
         storage: Storage instance
 
     Returns:
-        Dict with results, total, artifacts, and search_type
+        Dict with results, total, and query (compact) or artifacts/search_type (verbose)
     """
     query = params.get("query", "")
     limit = params.get("limit", 10)
     project_path = params.get("project_path")  # Optional: filter to specific project
+    compact = params.get("compact", True)  # Default to compact for token efficiency
     mira_path = get_mira_path()
 
     if not query:
@@ -189,12 +369,21 @@ def handle_search(params: dict, collection, storage=None) -> dict:
         except Exception as e:
             log(f"Fulltext fallback failed: {e}")
 
-    return {
-        "results": results,
-        "total": len(results),
-        "search_type": search_type,
-        "artifacts": artifact_results
-    }
+    # Apply compact transformation if requested (default)
+    if compact:
+        return {
+            "results": _compact_results(results, query),
+            "total": len(results),
+            "query": query,  # Include query for context
+        }
+    else:
+        # Verbose format for debugging
+        return {
+            "results": results,
+            "total": len(results),
+            "search_type": search_type,
+            "artifacts": artifact_results
+        }
 
 
 def _extract_excerpts(content: str, query: str, max_excerpts: int = 3) -> List[str]:
