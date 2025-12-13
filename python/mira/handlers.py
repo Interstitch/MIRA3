@@ -156,15 +156,22 @@ def handle_init(params: dict, collection, storage=None) -> dict:
     project_path = params.get("project_path", "")
     mira_path = get_mira_path()
 
-    # Get indexed count from central storage
+    # Get indexed count from storage (central or local)
     count = 0
     if storage and storage.using_central and storage.postgres:
         try:
-            # Count sessions in postgres
+            # Count sessions in postgres (central mode)
             with storage.postgres._get_connection() as conn:
                 with conn.cursor() as cur:
                     cur.execute("SELECT COUNT(*) FROM sessions")
                     count = cur.fetchone()[0]
+        except Exception:
+            pass
+    else:
+        # Count sessions in local SQLite
+        try:
+            from .local_store import get_session_count
+            count = get_session_count()
         except Exception:
             pass
 
@@ -405,6 +412,17 @@ def handle_init(params: dict, collection, storage=None) -> dict:
     # Only include details if there's meaningful learned knowledge
     if details:
         response["details"] = details
+
+    # Add estimated token count to help users understand context usage
+    # Using ~4 chars per token as rough approximation (GPT/Claude typical)
+    response_json = json.dumps(response, separators=(',', ':'))
+    char_count = len(response_json)
+    estimated_tokens = char_count // 4  # Conservative estimate
+    response["token_estimate"] = {
+        "chars": char_count,
+        "tokens": estimated_tokens,
+        "note": "Estimated tokens injected into context (~4 chars/token)"
+    }
 
     return response
 
@@ -1109,7 +1127,7 @@ def handle_error_lookup(params: dict, storage=None) -> dict:
 
             if results:
                 response = {
-                    "results": results,
+                    "solutions": results,  # Key matches TypeScript expectation
                     "total": len(results),
                     "query": query,
                     "source": "central" + ("_global" if searched_global else "")
@@ -1125,7 +1143,7 @@ def handle_error_lookup(params: dict, storage=None) -> dict:
     results = search_error_solutions(query, limit=limit)
 
     response = {
-        "results": results,
+        "solutions": results,  # Key matches TypeScript expectation
         "total": len(results),
         "query": query,
         "source": "local"
@@ -1133,6 +1151,16 @@ def handle_error_lookup(params: dict, storage=None) -> dict:
     if corrections:
         response["corrections"] = corrections
         response["original_query"] = original_query
+
+    # Add helpful message for empty results
+    if not results:
+        response["message"] = f"No past errors found matching '{query}'."
+        response["suggestions"] = [
+            "Try simpler keywords (e.g., 'TypeError' instead of full message)",
+            "Error patterns are learned from past conversations",
+            "Use mira_search for broader conversation search"
+        ]
+
     return response
 
 
@@ -1145,7 +1173,7 @@ def handle_decisions(params: dict, storage=None) -> dict:
     2. If no results, expand to search all projects globally
 
     Args:
-        params: Request parameters (query, category, limit, project_path)
+        params: Request parameters (query, category, limit, project_path, min_confidence)
         storage: Storage instance for central Qdrant + Postgres
 
     Params:
@@ -1153,6 +1181,8 @@ def handle_decisions(params: dict, storage=None) -> dict:
         category: Optional category filter (architecture, technology, etc.)
         limit: Maximum results (default: 10)
         project_path: Optional project path to search first
+        min_confidence: Minimum confidence threshold (0.0-1.0, default: 0.0)
+                       Use 0.8+ for explicit decisions only, 0.6+ to include implicit
 
     Returns matching decisions with context.
     """
@@ -1160,6 +1190,7 @@ def handle_decisions(params: dict, storage=None) -> dict:
     category = params.get("category")
     limit = params.get("limit", 10)
     project_path = params.get("project_path")
+    min_confidence = params.get("min_confidence", 0.0)
 
     # Apply fuzzy matching for typo correction
     original_query = query
@@ -1206,7 +1237,7 @@ def handle_decisions(params: dict, storage=None) -> dict:
 
             if results:
                 response = {
-                    "results": results,
+                    "decisions": results,  # Key matches TypeScript expectation
                     "total": len(results),
                     "query": query,
                     "category": category,
@@ -1221,21 +1252,233 @@ def handle_decisions(params: dict, storage=None) -> dict:
 
     # Fall back to local search
     if not query:
-        results = search_decisions("", category=category, limit=limit)
+        results = search_decisions("", category=category, limit=limit, min_confidence=min_confidence)
     else:
-        results = search_decisions(query, category=category, limit=limit)
+        results = search_decisions(query, category=category, limit=limit, min_confidence=min_confidence)
 
     response = {
-        "results": results,
+        "decisions": results,  # Key matches TypeScript expectation
         "total": len(results),
         "query": query,
         "category": category,
+        "min_confidence": min_confidence,
         "source": "local"
     }
     if corrections:
         response["corrections"] = corrections
         response["original_query"] = original_query
+
+    # Add helpful message for empty results
+    if not results:
+        response["message"] = f"No past decisions found matching '{query}'."
+        response["suggestions"] = [
+            "Record decisions explicitly: 'Decision: use PostgreSQL for the database'",
+            "Try broader keywords or remove category filter",
+            "Lower min_confidence to include implicit decisions"
+        ]
+
     return response
+
+
+def _normalize_file_path_pattern(file_path: str) -> str:
+    """Convert user file path input to SQL LIKE pattern.
+
+    - Converts * to % for glob patterns
+    - Adds % prefix for simple filenames (not absolute paths)
+    - Passes through absolute paths and existing % patterns
+    """
+    if not file_path:
+        return file_path
+    if '*' in file_path:
+        return file_path.replace('*', '%')
+    if not file_path.startswith('/') and '%' not in file_path:
+        return '%' + file_path
+    return file_path
+
+
+def handle_code_history(params: dict, storage=None) -> dict:
+    """
+    Search code history by file path or symbol name.
+
+    Provides three modes:
+    - timeline: List of sessions that touched a file/symbol
+    - snapshot: Reconstruct file content at a specific date
+    - changes: List of edits made to a file
+
+    Args:
+        params: Request parameters
+        storage: Storage instance (unused for local code history)
+
+    Params:
+        path: File path or pattern (supports % wildcards)
+        symbol: Function/class name to search
+        mode: "timeline" | "snapshot" | "changes" (default: timeline)
+        date: Target date for snapshot mode (ISO format)
+        limit: Maximum results (default: 20)
+
+    Returns:
+        Mode-specific response with file history data.
+    """
+    from .code_history import (
+        get_file_timeline,
+        get_symbol_history,
+        reconstruct_file_at_date,
+        get_edits_between,
+        get_file_snapshot_at_date,
+        get_code_history_stats,
+    )
+
+    file_path = params.get("path", "")
+    symbol = params.get("symbol", "")
+    mode = params.get("mode", "timeline")
+    target_date = params.get("date", "")
+    limit = params.get("limit", 20)
+
+    # Require at least one search criterion
+    if not file_path and not symbol:
+        return {
+            "error": "Must provide 'path' or 'symbol' parameter",
+            "usage": {
+                "path": "File path or pattern (e.g., 'handlers.py', 'src/%.py')",
+                "symbol": "Function/class name (e.g., 'handle_search')",
+                "mode": "timeline | snapshot | changes",
+                "date": "ISO date for snapshot mode (e.g., '2025-12-01')",
+                "limit": "Max results (default 20)",
+            }
+        }
+
+    # MODE: timeline - list of changes over time
+    if mode == "timeline":
+        if symbol and not file_path:
+            # Symbol-only search
+            results = get_symbol_history(symbol, limit=limit)
+            return {
+                "mode": "timeline",
+                "symbol": symbol,
+                "appearances": results,
+                "total": len(results),
+            }
+        else:
+            # File-based timeline (optionally filtered by symbol)
+            search_path = _normalize_file_path_pattern(file_path)
+
+            results = get_file_timeline(
+                file_path=search_path,
+                symbol=symbol if symbol else None,
+                limit=limit
+            )
+            response = {
+                "mode": "timeline",
+                "file_path": file_path,
+                "timeline": results,
+                "total": len(results),
+            }
+            if symbol:
+                response["filtered_by_symbol"] = symbol
+            return response
+
+    # MODE: snapshot - reconstruct file at a date
+    elif mode == "snapshot":
+        if not file_path:
+            return {"error": "snapshot mode requires 'path' parameter"}
+        if not target_date:
+            return {"error": "snapshot mode requires 'date' parameter (ISO format)"}
+
+        # Normalize file path for pattern matching
+        search_path = _normalize_file_path_pattern(file_path)
+
+        # Add end-of-day time if only date provided (to include all snapshots on that day)
+        if len(target_date) == 10:  # YYYY-MM-DD format
+            target_date = target_date + "T23:59:59.999Z"
+
+        result = reconstruct_file_at_date(search_path, target_date)
+
+        response = {
+            "mode": "snapshot",
+            "file_path": result.file_path,
+            "target_date": result.target_date,
+            "confidence": result.confidence,
+        }
+
+        if result.content:
+            response["content"] = result.content
+            response["line_count"] = result.content.count('\n') + 1
+            response["source_snapshot_date"] = result.source_snapshot_date
+            response["edits_applied"] = result.edits_applied
+            if result.edits_failed > 0:
+                response["edits_failed"] = result.edits_failed
+            if result.gaps:
+                response["gaps"] = result.gaps
+        else:
+            response["error"] = "Could not reconstruct file"
+            response["gaps"] = result.gaps
+
+        return response
+
+    # MODE: changes - list of edits
+    elif mode == "changes":
+        if not file_path:
+            return {"error": "changes mode requires 'path' parameter"}
+
+        # Normalize file path for SQL LIKE pattern
+        search_path = _normalize_file_path_pattern(file_path)
+
+        # Get all snapshots and edits for the file
+        # Default to last 30 days if no date specified
+        from datetime import datetime, timedelta, timezone
+
+        if target_date:
+            end_date = target_date
+        else:
+            end_date = datetime.now(timezone.utc).isoformat()
+
+        # Get earliest snapshot as start date
+        earliest_snapshot = get_file_snapshot_at_date(search_path, "2000-01-01")
+        if earliest_snapshot:
+            start_date = "2000-01-01"  # Get all history
+        else:
+            start_date = (datetime.now(timezone.utc) - timedelta(days=365)).isoformat()
+
+        edits = get_edits_between(search_path, start_date, end_date)
+
+        # Format edits for display
+        changes = []
+        for edit in edits[:limit]:
+            change = {
+                "date": edit.get("timestamp", ""),
+                "session_id": edit.get("session_id", ""),
+                "type": "edit",
+            }
+            # Truncate long strings for readability
+            old_str = edit.get("old_string", "")
+            new_str = edit.get("new_string", "")
+
+            if len(old_str) > 200:
+                change["before"] = old_str[:200] + "..."
+                change["before_truncated"] = True
+            else:
+                change["before"] = old_str
+
+            if len(new_str) > 200:
+                change["after"] = new_str[:200] + "..."
+                change["after_truncated"] = True
+            else:
+                change["after"] = new_str
+
+            changes.append(change)
+
+        return {
+            "mode": "changes",
+            "file_path": file_path,
+            "changes": changes,
+            "total": len(changes),
+        }
+
+    else:
+        return {
+            "error": f"Unknown mode: {mode}",
+            "valid_modes": ["timeline", "snapshot", "changes"]
+        }
 
 
 def handle_rpc_request(request: dict, collection, storage=None) -> dict:
@@ -1267,6 +1510,8 @@ def handle_rpc_request(request: dict, collection, storage=None) -> dict:
             result = handle_error_lookup(params, storage)
         elif method == "decisions":
             result = handle_decisions(params, storage)
+        elif method == "code_history":
+            result = handle_code_history(params, storage)
         elif method == "shutdown":
             result = {"status": "shutting_down"}
         else:

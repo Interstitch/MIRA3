@@ -865,6 +865,7 @@ class Storage:
             "using_central": False,
             "mode": "local",
             "local_healthy": True,  # Local SQLite is always assumed healthy
+            "security_warnings": [],
         }
 
         # Check local store
@@ -881,8 +882,19 @@ class Storage:
             status["mode"] = "central" if self._using_central else "local"
             if self._qdrant:
                 status["qdrant_healthy"] = self._qdrant.is_healthy()
+                # Security check: warn if Qdrant has no API key configured
+                if self._qdrant.api_key is None:
+                    status["security_warnings"].append({
+                        "type": "qdrant_no_auth",
+                        "message": "Qdrant has no API key configured. Anyone with network access can query/modify your data.",
+                        "recommendation": "Add api_key to your ~/.mira/server.json qdrant config and configure Qdrant with the same key."
+                    })
             if self._postgres:
                 status["postgres_healthy"] = self._postgres.is_healthy()
+
+        # Remove empty security_warnings array for cleaner output
+        if not status["security_warnings"]:
+            del status["security_warnings"]
 
         # Get sync queue stats
         try:

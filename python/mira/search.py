@@ -360,7 +360,11 @@ def handle_search(params: dict, collection, storage=None) -> dict:
         cutoff_time = datetime.now() - timedelta(days=days)
 
     if not query:
-        return {"results": [], "total": 0}
+        return {
+            "results": [],
+            "total": 0,
+            "message": "No query provided. Specify a search query to search conversation history."
+        }
 
     # Apply fuzzy matching for typo correction
     original_query = query
@@ -595,6 +599,26 @@ def handle_search(params: dict, collection, storage=None) -> dict:
             "total": len(results),
             "query": query,  # Include query for context
         }
+
+        # Add helpful message for empty results
+        if not results:
+            # Check if nothing is indexed yet
+            try:
+                from .local_store import get_session_count
+                session_count = get_session_count()
+                if session_count == 0:
+                    response["message"] = "No conversations indexed yet. MIRA is still processing your conversation history. Try again in a few moments."
+                    response["hint"] = "Run mira_status to check ingestion progress."
+                else:
+                    response["message"] = f"No results found for '{query}'. Searched {session_count} indexed conversations."
+                    response["suggestions"] = [
+                        "Try different keywords or broader terms",
+                        "Use mira_recent to see what topics are available",
+                        "Check spelling - typo correction is automatic"
+                    ]
+            except Exception:
+                response["message"] = f"No results found for '{query}'."
+
         if days:
             response["filtered_to_days"] = days
         # Include typo corrections if any were made
@@ -616,6 +640,19 @@ def handle_search(params: dict, collection, storage=None) -> dict:
             "search_type": search_type,
             "artifacts": artifact_results
         }
+
+        # Add helpful message for empty results
+        if not results:
+            try:
+                from .local_store import get_session_count
+                session_count = get_session_count()
+                if session_count == 0:
+                    response["message"] = "No conversations indexed yet. MIRA is still processing."
+                else:
+                    response["message"] = f"No results found for '{query}'. Searched {session_count} conversations."
+            except Exception:
+                response["message"] = f"No results found for '{query}'."
+
         if days:
             response["filtered_to_days"] = days
         # Include typo corrections if any were made

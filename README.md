@@ -464,12 +464,13 @@ MIRA detects and indexes structured content: code blocks, commands, configs, tab
 
 | Tool | Purpose |
 |------|---------|
+| `mira_init` | Session initialization - user profile, prerequisites, danger zones, token count |
 | `mira_search` | Search conversations. Params: `query`, `limit`, `project_path`, `days`, `recency_bias`, `compact` |
 | `mira_recent` | Recent sessions. Params: `limit`, `days` (e.g., `days: 7` for last week) |
-| `mira_init` | Session initialization - user profile, prerequisites, danger zones |
-| `mira_status` | Ingestion stats and system health |
 | `mira_error_lookup` | Search past errors and their solutions. Params: `query`, `limit` |
 | `mira_decisions` | Search architectural decisions. Params: `query`, `category`, `limit` |
+| `mira_code_history` | Track file/function history across conversations. Params: `file_path`, `function_name`, `limit` |
+| `mira_status` | Ingestion stats and system health |
 
 ### Search Parameters
 

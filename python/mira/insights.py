@@ -442,19 +442,40 @@ def _is_error_false_positive(error_text: str, full_content: str) -> bool:
     Returns True if the match should be rejected.
     """
     error_lower = error_text.lower().strip()
+    error_stripped = error_text.strip()
     content_lower = full_content.lower()
 
     # Too short to be a real error
-    if len(error_text.strip()) < 10:
+    if len(error_stripped) < 10:
         return True
 
     # Markdown headers that contain error-like words
-    if re.match(r'^#+\s', error_text.strip()):
+    if re.match(r'^#+\s', error_stripped):
+        return True
+
+    # Markdown list items about errors (not actual errors)
+    if re.match(r'^[-*]\s*\*?\*?(?:errors?|error handling|error patterns)', error_lower):
         return True
 
     # Code comments explaining error handling
-    if re.match(r'^\s*(//|#|/\*|\*|<!--)', error_text.strip()):
+    if re.match(r'^\s*(//|#|/\*|\*|<!--)', error_stripped):
         return True
+
+    # Code definitions - function/class/variable definitions containing "error"
+    # Be careful not to reject actual error messages like "ERROR:" (Postgres) or "Error:" (generic)
+    code_definition_patterns = [
+        r'^(?:def|class|function|const|let|var|async)\s+\w*error',  # def handle_error(
+        r'^[a-z_]+error\w*\s*[=(]',  # error_patterns( or error_handler = (lowercase = variable)
+        r'^exception\s+as\s+\w+:',  # Exception as e:
+        r'^\s*except\s+\w*(?:error|exception)',  # except ValueError:
+        r'^\s*catch\s*\(',  # catch (
+        r'^\s*try\s*:',  # try:
+        r'^errors\s*[=\[]',  # errors = [] (but NOT "ERROR:" which is a real error prefix)
+        r'^["\']errors?["\']\s*:',  # "errors": or 'error':
+    ]
+    for pattern in code_definition_patterns:
+        if re.match(pattern, error_lower):
+            return True
 
     # Documentation patterns
     doc_patterns = [
@@ -467,25 +488,25 @@ def _is_error_false_positive(error_text: str, full_content: str) -> bool:
         r'throws?\s+an?\s+error',  # "throws an error"
         r'error\s+handling',  # discussion of error handling
         r'error\s+message',  # discussing error messages
+        r'error\s+patterns?',  # discussing error patterns
+        r'error\s+types?',  # discussing error types
     ]
     for pattern in doc_patterns:
         if re.search(pattern, error_lower):
             return True
 
-    # Example/sample indicators - check if error appears right after example words
-    # No need to require "error" in pattern since the error text follows context_before
+    # Example/sample indicators
     example_patterns = [
         r'\bfor example\b',
         r'\bexample[,:]',
         r'\bsample\b',
         r'\bsuch as\b',
-        r'\blike\b.{0,10}$',  # "like" near end of context (close to error)
+        r'\blike\b.{0,10}$',
         r'for instance',
         r'e\.g\.',
         r'you might see',
         r'you could get',
     ]
-    # Check if it's in an example context (within 50 chars before)
     error_pos = content_lower.find(error_lower[:30])
     if error_pos > 0:
         context_before = content_lower[max(0, error_pos - 50):error_pos]
@@ -494,16 +515,13 @@ def _is_error_false_positive(error_text: str, full_content: str) -> bool:
                 return True
 
     # Variable/function names that happen to contain "error"
-    # Check ORIGINAL case - real error types are CamelCase (TypeError, ValueError)
-    # while variables are snake_case (my_error, handle_error) or start lowercase
-    error_stripped = error_text.strip()
-    if re.match(r'^[a-z_]+error[a-z_]*\s*[=(]', error_stripped):  # snake_case variable assignment
+    if re.match(r'^[a-z_]+error[a-z_]*\s*[=(]', error_stripped):  # snake_case variable
         return True
-    if re.match(r'^[a-z]+Error[a-zA-Z]*\s*[=(]', error_stripped):  # camelCase function call
+    if re.match(r'^[a-z]+Error[a-zA-Z]*\s*[=(]', error_stripped):  # camelCase function
         return True
 
     # Import statements
-    if re.match(r'^\s*(import|from|require|use)\b', error_text.strip()):
+    if re.match(r'^\s*(import|from|require|use)\b', error_stripped):
         return True
 
     # Conditional/test patterns (checking for errors, not actual errors)
@@ -519,6 +537,19 @@ def _is_error_false_positive(error_text: str, full_content: str) -> bool:
     for pattern in check_patterns:
         if re.match(pattern, error_lower):
             return True
+
+    # Code snippets with function calls - but NOT tracebacks
+    # "Traceback (most recent call last):" is NOT a function call
+    if not error_lower.startswith('traceback'):
+        # Only reject if it looks like a function definition, not a traceback
+        if re.match(r'^[a-z_]+\s*\([^)]*\)\s*:', error_lower):  # function(): pattern
+            return True
+    if error_lower.count('(') > 3:  # More than 3 parens = probably code
+        return True
+
+    # Markdown formatting - bold/italic section headers
+    if re.match(r'^\*\*[^*]+\*\*:?\s*$', error_stripped):  # **Errors**:
+        return True
 
     return False
 
@@ -619,18 +650,27 @@ def extract_errors_from_conversation(
 
                         error_type = extract_error_type(error_msg)
 
-                        # Extract solution from next assistant message
+                        # Extract solution from next 2-3 assistant messages
+                        # Real solutions often come after some investigation
                         solution_summary = None
-                        if i + 1 < len(messages):
-                            next_msg = messages[i + 1]
-                            if next_msg.get('role') == 'assistant':
-                                solution_details = next_msg.get('content', '')
-                                if isinstance(solution_details, list):
-                                    solution_details = ' '.join(
-                                        item.get('text', '') for item in solution_details
-                                        if isinstance(item, dict) and item.get('type') == 'text'
-                                    )
-                                solution_summary = _extract_solution_summary(solution_details)
+                        for look_ahead in range(1, 4):  # Check next 3 messages
+                            msg_idx = i + look_ahead
+                            if msg_idx >= len(messages):
+                                break
+                            next_msg = messages[msg_idx]
+                            if next_msg.get('role') != 'assistant':
+                                continue
+
+                            solution_details = next_msg.get('content', '')
+                            if isinstance(solution_details, list):
+                                solution_details = ' '.join(
+                                    item.get('text', '') for item in solution_details
+                                    if isinstance(item, dict) and item.get('type') == 'text'
+                                )
+                            candidate = _extract_solution_summary(solution_details)
+                            if candidate:
+                                solution_summary = candidate
+                                break  # Found a solution, stop looking
 
                         # Store in central Postgres
                         if use_central and project_id:
@@ -704,13 +744,15 @@ def _extract_solution_summary(solution_text: str) -> Optional[str]:
     Only extracts if the response actually contains solution-like content.
     Returns None if no clear solution is found.
 
-    Uses tiered patterns:
-    - Direct fix statements ("The fix is...", "To fix this...")
-    - Action descriptions ("I changed...", "Updated the...")
-    - Root cause with fix ("The issue was... so I...")
-    - Command/code fixes ("Run:", "Try:", "Install:")
+    Pattern priority (IMPORTANT - order matters!):
+    1. Command/code fixes (most concrete - "Run: pip install X")
+    2. Action descriptions ("I changed...", "I added...")
+    3. Direct fix statements ("The fix is...", "To fix this...")
+    4. Root cause with action (only if contains action verb after explanation)
+
+    NEVER extract pure problem descriptions without accompanying solutions.
     """
-    if not solution_text or len(solution_text) < 50:
+    if not solution_text or len(solution_text) < 30:
         return None
 
     # Expanded solution-indicating words
@@ -724,63 +766,97 @@ def _extract_solution_summary(solution_text: str) -> Optional[str]:
     if not any(ind in text_lower for ind in solution_indicators):
         return None
 
-    # Tier 1: Direct fix statements (high confidence)
-    direct_fix_patterns = [
-        r"(?:The (?:fix|solution|answer) (?:is|was))[:\s]+([^.!?\n]{20,200}[.!?])",
-        r"(?:To (?:fix|solve|resolve) (?:this|the|it))[,:\s]+([^.!?\n]{20,200}[.!?])",
-        r"(?:The (?:issue|problem|error|bug) (?:is|was))[:\s]+([^.!?\n]{20,200}[.!?])",
-        r"(?:This (?:happens|occurs|is caused) (?:because|when|due to))[:\s]+([^.!?\n]{20,200}[.!?])",
-    ]
-
-    # Tier 2: Action descriptions
-    action_patterns = [
-        r"(?:I (?:fixed|resolved|corrected|changed|updated|modified) (?:this|it|the))[:\s]+([^.!?\n]{20,200}[.!?])",
-        r"(?:Changed|Updated|Fixed|Replaced|Added|Removed|Modified|Deleted|Created)\s+([^.!?\n]{20,150}[.!?])",
-        r"(?:You (?:need|should|must|can) (?:to )?(?:change|update|fix|add|remove|install))\s+([^.!?\n]{15,150}[.!?])",
-        r"(?:(?:Try|Run|Execute|Install|Use))[:\s]+([^.!?\n`]{15,150})",
-    ]
-
-    # Tier 3: Root cause explanations with solutions
-    root_cause_patterns = [
-        r"(?:This (?:error|issue|problem) (?:means|indicates|suggests))[:\s]+([^.!?\n]{20,200}[.!?])",
-        r"(?:The (?:root cause|reason|cause) (?:is|was))[:\s]+([^.!?\n]{20,200}[.!?])",
-        r"(?:This (?:is|was) (?:because|caused by|due to))[:\s]+([^.!?\n]{20,200}[.!?])",
-    ]
-
-    # Tier 4: Command/code fixes (extract first actionable line)
+    # TIER 1: Command/code fixes (most concrete, highest priority)
+    # These are actionable commands - extract them first
     command_patterns = [
-        r"```(?:bash|sh|shell|console)?\n([^\n`]{10,100})",  # First line of code block
-        r"(?:Run|Execute|Try|Install|Use):\s*`([^`]{10,100})`",  # Inline code after action word
-        r"(?:Run|Execute|Try|Install|Use):\s*\n```\s*\n?([^\n`]{10,100})",  # Code block after action
+        # Code blocks with shell commands
+        r"```(?:bash|sh|shell|console|terminal)?\s*\n\s*([^\n`]{5,100})",
+        # Inline code after action words
+        r"(?:Run|Execute|Try|Install|Use)[:\s]+`([^`]{5,100})`",
+        # Code block after action words
+        r"(?:Run|Execute|Try|Install|Use)[:\s]*\n```[^\n]*\n\s*([^\n`]{5,100})",
     ]
 
-    # Language-specific fix patterns
-    language_fix_patterns = [
-        # npm/yarn/pnpm
-        r"(?:npm|yarn|pnpm) (?:install|add|update|remove|run)\s+([^\n]{10,100})",
-        # pip
-        r"pip (?:install|uninstall|upgrade)\s+([^\n]{10,100})",
+    # TIER 2: Language-specific package manager commands (very concrete)
+    package_manager_patterns = [
+        # Full command capture (npm/yarn/pnpm)
+        r"((?:npm|yarn|pnpm)\s+(?:install|add|update|remove|run|i)\s+[^\n]{3,80})",
+        # pip commands
+        r"(pip\s+(?:install|uninstall|upgrade)\s+[^\n]{3,80})",
         # apt/brew/yum
-        r"(?:apt|brew|yum|dnf) (?:install|update|remove)\s+([^\n]{10,100})",
-        # git
-        r"git (?:checkout|reset|revert|pull|fetch)\s+([^\n]{10,100})",
-        # docker
-        r"docker (?:run|pull|build|compose)\s+([^\n]{10,100})",
-        # cargo
-        r"cargo (?:add|install|update|build)\s+([^\n]{10,100})",
+        r"((?:apt|apt-get|brew|yum|dnf)\s+(?:install|update|remove)\s+[^\n]{3,80})",
+        # git commands
+        r"(git\s+(?:checkout|reset|revert|pull|fetch|stash|clean)\s+[^\n]{3,80})",
+        # docker commands
+        r"(docker(?:-compose)?\s+(?:run|pull|build|up|down)\s+[^\n]{3,80})",
+        # cargo commands
+        r"(cargo\s+(?:add|install|update|build|run)\s+[^\n]{3,80})",
     ]
 
-    # Try each tier in order
-    all_patterns = direct_fix_patterns + action_patterns + root_cause_patterns + command_patterns + language_fix_patterns
+    # TIER 3: Explicit action descriptions (what the assistant DID)
+    action_patterns = [
+        # Past tense actions - very reliable
+        r"I\s+(?:fixed|resolved|corrected|changed|updated|modified|added|removed|replaced|installed)\s+([^.!?\n]{10,150}[.!?]?)",
+        # Present perfect - also reliable
+        r"I(?:'ve| have)\s+(?:fixed|resolved|corrected|changed|updated|modified|added|removed)\s+([^.!?\n]{10,150}[.!?]?)",
+        # Imperative sentence starters (Claude often uses these)
+        r"(?:^|\n)\s*(?:Change|Update|Fix|Replace|Add|Remove|Modify|Delete|Create|Install|Run|Set)\s+([^.!?\n]{10,120}[.!?\n])",
+    ]
+
+    # TIER 4: Direct fix statements (explicit solution framing)
+    fix_statement_patterns = [
+        r"(?:The\s+(?:fix|solution)\s+(?:is|was))[:\s]+([^.!?\n]{15,180}[.!?])",
+        r"(?:To\s+(?:fix|solve|resolve)\s+(?:this|the|it))[,:\s]+([^.!?\n]{15,180}[.!?])",
+        r"(?:You\s+(?:need|should|must|can)\s+(?:to\s+)?(?:change|update|fix|add|remove|install|run))\s+([^.!?\n]{10,150}[.!?]?)",
+    ]
+
+    # TIER 5: Root cause WITH action (must have action verb AFTER the explanation)
+    # These patterns require both explanation AND action in the same sentence
+    root_cause_with_action_patterns = [
+        # "The issue was X, so I did Y" - capture Y
+        r"(?:The\s+(?:issue|problem|error)\s+(?:is|was)[^.]{10,80}),?\s+(?:so\s+)?I\s+([^.!?\n]{10,150}[.!?])",
+        # "This happened because X. I fixed it by Y" - capture Y
+        r"(?:because|due to)[^.]{10,80}\.\s*I\s+(?:fixed|resolved|changed|updated)\s+([^.!?\n]{10,150}[.!?])",
+    ]
+
+    # Combine in priority order
+    all_patterns = (
+        command_patterns +
+        package_manager_patterns +
+        action_patterns +
+        fix_statement_patterns +
+        root_cause_with_action_patterns
+    )
+
+    # Patterns that indicate NOT a solution (generic task continuation)
+    non_solution_patterns = [
+        r"^i'?ll\s+(?:continue|proceed|move|go|start|begin|check|look|examine|review|analyze|investigate)",
+        r"^(?:continue|proceed|move|go|start|begin)\s+(?:with|to|on)",
+        r"^(?:let me|let's)\s+(?:continue|proceed|move|check|look|examine)",
+        r"^(?:now|next)\s+(?:i'?ll|let me|let's|we)",
+        r"^testing\s+the",
+        r"^verif(?:y|ying)\s+(?:the|that|all)",
+        r"data validation",
+        r"^checking\s+(?:if|the|that)",
+    ]
 
     for pattern in all_patterns:
-        match = re.search(pattern, solution_text, re.IGNORECASE)
+        match = re.search(pattern, solution_text, re.IGNORECASE | re.MULTILINE)
         if match:
             summary = match.group(1).strip()
             # Clean up: remove leading/trailing punctuation noise
             summary = re.sub(r'^[:\-\s]+', '', summary)
             summary = re.sub(r'[:\-\s]+$', '', summary)
-            if 15 < len(summary) < 250:
+
+            # Reject generic task continuation statements
+            summary_lower = summary.lower()
+            is_non_solution = any(re.match(p, summary_lower) for p in non_solution_patterns)
+            if is_non_solution:
+                continue  # Try next pattern
+
+            # Lower minimum for commands (pip install X = 14 chars)
+            min_len = 8 if any(pm in summary_lower for pm in ['npm', 'pip', 'apt', 'brew', 'git', 'cargo', 'docker']) else 12
+            if min_len < len(summary) < 250:
                 return summary
 
     # Don't fall back to arbitrary sentences - too noisy
@@ -832,6 +908,16 @@ def _search_error_solutions_local(query: str, limit: int = 5) -> List[Dict]:
     db = get_db_manager()
     results = []
 
+    def _extract_session_id(source_sessions_json: str) -> Optional[str]:
+        """Extract most recent session_id from JSON array."""
+        if not source_sessions_json:
+            return None
+        try:
+            sessions = json.loads(source_sessions_json)
+            return sessions[-1] if sessions else None  # Most recent is last
+        except (json.JSONDecodeError, TypeError):
+            return None
+
     try:
         terms = extract_query_terms(query, max_terms=5)
         if terms:
@@ -839,7 +925,7 @@ def _search_error_solutions_local(query: str, limit: int = 5) -> List[Dict]:
 
             rows = db.execute_read(INSIGHTS_DB, """
                 SELECT e.id, e.error_type, e.error_message, e.solution_summary,
-                       e.solution_details, e.occurrence_count, e.last_seen
+                       e.solution_details, e.occurrence_count, e.last_seen, e.source_sessions
                 FROM error_patterns e
                 JOIN errors_fts f ON e.id = f.rowid
                 WHERE errors_fts MATCH ?
@@ -856,13 +942,14 @@ def _search_error_solutions_local(query: str, limit: int = 5) -> List[Dict]:
                     'solution_details': row['solution_details'][:500] if row['solution_details'] else None,
                     'occurrence_count': row['occurrence_count'],
                     'last_seen': row['last_seen'],
+                    'session_id': _extract_session_id(row['source_sessions']),
                 })
 
         if not results:
             normalized_query = normalize_error_message(query)
             rows = db.execute_read(INSIGHTS_DB, """
                 SELECT id, error_type, error_message, solution_summary,
-                       solution_details, occurrence_count, last_seen
+                       solution_details, occurrence_count, last_seen, source_sessions
                 FROM error_patterns
                 WHERE normalized_message LIKE ?
                 ORDER BY occurrence_count DESC
@@ -878,6 +965,7 @@ def _search_error_solutions_local(query: str, limit: int = 5) -> List[Dict]:
                     'solution_details': row['solution_details'][:500] if row['solution_details'] else None,
                     'occurrence_count': row['occurrence_count'],
                     'last_seen': row['last_seen'],
+                    'session_id': _extract_session_id(row['source_sessions']),
                 })
 
     except Exception as e:
@@ -965,8 +1053,27 @@ def _is_decision_false_positive(trigger_match: str, content: str) -> bool:
     if re.search(r"\b(haven't|hasn't|not yet|isn't final|undecided|uncertain)\b", content_stripped, re.I):
         return True
 
-    # Too short to be meaningful
-    if len(content_stripped) < 10:
+    # Too short to be meaningful - require at least 20 chars for a real decision
+    if len(content_stripped) < 20:
+        return True
+
+    # Fragments: markdown list items, section headers, bullet points
+    if re.match(r'^[-*+]\s+', content_stripped):  # Bullet list fragments
+        return True
+    if re.match(r'^\d+\.\s+', content_stripped):  # Numbered list fragments
+        return True
+    if re.match(r'^#+\s', content_stripped):  # Headers
+        return True
+
+    # Incomplete sentences: starts lowercase, no verb-like words
+    if content_stripped[0].islower():
+        # Check if it has action/decision words that make it meaningful
+        if not re.search(r'\b(use|using|implement|create|build|deploy|store|avoid|prefer|must|always|never|should|require)\b', content_stripped, re.I):
+            return True
+
+    # Reject if too few words (less than 4 words = fragment)
+    word_count = len(content_stripped.split())
+    if word_count < 4:
         return True
 
     # Skip if it looks like code
@@ -1199,12 +1306,22 @@ def search_decisions(
     category: Optional[str] = None,
     limit: int = 10,
     project_path: str = None,
+    min_confidence: float = 0.0,
     storage=None
 ) -> List[Dict]:
     """
     Search for past decisions matching the query.
 
     Uses central Postgres if available, falls back to local SQLite.
+
+    Args:
+        query: Search query
+        category: Optional category filter
+        limit: Maximum results
+        project_path: Optional project path filter
+        min_confidence: Minimum confidence threshold (0.0-1.0). Default 0.0 returns all.
+                       Recommended: 0.8 for explicit decisions, 0.6 for including implicit.
+        storage: Storage instance
 
     Returns list of matching decisions with context.
     """
@@ -1227,26 +1344,29 @@ def search_decisions(
                 category=category,
                 limit=limit
             )
+            # Filter by min_confidence (central storage may not support this natively)
             formatted = []
             for r in results:
-                formatted.append({
-                    'decision': r.get('decision'),
-                    'reasoning': r.get('reasoning'),
-                    'category': r.get('category'),
-                    'alternatives': r.get('alternatives', []),
-                    'confidence': r.get('confidence', 0.5),
-                    'created_at': str(r.get('created_at', '')),
-                    'project_path': r.get('project_path', ''),
-                })
+                conf = r.get('confidence', 0.5)
+                if conf >= min_confidence:
+                    formatted.append({
+                        'decision': r.get('decision'),
+                        'reasoning': r.get('reasoning'),
+                        'category': r.get('category'),
+                        'alternatives': r.get('alternatives', []),
+                        'confidence': conf,
+                        'created_at': str(r.get('created_at', '')),
+                        'project_path': r.get('project_path', ''),
+                    })
             return formatted
         except Exception as e:
             log(f"Central decision search failed: {e}")
 
     # Fallback to local SQLite
-    return _search_decisions_local(query, category, limit)
+    return _search_decisions_local(query, category, limit, min_confidence)
 
 
-def _search_decisions_local(query: str, category: Optional[str] = None, limit: int = 10) -> List[Dict]:
+def _search_decisions_local(query: str, category: Optional[str] = None, limit: int = 10, min_confidence: float = 0.0) -> List[Dict]:
     """Search local SQLite for decisions."""
     db = get_db_manager()
     results = []
@@ -1262,20 +1382,20 @@ def _search_decisions_local(query: str, category: Optional[str] = None, limit: i
                            d.session_id, d.timestamp, d.confidence
                     FROM decisions d
                     JOIN decisions_fts f ON d.id = f.rowid
-                    WHERE decisions_fts MATCH ? AND d.category = ?
-                    ORDER BY d.timestamp DESC
+                    WHERE decisions_fts MATCH ? AND d.category = ? AND d.confidence >= ?
+                    ORDER BY d.confidence DESC, d.timestamp DESC
                     LIMIT ?
-                """, (fts_query, category, limit))
+                """, (fts_query, category, min_confidence, limit))
             else:
                 rows = db.execute_read(INSIGHTS_DB, """
                     SELECT d.id, d.decision_summary, d.context, d.category,
                            d.session_id, d.timestamp, d.confidence
                     FROM decisions d
                     JOIN decisions_fts f ON d.id = f.rowid
-                    WHERE decisions_fts MATCH ?
-                    ORDER BY d.timestamp DESC
+                    WHERE decisions_fts MATCH ? AND d.confidence >= ?
+                    ORDER BY d.confidence DESC, d.timestamp DESC
                     LIMIT ?
-                """, (fts_query, limit))
+                """, (fts_query, min_confidence, limit))
 
             for row in rows:
                 results.append({

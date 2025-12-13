@@ -35,9 +35,11 @@ MIRA3 (Memory Information Retriever and Archiver) is an MCP server that monitors
 ```bash
 npm run build        # Compile TypeScript to dist/
 npm run dev          # Watch mode for development
-npm run test         # Run tests with vitest
 npm run lint         # ESLint on src/
 npm run typecheck    # TypeScript type checking without emit
+
+# Tests are Python (pytest), not TypeScript
+python -m pytest test/ -v
 ```
 
 ### Running the Integration Test
@@ -57,7 +59,7 @@ npx tsx test/integration.ts
 
 1. **Node.js MCP Server** (`src/`) - Thin MCP protocol layer that:
    - Handles stdio transport with Claude Code
-   - Registers 6 MCP tools: `mira_search`, `mira_recent`, `mira_init`, `mira_status`, `mira_error_lookup`, `mira_decisions`
+   - Registers 7 MCP tools: `mira_init`, `mira_search`, `mira_recent`, `mira_error_lookup`, `mira_decisions`, `mira_code_history`, `mira_status`
    - Spawns and communicates with Python backend via JSON-RPC over stdio
 
 2. **Python Backend Daemon** (`python/mira/`) - Lightweight self-installing backend:
@@ -85,6 +87,7 @@ npx tsx test/integration.ts
 | `python/mira/custodian.py` | Custodian learning and profile management |
 | `python/mira/insights.py` | Error pattern recognition and decision journal |
 | `python/mira/concepts.py` | Codebase concept extraction and tracking |
+| `python/mira/code_history.py` | File/function history tracking across conversations |
 
 ### Communication Flow
 

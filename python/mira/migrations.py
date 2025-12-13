@@ -9,7 +9,7 @@ Migrations are idempotent and can be safely re-run.
 """
 
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Callable
 
@@ -17,7 +17,7 @@ from .utils import log, get_mira_path
 from .db_manager import get_db_manager
 
 # Current schema version
-CURRENT_VERSION = 5
+CURRENT_VERSION = 6
 
 # Migration registry
 MIGRATIONS_DB = "migrations.db"
@@ -302,6 +302,24 @@ def migrate_v5(db_manager):
     return True
 
 
+@migration(6, "add_code_history_db")
+def migrate_v6(db_manager):
+    """Add code_history.db for file operation tracking and reconstruction."""
+    log("Migration v6: Creating code_history database")
+
+    try:
+        from .code_history import init_code_history_db
+        init_code_history_db()
+        log("  Created code_history.db with file tracking tables")
+
+    except Exception as e:
+        log(f"Migration v6 error: {e}")
+        # Don't fail - tables might already exist
+        pass
+
+    return True
+
+
 # ==================== Migration Runner ====================
 
 def init_migrations_db():
@@ -377,11 +395,11 @@ def run_migrations(target_version: Optional[int] = None) -> Dict[str, Any]:
             break
 
         log(f"Running migration v{version}: {name}")
-        start_time = datetime.utcnow()
+        start_time = datetime.now(timezone.utc)
 
         try:
             success = migrate_func(db)
-            duration_ms = int((datetime.utcnow() - start_time).total_seconds() * 1000)
+            duration_ms = int((datetime.now(timezone.utc) - start_time).total_seconds() * 1000)
 
             if success:
                 # Record successful migration
@@ -389,7 +407,7 @@ def run_migrations(target_version: Optional[int] = None) -> Dict[str, Any]:
                     MIGRATIONS_DB,
                     """INSERT INTO schema_migrations (version, name, applied_at, duration_ms, status)
                        VALUES (?, ?, ?, ?, 'success')""",
-                    (version, name, datetime.utcnow().isoformat(), duration_ms)
+                    (version, name, datetime.now(timezone.utc).isoformat(), duration_ms)
                 )
                 results["migrations_run"].append({
                     "version": version,
@@ -404,7 +422,7 @@ def run_migrations(target_version: Optional[int] = None) -> Dict[str, Any]:
                 break
 
         except Exception as e:
-            duration_ms = int((datetime.utcnow() - start_time).total_seconds() * 1000)
+            duration_ms = int((datetime.now(timezone.utc) - start_time).total_seconds() * 1000)
             log(f"Migration v{version} failed: {e}")
 
             # Record failed migration
@@ -412,7 +430,7 @@ def run_migrations(target_version: Optional[int] = None) -> Dict[str, Any]:
                 MIGRATIONS_DB,
                 """INSERT INTO schema_migrations (version, name, applied_at, duration_ms, status)
                    VALUES (?, ?, ?, ?, 'failed')""",
-                (version, name, datetime.utcnow().isoformat(), duration_ms)
+                (version, name, datetime.now(timezone.utc).isoformat(), duration_ms)
             )
 
             results["status"] = "failed"
@@ -475,6 +493,10 @@ def run_postgres_migrations(postgres_backend) -> Dict[str, Any]:
     """
     Run migrations on central Postgres database.
 
+    Creates base tables if needed, then runs incremental migrations.
+    This ensures users only need to provide credentials - MIRA handles
+    all schema setup automatically.
+
     Args:
         postgres_backend: PostgresBackend instance
 
@@ -499,7 +521,10 @@ def run_postgres_migrations(postgres_backend) -> Dict[str, Any]:
                 exists = cur.fetchone()[0]
 
                 if not exists:
-                    log("Creating Postgres schema_version table")
+                    # Fresh install - create all base tables
+                    log("Creating Postgres base schema (first run)")
+
+                    # Schema version tracking
                     cur.execute("""
                         CREATE TABLE schema_version (
                             version INTEGER PRIMARY KEY,
@@ -507,11 +532,138 @@ def run_postgres_migrations(postgres_backend) -> Dict[str, Any]:
                             description TEXT
                         )
                     """)
+
+                    # Projects table
+                    cur.execute("""
+                        CREATE TABLE IF NOT EXISTS projects (
+                            id SERIAL PRIMARY KEY,
+                            project_path TEXT UNIQUE NOT NULL,
+                            created_at TIMESTAMPTZ DEFAULT NOW()
+                        )
+                    """)
+                    cur.execute("CREATE INDEX IF NOT EXISTS idx_projects_path ON projects(project_path)")
+
+                    # Sessions table
+                    cur.execute("""
+                        CREATE TABLE IF NOT EXISTS sessions (
+                            id SERIAL PRIMARY KEY,
+                            session_id TEXT UNIQUE NOT NULL,
+                            project_id INTEGER REFERENCES projects(id),
+                            slug TEXT,
+                            summary TEXT,
+                            task_description TEXT,
+                            git_branch TEXT,
+                            keywords TEXT[],
+                            message_count INTEGER DEFAULT 0,
+                            file_hash TEXT,
+                            indexed_at TIMESTAMPTZ DEFAULT NOW(),
+                            llm_processed_at TIMESTAMPTZ
+                        )
+                    """)
+                    cur.execute("CREATE INDEX IF NOT EXISTS idx_sessions_session_id ON sessions(session_id)")
+                    cur.execute("CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(project_id)")
+
+                    # Archives table
+                    cur.execute("""
+                        CREATE TABLE IF NOT EXISTS archives (
+                            id SERIAL PRIMARY KEY,
+                            session_id TEXT UNIQUE NOT NULL REFERENCES sessions(session_id) ON DELETE CASCADE,
+                            content TEXT,
+                            archived_at TIMESTAMPTZ DEFAULT NOW()
+                        )
+                    """)
+
+                    # Artifacts table
+                    cur.execute("""
+                        CREATE TABLE IF NOT EXISTS artifacts (
+                            id SERIAL PRIMARY KEY,
+                            project_id INTEGER REFERENCES projects(id),
+                            session_id TEXT REFERENCES sessions(session_id) ON DELETE CASCADE,
+                            artifact_type TEXT NOT NULL,
+                            content TEXT NOT NULL,
+                            language TEXT,
+                            context TEXT,
+                            line_count INTEGER,
+                            created_at TIMESTAMPTZ DEFAULT NOW()
+                        )
+                    """)
+                    cur.execute("CREATE INDEX IF NOT EXISTS idx_artifacts_session ON artifacts(session_id)")
+                    cur.execute("CREATE INDEX IF NOT EXISTS idx_artifacts_type ON artifacts(artifact_type)")
+
+                    # Decisions table
+                    cur.execute("""
+                        CREATE TABLE IF NOT EXISTS decisions (
+                            id SERIAL PRIMARY KEY,
+                            project_id INTEGER REFERENCES projects(id),
+                            decision TEXT NOT NULL,
+                            category TEXT DEFAULT 'general',
+                            reasoning TEXT,
+                            alternatives TEXT[],
+                            confidence REAL DEFAULT 0.5,
+                            source TEXT DEFAULT 'regex',
+                            session_id TEXT,
+                            created_at TIMESTAMPTZ DEFAULT NOW(),
+                            updated_at TIMESTAMPTZ DEFAULT NOW()
+                        )
+                    """)
+                    cur.execute("CREATE INDEX IF NOT EXISTS idx_decisions_project ON decisions(project_id)")
+
+                    # Error patterns table
+                    cur.execute("""
+                        CREATE TABLE IF NOT EXISTS error_patterns (
+                            id SERIAL PRIMARY KEY,
+                            project_id INTEGER REFERENCES projects(id),
+                            signature TEXT NOT NULL,
+                            error_type TEXT,
+                            error_text TEXT NOT NULL,
+                            solution TEXT,
+                            file_path TEXT,
+                            occurrences INTEGER DEFAULT 1,
+                            first_seen TIMESTAMPTZ DEFAULT NOW(),
+                            last_seen TIMESTAMPTZ DEFAULT NOW()
+                        )
+                    """)
+                    cur.execute("CREATE INDEX IF NOT EXISTS idx_errors_project ON error_patterns(project_id)")
+
+                    # Custodian table
+                    cur.execute("""
+                        CREATE TABLE IF NOT EXISTS custodian (
+                            id SERIAL PRIMARY KEY,
+                            key TEXT UNIQUE NOT NULL,
+                            value TEXT NOT NULL,
+                            category TEXT,
+                            confidence REAL DEFAULT 0.5,
+                            frequency INTEGER DEFAULT 1,
+                            source_sessions TEXT[],
+                            created_at TIMESTAMPTZ DEFAULT NOW(),
+                            updated_at TIMESTAMPTZ DEFAULT NOW()
+                        )
+                    """)
+                    cur.execute("CREATE INDEX IF NOT EXISTS idx_custodian_key ON custodian(key)")
+
+                    # Concepts table
+                    cur.execute("""
+                        CREATE TABLE IF NOT EXISTS concepts (
+                            id SERIAL PRIMARY KEY,
+                            project_id INTEGER REFERENCES projects(id),
+                            concept_type TEXT NOT NULL,
+                            name TEXT NOT NULL,
+                            description TEXT,
+                            confidence REAL DEFAULT 0.5,
+                            frequency INTEGER DEFAULT 1,
+                            source_sessions TEXT[],
+                            updated_at TIMESTAMPTZ DEFAULT NOW(),
+                            UNIQUE(project_id, concept_type, name)
+                        )
+                    """)
+                    cur.execute("CREATE INDEX IF NOT EXISTS idx_concepts_project ON concepts(project_id)")
+
                     cur.execute(
-                        "INSERT INTO schema_version (version, description) VALUES (1, 'Initial schema')"
+                        "INSERT INTO schema_version (version, description) VALUES (1, 'Initial schema with all base tables')"
                     )
                     conn.commit()
-                    results["migrations_run"].append({"version": 1, "name": "initial"})
+                    results["migrations_run"].append({"version": 1, "name": "initial_full_schema"})
+                    log("  Created all base tables (projects, sessions, archives, artifacts, decisions, error_patterns, custodian, concepts)")
 
                 # Get current Postgres version
                 cur.execute("SELECT MAX(version) FROM schema_version")

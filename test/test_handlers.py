@@ -159,10 +159,10 @@ class TestRPCHandlersComplete:
             storage=None
         )
 
-        # Handler returns 'results' list and 'total' count
-        assert "results" in result
+        # Handler returns 'solutions' list (matches TypeScript expectation) and 'total' count
+        assert "solutions" in result
         assert "total" in result
-        assert isinstance(result["results"], list)
+        assert isinstance(result["solutions"], list)
 
     def test_handle_error_lookup_with_project(self):
         """Test error_lookup handler with project filter."""
@@ -177,7 +177,7 @@ class TestRPCHandlersComplete:
             storage=None
         )
 
-        assert "results" in result
+        assert "solutions" in result
         assert "total" in result
 
     def test_handle_decisions_basic(self):
@@ -189,10 +189,10 @@ class TestRPCHandlersComplete:
             storage=None
         )
 
-        # Handler returns 'results' list and 'total' count
-        assert "results" in result
+        # Handler returns 'decisions' list (matches TypeScript expectation) and 'total' count
+        assert "decisions" in result
         assert "total" in result
-        assert isinstance(result["results"], list)
+        assert isinstance(result["decisions"], list)
 
     def test_handle_decisions_with_category(self):
         """Test decisions handler with category filter."""
@@ -207,7 +207,7 @@ class TestRPCHandlersComplete:
             storage=None
         )
 
-        assert "results" in result
+        assert "decisions" in result
         assert "total" in result
 
     def test_handle_rpc_request_error_lookup(self):
@@ -225,7 +225,7 @@ class TestRPCHandlersComplete:
 
         # RPC wraps result in jsonrpc format
         assert "result" in result
-        assert "results" in result["result"]
+        assert "solutions" in result["result"]
 
     def test_handle_rpc_request_decisions(self):
         """Test RPC dispatch for decisions method."""
@@ -242,4 +242,4 @@ class TestRPCHandlersComplete:
 
         # RPC wraps result in jsonrpc format
         assert "result" in result
-        assert "results" in result["result"]
+        assert "decisions" in result["result"]

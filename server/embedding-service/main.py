@@ -22,7 +22,7 @@ import logging
 import threading
 import time
 from typing import Optional, List, Dict, Any
-from datetime import datetime
+from datetime import datetime, timezone
 from contextlib import contextmanager
 
 from fastapi import FastAPI, HTTPException
@@ -411,7 +411,7 @@ def index_session(row: dict) -> bool:
                         "chunk_index": i,
                         "total_chunks": len(chunks),
                         "chunk_preview": chunk_text[:200],  # Preview for debugging
-                        "indexed_at": datetime.utcnow().isoformat()
+                        "indexed_at": datetime.now(timezone.utc).isoformat()
                     }
                 )
             )
@@ -520,7 +520,7 @@ def indexer_worker():
 
     while indexer_running:
         try:
-            indexer_stats["last_poll"] = datetime.utcnow().isoformat()
+            indexer_stats["last_poll"] = datetime.now(timezone.utc).isoformat()
             indexed = poll_and_index()
 
             # If we indexed a full batch, poll again immediately
