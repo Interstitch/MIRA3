@@ -7,11 +7,46 @@ An MCP server that gives Claude Code persistent memory across sessions, machines
 MIRA watches your Claude Code conversations, learns your preferences, indexes errors and solutions, and makes everything searchable. With remote storage, you get semantic search ("that auth conversation") and seamless history across all your machines.
 
 **Key Features:**
+- **Zero-configuration context** - Claude knows who you are the moment a session starts (see below)
 - **Semantic search** - Find conversations by meaning, not just keywords (requires remote storage)
 - **Cross-machine sync** - Your full history follows you across laptop, desktop, Codespaces
-- **Automatic context injection** - Claude knows your name, workflow, and preferences from session start
-- **Error pattern recognition** - Search 88+ resolved errors before debugging from scratch
+- **Error pattern recognition** - Search past errors before debugging from scratch
 - **Learned prerequisites** - MIRA learns environment-specific setup (e.g., "start tailscaled in Codespaces")
+
+## Claude Knows You From the Start
+
+**This is MIRA's killer feature.** The SessionStart hook automatically injects context before you type anything:
+
+```
+=== MIRA Session Context ===
+
+## User Profile
+Name: Max
+Summary: Max is the sole developer (123 sessions). Prefers planning before implementation.
+Development Lifecycle: Plan → Test → Implement → Commit (85% confidence)
+Interaction Tips:
+  - Work pattern: Iterative development with frequent edits
+  - Be careful with: ingestion.py (51 recorded issues)
+
+## When to Consult MIRA
+- [CRITICAL] Encountering an error → call mira_error_lookup first
+- [CRITICAL] About to say "I don't know" → search MIRA before admitting ignorance
+- [CRITICAL] Making architectural decisions → call mira_decisions for precedents
+
+## Alerts
+- [HIGH] In Codespaces, start tailscaled first
+```
+
+**What this means:**
+- Claude addresses you by name without asking
+- Claude follows your preferred workflow (test first? plan first?)
+- Claude warns before touching files that caused past issues
+- Claude searches your history before saying "I don't know"
+- Claude reminds you of environment-specific prerequisites
+
+No manual prompting. No "remember that I prefer..." every session. MIRA learns from your conversations and Claude just *knows*.
+
+**How it works:** MIRA installs a [SessionStart hook](https://docs.anthropic.com/en/docs/claude-code/hooks) that runs `mira_init` before every conversation. The hook returns your profile, danger zones, critical reminders, and environment-specific alerts - all injected into Claude's context automatically.
 
 **Storage modes:**
 - **Remote (recommended)** - Postgres + Qdrant for semantic search and cross-machine sync
@@ -200,15 +235,16 @@ Skipped: file-history snapshots, agent sub-conversations, empty conversations.
 
 ## Custodian Learning
 
-MIRA learns your preferences from conversations:
-- **Identity** - Your name (from statements like "My name is John")
-- **Preferences** - Tool preferences ("I prefer pnpm"), coding style
-- **Rules** - Explicit constraints ("never commit to main")
-- **Danger zones** - Files that have caused repeated issues
-- **Development lifecycle** - Your workflow pattern (e.g., "Plan → Test → Implement")
-- **Prerequisites** - Environment-specific setup requirements (see below)
+MIRA builds your profile from conversations - this is what powers the [automatic context injection](#claude-knows-you-from-the-start):
 
-This context is automatically injected at session start via the SessionStart hook.
+- **Identity** - Your name (from "My name is John" or "I'm Sarah")
+- **Preferences** - Tool preferences ("I prefer pnpm"), coding style, frameworks
+- **Rules** - Explicit constraints ("never commit to main", "always run tests first")
+- **Danger zones** - Files that have caused repeated issues (tracked automatically)
+- **Development lifecycle** - Your workflow pattern, detected from how you work across sessions
+- **Prerequisites** - Environment-specific setup (see below)
+
+The more you use Claude Code with MIRA, the more it learns. Everything feeds into the session start context.
 
 ## Learned Prerequisites
 
