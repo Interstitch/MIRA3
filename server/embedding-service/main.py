@@ -16,7 +16,7 @@ Endpoints:
 - POST /reindex/all - Manual full reindex (admin)
 """
 
-VERSION = "0.3.2"
+VERSION = "0.3.3"
 
 import os
 import asyncio
@@ -68,6 +68,8 @@ CREATE TABLE IF NOT EXISTS schema_version (
 CREATE TABLE IF NOT EXISTS projects (
     id SERIAL PRIMARY KEY,
     path TEXT UNIQUE NOT NULL,
+    slug TEXT,
+    git_remote TEXT,
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
 CREATE INDEX IF NOT EXISTS idx_projects_path ON projects(path);
@@ -228,7 +230,14 @@ CREATE INDEX IF NOT EXISTS idx_file_ops_project ON file_operations(project_id);
 CREATE INDEX IF NOT EXISTS idx_file_ops_file ON file_operations(file_path);
 
 -- Record schema version
-INSERT INTO schema_version (version) VALUES (5) ON CONFLICT (version) DO NOTHING;
+INSERT INTO schema_version (version) VALUES (6) ON CONFLICT (version) DO NOTHING;
+"""
+
+# Schema migrations for existing databases
+MIGRATIONS_SQL = """
+-- v6: Add slug and git_remote columns to projects table
+ALTER TABLE projects ADD COLUMN IF NOT EXISTS slug TEXT;
+ALTER TABLE projects ADD COLUMN IF NOT EXISTS git_remote TEXT;
 """
 
 # Logging
@@ -593,7 +602,7 @@ async def startup():
         cursor_factory=RealDictCursor
     )
 
-    # Initialize database schema (skip if tables already exist)
+    # Initialize database schema or run migrations
     try:
         with get_db_connection() as conn:
             cur = conn.cursor()
@@ -607,14 +616,17 @@ async def startup():
             tables_exist = cur.fetchone()['exists']
 
             if tables_exist:
-                logger.info("Database schema already exists, skipping initialization")
+                logger.info("Database schema exists, running migrations...")
+                cur.execute(MIGRATIONS_SQL)
+                conn.commit()
+                logger.info("Database migrations complete")
             else:
                 cur.execute(SCHEMA_SQL)
                 conn.commit()
                 logger.info("Database schema initialized")
             cur.close()
     except Exception as e:
-        logger.error(f"Failed to initialize schema: {e}")
+        logger.error(f"Failed to initialize/migrate schema: {e}")
 
     # Start background indexer
     indexer_running = True

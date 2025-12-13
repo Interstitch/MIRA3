@@ -765,6 +765,46 @@ def handle_status(params: dict, collection, storage=None) -> dict:
     indexed_project = 0
     indexed_of_indexable = 0      # How many of current indexable files are in DB
     indexed_of_project = 0        # How many of current project files are in DB
+    session_count_source = "unknown"
+
+    # Helper to query local SQLite for session counts
+    def _query_local_session_counts():
+        nonlocal indexed_global, indexed_of_indexable, indexed_of_project, session_count_source
+        try:
+            import sqlite3
+            local_db = mira_path / "local_store.db"
+            if local_db.exists():
+                conn = sqlite3.connect(str(local_db))
+                cur = conn.cursor()
+                try:
+                    # Total sessions in local DB
+                    cur.execute("SELECT COUNT(*) FROM sessions")
+                    indexed_global = cur.fetchone()[0]
+
+                    # Check which of the current indexable files are indexed
+                    if indexable_session_ids:
+                        placeholders = ','.join(['?'] * len(indexable_session_ids))
+                        cur.execute(
+                            f"SELECT COUNT(*) FROM sessions WHERE session_id IN ({placeholders})",
+                            indexable_session_ids
+                        )
+                        indexed_of_indexable = cur.fetchone()[0]
+
+                    # Check which of the current project files are indexed
+                    if project_session_ids:
+                        placeholders = ','.join(['?'] * len(project_session_ids))
+                        cur.execute(
+                            f"SELECT COUNT(*) FROM sessions WHERE session_id IN ({placeholders})",
+                            project_session_ids
+                        )
+                        indexed_of_project = cur.fetchone()[0]
+
+                    session_count_source = "local"
+                finally:
+                    conn.close()
+        except Exception:
+            pass
+
     if storage and storage.using_central and storage.postgres:
         # Query central Postgres
         try:
@@ -796,42 +836,16 @@ def handle_status(params: dict, collection, storage=None) -> dict:
                             project_session_ids
                         )
                         indexed_of_project = cur.fetchone()[0]
-        except Exception:
-            pass
+                    session_count_source = "central"
+        except Exception as e:
+            # Fall back to local SQLite if central queries fail
+            log(f"Central session count query failed, falling back to local: {e}")
+            _query_local_session_counts()
+            if session_count_source == "local":
+                session_count_source = "local_fallback"
     else:
         # Query local SQLite
-        try:
-            import sqlite3
-            local_db = mira_path / "local_store.db"
-            if local_db.exists():
-                conn = sqlite3.connect(str(local_db))
-                cur = conn.cursor()
-                try:
-                    # Total sessions in local DB
-                    cur.execute("SELECT COUNT(*) FROM sessions")
-                    indexed_global = cur.fetchone()[0]
-
-                    # Check which of the current indexable files are indexed
-                    if indexable_session_ids:
-                        placeholders = ','.join(['?'] * len(indexable_session_ids))
-                        cur.execute(
-                            f"SELECT COUNT(*) FROM sessions WHERE session_id IN ({placeholders})",
-                            indexable_session_ids
-                        )
-                        indexed_of_indexable = cur.fetchone()[0]
-
-                    # Check which of the current project files are indexed
-                    if project_session_ids:
-                        placeholders = ','.join(['?'] * len(project_session_ids))
-                        cur.execute(
-                            f"SELECT COUNT(*) FROM sessions WHERE session_id IN ({placeholders})",
-                            project_session_ids
-                        )
-                        indexed_of_project = cur.fetchone()[0]
-                finally:
-                    conn.close()
-        except Exception:
-            pass
+        _query_local_session_counts()
 
     # Get insights stats (local SQLite - always global for now)
     error_stats = get_error_stats()
@@ -913,8 +927,9 @@ def handle_status(params: dict, collection, storage=None) -> dict:
                         }
 
                     artifact_stats['storage'] = 'central'
-        except Exception:
+        except Exception as e:
             # Fall back to local stats if central query fails
+            log(f"Central artifact count query failed, falling back to local: {e}")
             local_stats = get_artifact_stats()
             artifact_stats['global'] = local_stats
             artifact_stats['storage'] = 'local_fallback'
@@ -1090,6 +1105,7 @@ def handle_status(params: dict, collection, storage=None) -> dict:
 
     # Add storage info
     result["storage_mode"] = {
+        "sessions": session_count_source,
         "artifacts": artifact_stats.get('storage', 'unknown'),
         "decisions": decision_stats_central.get('storage', 'unknown'),
         "file_operations": file_ops_stats.get('storage', 'unknown'),
