@@ -8,6 +8,12 @@ Three-Tier Search Architecture:
 - Tier 2: Local semantic (sqlite-vec + fastembed) - offline, same quality
 - Tier 3: FTS5 keyword (SQLite) - always available, fast
 
+Time Decay Scoring:
+- Exponential decay with 90-day half-life: recent results weighted higher
+- Formula: decayed_score = relevance × e^(-λ × age_days) where λ = ln(2)/90
+- Floor of 0.1 ensures old but highly relevant results still appear
+- Applied after all search tiers, before final ranking
+
 Lazy Loading:
 - Local semantic model (~100MB) only downloads when:
   1. Remote storage is unavailable AND
@@ -21,13 +27,103 @@ Response Format:
 """
 
 import json
+import math
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Any, Optional
 
 from .utils import log, get_mira_path, extract_text_content, extract_query_terms
 from .artifacts import search_artifacts_for_query
+
+
+# =============================================================================
+# TIME DECAY SCORING
+# =============================================================================
+
+# Default parameters for exponential time decay
+DEFAULT_HALF_LIFE_DAYS = 90  # Score halves every 90 days
+MIN_DECAY_FACTOR = 0.1  # Floor to prevent old results from disappearing entirely
+
+
+def _calculate_time_decay(timestamp_str: str, half_life_days: float = DEFAULT_HALF_LIFE_DAYS) -> float:
+    """
+    Calculate exponential time decay factor for a result.
+
+    Uses formula: decay = e^(-λ × age_days) where λ = ln(2) / half_life
+
+    This implements a "forgetting curve" where recent results are weighted more
+    heavily, but old results with high relevance can still surface.
+
+    Args:
+        timestamp_str: ISO format timestamp string (e.g., "2025-01-15T10:30:00")
+        half_life_days: Days until score is halved (default 90)
+
+    Returns:
+        Decay factor between MIN_DECAY_FACTOR and 1.0
+    """
+    if not timestamp_str:
+        return 0.5  # Neutral for missing timestamps
+
+    try:
+        # Parse timestamp (handle various formats)
+        ts_str = str(timestamp_str)
+        if "T" in ts_str:
+            # ISO format: 2025-01-15T10:30:00Z or 2025-01-15T10:30:00+00:00
+            ts = datetime.fromisoformat(ts_str.replace("Z", "+00:00").split("+")[0])
+        else:
+            ts = datetime.fromisoformat(ts_str)
+
+        # Calculate age in days
+        age_days = (datetime.now() - ts).total_seconds() / 86400
+
+        if age_days < 0:
+            return 1.0  # Future timestamps get no decay
+
+        # Exponential decay: e^(-λ × age) where λ = ln(2) / half_life
+        decay_rate = math.log(2) / half_life_days
+        decay = math.exp(-decay_rate * age_days)
+
+        # Apply floor to prevent old results from disappearing
+        return max(decay, MIN_DECAY_FACTOR)
+
+    except (ValueError, TypeError, AttributeError):
+        return 0.5  # Neutral for unparseable timestamps
+
+
+def _apply_time_decay(
+    results: List[Dict[str, Any]],
+    half_life_days: float = DEFAULT_HALF_LIFE_DAYS
+) -> List[Dict[str, Any]]:
+    """
+    Apply exponential time decay to search results and re-sort.
+
+    Modifies results in place, adding 'decayed_score' and 'decay_factor' fields.
+    The original 'relevance' is preserved. Results are re-sorted by decayed_score.
+
+    Args:
+        results: List of search result dicts with 'relevance' and 'timestamp'
+        half_life_days: Days until score is halved (default 90)
+
+    Returns:
+        Results sorted by decayed score (descending)
+    """
+    for result in results:
+        original_score = result.get('relevance', 0.5)
+        # Try multiple timestamp fields
+        timestamp = result.get('timestamp') or result.get('started_at', '')
+
+        decay_factor = _calculate_time_decay(timestamp, half_life_days)
+        decayed_score = original_score * decay_factor
+
+        result['decayed_score'] = round(decayed_score, 4)
+        result['decay_factor'] = round(decay_factor, 3)
+
+    # Re-sort by decayed score
+    results.sort(key=lambda x: x.get('decayed_score', 0), reverse=True)
+
+    return results
 
 
 # =============================================================================
@@ -191,10 +287,19 @@ def _compact_result(result: Dict[str, Any], query_terms: List[str]) -> Dict[str,
         'messages': msg_count,
     }
 
-    # Only include score if high relevance
+    # Include score if high relevance (use decayed_score if available for ranking transparency)
+    decayed_score = result.get('decayed_score')
     relevance = result.get('relevance', 0)
-    if relevance and relevance > 0.7:
-        compact['score'] = round(relevance, 2)
+
+    # Use decayed score for display since that's what we're ranking by
+    display_score = decayed_score if decayed_score is not None else relevance
+    if display_score and display_score > 0.5:
+        compact['score'] = round(display_score, 2)
+        # Show age indicator if decay significantly affected score
+        decay_factor = result.get('decay_factor', 1.0)
+        if decay_factor < 0.7:
+            # Result is older - show the original relevance for context
+            compact['raw_score'] = round(relevance, 2) if relevance else None
 
     return compact
 
@@ -223,7 +328,9 @@ def handle_search(params: dict, collection, storage=None) -> dict:
             - limit: Max results (default 10)
             - project_path: Optional project filter
             - compact: Return compact format (default True, ~79% smaller)
-            - days: Filter to sessions from last N days
+            - days: Filter to sessions from last N days (hard cutoff)
+            - recency_bias: Apply time decay to boost recent results (default True).
+                           Set to False for historical searches where old content matters.
         collection: Deprecated - kept for API compatibility, ignored
         storage: Storage instance
 
@@ -237,6 +344,7 @@ def handle_search(params: dict, collection, storage=None) -> dict:
     project_path = params.get("project_path")  # Optional: filter to specific project
     compact = params.get("compact", True)  # Default to compact for token efficiency
     days = params.get("days")  # Optional: filter to last N days
+    recency_bias = params.get("recency_bias", True)  # Apply time decay by default
     mira_path = get_mira_path()
 
     # Calculate cutoff time if days specified
@@ -445,6 +553,11 @@ def handle_search(params: dict, collection, storage=None) -> dict:
                 # No timestamp, include the result
                 filtered_results.append(r)
         results = filtered_results
+
+    # Apply exponential time decay to scores and re-sort (unless disabled)
+    # Recent results are boosted relative to older ones (90-day half-life)
+    if results and recency_bias:
+        results = _apply_time_decay(results)
 
     # Apply compact transformation if requested (default)
     if compact:

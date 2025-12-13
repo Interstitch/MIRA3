@@ -304,6 +304,31 @@ MIRA provides semantic search that finds conversations by meaning, not just keyw
 
 Semantic search works both with remote storage (cross-machine) and locally (single-machine). MIRA automatically uses the best available method.
 
+### Time Decay (Recency Bias)
+
+By default, search results are ranked with **exponential time decay** - recent conversations are weighted higher than older ones:
+
+| Age | Score Multiplier |
+|-----|------------------|
+| Today | 1.00 |
+| 30 days | 0.79 |
+| 90 days | 0.50 (half-life) |
+| 180 days | 0.25 |
+| 1 year | 0.10 (floor) |
+
+This ensures recent context surfaces first while still including old but highly relevant results.
+
+**Disable time decay** with `recency_bias: false` for historical searches:
+```
+mira_search(query='original architecture decision', recency_bias=false)
+mira_search(query='how we first implemented auth', recency_bias=false)
+```
+
+Use `recency_bias: false` when:
+- Looking for **original** decisions or implementations
+- Searching for the **first time** something was discussed
+- Wanting **comprehensive** results regardless of age
+
 **Optimized responses:** Search results use a compact format by default, reducing token usage by ~79%. Each result includes:
 - Short session ID (8 chars)
 - Consolidated summary (max 100 chars)
@@ -403,7 +428,7 @@ MIRA detects and indexes structured content: code blocks, commands, configs, tab
 
 | Tool | Purpose |
 |------|---------|
-| `mira_search` | Search conversations. Params: `query`, `limit`, `project_path`, `days`, `compact` |
+| `mira_search` | Search conversations. Params: `query`, `limit`, `project_path`, `days`, `recency_bias`, `compact` |
 | `mira_recent` | Recent sessions. Params: `limit`, `days` (e.g., `days: 7` for last week) |
 | `mira_init` | Session initialization - user profile, prerequisites, danger zones |
 | `mira_status` | Ingestion stats and system health |
@@ -417,7 +442,8 @@ MIRA detects and indexes structured content: code blocks, commands, configs, tab
 | `query` | string | required | Search query |
 | `limit` | number | 10 | Maximum results |
 | `project_path` | string | - | Filter to specific project |
-| `days` | number | - | Filter to last N days |
+| `days` | number | - | Filter to last N days (hard cutoff) |
+| `recency_bias` | boolean | true | Apply time decay to boost recent results. Set `false` for historical searches |
 | `compact` | boolean | true | Compact format (~79% smaller) |
 
 **Note:** `mira_init` is called automatically via the SessionStart hook. You don't need to call it manually unless context seems stale.

@@ -29,7 +29,8 @@ const SearchSchema = z.object({
   limit: z.number().optional().default(10).describe("Maximum number of results"),
   project_path: z.string().optional().describe("Optional: filter to specific project path"),
   compact: z.boolean().optional().default(true).describe("Return compact format (default true, ~79% smaller)"),
-  days: z.number().optional().describe("Filter to sessions from last N days"),
+  days: z.number().optional().describe("Filter to sessions from last N days (hard cutoff)"),
+  recency_bias: z.boolean().optional().default(true).describe("Apply time decay to boost recent results (default true). Set false for historical searches."),
 });
 
 const RecentSchema = z.object({
@@ -78,14 +79,14 @@ export async function startServer(): Promise<void> {
     "mira_search",
     "Search conversation history by keywords. Uses semantic search (with remote storage) or FTS5 keyword search (local).",
     SearchSchema.shape,
-    async ({ query, limit, project_path, compact, days }) => {
+    async ({ query, limit, project_path, compact, days, recency_bias }) => {
       if (!backendReady) {
         return {
           content: [{ type: "text", text: "Error: Python backend not ready. Ensure Python 3.8+ is installed." }],
         };
       }
       try {
-        const result = await callRpc("search", { query, limit, project_path, compact, days }) as any;
+        const result = await callRpc("search", { query, limit, project_path, compact, days, recency_bias }) as any;
         const resultCount = result?.results?.length || result?.total || 0;
         return {
           content: [{ type: "text", text: `${MIRA_FACES.search} ${resultCount} results\n${JSON.stringify(result, null, 2)}` }],

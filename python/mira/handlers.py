@@ -506,11 +506,25 @@ def _build_claude_guidance(
         "mira_search": {
             "purpose": "Semantic search across all conversation history",
             "when": "Looking for past discussions, implementations, decisions, or any historical context",
-            "syntax": "mira_search(query='<search terms>', limit=10, project_path='<optional>')",
+            "syntax": "mira_search(query='<search terms>', limit=10, project_path='<optional>', days=<optional>, recency_bias=True)",
+            "parameters": {
+                "days": "Filter to last N days (hard cutoff)",
+                "recency_bias": "Time decay boosts recent results (default True). Recent content ranks higher than old."
+            },
+            "recency_bias_guidance": {
+                "default_true": "Most searches - recent context is usually more relevant",
+                "set_false_when": [
+                    "User asks about 'original', 'first', or 'initial' implementations",
+                    "User asks 'why did we decide X' or 'when did we start doing Y'",
+                    "User wants comprehensive results regardless of age",
+                    "Searching for historical decisions or early architecture"
+                ]
+            },
             "examples": [
                 "mira_search(query='authentication implementation')",
-                "mira_search(query='how we handled caching')",
-                "mira_search(query='WebSocket connection issues')"
+                "mira_search(query='recent bugs', days=7)",
+                "mira_search(query='original architecture decision', recency_bias=False)",
+                "mira_search(query='when did we first add caching', recency_bias=False)"
             ]
         },
         "mira_error_lookup": {
