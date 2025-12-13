@@ -161,6 +161,10 @@ def _compact_result(result: Dict[str, Any], query_terms: List[str]) -> Dict[str,
 
     # Select best excerpt (full length)
     excerpts = result.get('excerpts', [])
+    # Handle case where excerpts is a list of strings instead of dicts
+    if excerpts and isinstance(excerpts[0], str):
+        # Convert string excerpts to dict format
+        excerpts = [{'excerpt': e, 'role': 'unknown', 'matched_terms': []} for e in excerpts]
     excerpt = _select_best_excerpt(excerpts, query_terms) if excerpts else ''
 
     # Message count
