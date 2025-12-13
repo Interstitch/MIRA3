@@ -2,45 +2,15 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## IMPORTANT: Session Initialization
+## Session Context (Auto-Injected)
 
-**At the start of every session, run `mira_init` to get personalized context.**
+MIRA context is automatically injected at session start via the SessionStart hook. You'll receive:
+- User profile (name, workflow preferences, interaction style)
+- When to consult MIRA tools (error lookup, search, decisions)
+- Danger zones and alerts
+- Current work context
 
-```
-mira_init with project_path set to the current working directory
-```
-
-The `mira_init` tool returns:
-- **`guidance.actions`**: Specific instructions on how to work with this user - FOLLOW THESE
-- **`alerts`**: Issues requiring immediate attention (uncommitted changes, danger zones)
-- **`core.custodian`**: User profile including name, preferred development workflow, and interaction style
-- **`core.current_work`**: Recent tasks and active topics for continuity
-
-**Why this matters:** MIRA learns from past sessions. The guidance tells you:
-- The user's name (address them naturally)
-- Their development cycle (e.g., "Plan → Write Tests → Implement → Commit")
-- Work style preferences (incremental vs big changes, concise vs detailed responses)
-- Files that have caused issues before (proceed carefully)
-- Current work context (connect to what they were doing)
-
-**Run `mira_init` again** if the session runs long or context seems stale.
-
-### Use MIRA to Look Up Past Solutions
-
-**Before asking the user or getting stuck, search MIRA for how we've done things before.**
-
-When you encounter:
-- Infrastructure tasks (SSH access, server setup, deployments)
-- Recurring problems (connection issues, permission errors)
-- Project-specific procedures (release process, testing workflows)
-- Anything that feels like "we've probably done this before"
-
-**Use `mira_search` first:**
-```
-mira_search with query like "SSH GCP server access" or "deploy docker compose"
-```
-
-Past conversations contain solutions, commands, usernames, and context that save time. The artifact search is especially useful for finding specific commands and code blocks from previous sessions.
+**If context seems stale**, run `mira_init` manually to refresh.
 
 ### Tailscale Requirement (Codespaces)
 
