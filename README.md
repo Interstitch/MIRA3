@@ -1,11 +1,16 @@
-
 # MIRA3 - Memory Information Retriever and Archiver
 
-An MCP server that archives and searches your Claude Code conversation history.
+An MCP server that archives and searches your Claude Code conversation history with automatic context injection.
 
 ## Overview
 
 MIRA watches `~/.claude/projects/`, archives conversations, extracts metadata (summaries, keywords, decisions), and provides full-text search. Works offline with SQLite. Optional remote storage adds semantic search.
+
+**Key Features:**
+- **Automatic context injection** - SessionStart hook provides user profile and history at session start
+- **Learned prerequisites** - MIRA learns environment-specific setup (e.g., "start tailscaled in Codespaces")
+- **Optimized search** - Compact response format uses ~79% fewer tokens
+- **Cross-machine sync** - Optional remote storage for seamless history across devices
 
 **Source Directory:** `~/.claude/projects/<project-path>/`
 **Storage Directory:** `<workspace>/.mira/`
@@ -17,6 +22,8 @@ claude mcp add claude-mira3 -- npx claude-mira3
 ```
 
 That's it. On first use, MIRA3 creates a lightweight Python environment with minimal dependencies.
+
+The SessionStart hook is auto-configured on install, injecting MIRA context at the start of every Claude Code session.
 
 ### Alternative: Manual Configuration
 
@@ -93,6 +100,15 @@ MIRA3 maintains its own storage in the workspace:
 
 Uses SQLite FTS5 for keyword search. Searches conversation content, summaries, and artifacts.
 
+**Optimized responses:** Search results use a compact format by default, reducing token usage by ~79%. Each result includes:
+- Short session ID (8 chars)
+- Consolidated summary (max 100 chars)
+- Date (YYYY-MM-DD)
+- Top 5 topics (stopwords filtered)
+- Best matching excerpt (full length preserved)
+
+Pass `compact: false` to get verbose format for debugging.
+
 **First run:** Creates `.mira/.venv/`, installs `watchdog`, creates SQLite databases (~50MB total). Takes under a minute.
 
 **Want semantic search?** Set up [remote storage](#remote-storage-optional).
@@ -120,15 +136,37 @@ Skipped: file-history snapshots, agent sub-conversations, empty conversations.
 
 ## Custodian Learning
 
-MIRA learns your preferences from conversations: your name (from statements like "My name is John"), tool preferences ("I prefer pnpm"), rules ("never commit to main"), and files that cause issues. This context is provided to Claude via `mira_init`.
+MIRA learns your preferences from conversations:
+- **Identity** - Your name (from statements like "My name is John")
+- **Preferences** - Tool preferences ("I prefer pnpm"), coding style
+- **Rules** - Explicit constraints ("never commit to main")
+- **Danger zones** - Files that have caused repeated issues
+- **Development lifecycle** - Your workflow pattern (e.g., "Plan → Test → Implement")
+- **Prerequisites** - Environment-specific setup requirements (see below)
 
-## Error Pattern Recognition (Under Development)
+This context is automatically injected at session start via the SessionStart hook.
 
-MIRA indexes errors and their solutions from conversations. Search past errors with `mira_error_lookup`.
+## Learned Prerequisites
 
-## Decision Journal (Under Development)
+MIRA learns environment-specific prerequisites from your conversations. State them naturally:
 
-MIRA extracts architectural decisions (technology choices, patterns, etc.) with reasoning. Search with `mira_decisions`.
+```
+"In Codespaces, I need to start tailscaled first"
+"On my home workstation, run docker-compose up before tests"
+"When SSHed into the server, source the env file first"
+```
+
+MIRA extracts the environment, action, command, and reason - then reminds you in future sessions when that environment is detected.
+
+**Environment detection:** Codespaces, Gitpod, WSL, SSH, Docker, hostname, OS, and more. Set explicitly with `export MIRA_ENVIRONMENT=my-workstation`.
+
+## Error Pattern Recognition
+
+MIRA indexes errors and their solutions from conversations. Search past errors with `mira_error_lookup` to find how similar issues were resolved before.
+
+## Decision Journal
+
+MIRA extracts architectural decisions (technology choices, patterns, implementation approaches) with reasoning. Search with `mira_decisions` to understand past choices and maintain consistency.
 
 ## Artifacts
 
@@ -138,12 +176,14 @@ MIRA detects and indexes structured content: code blocks, commands, configs, tab
 
 | Tool | Purpose |
 |------|---------|
-| `mira_search` | Full-text search across conversations |
+| `mira_search` | Full-text search across conversations (compact format by default) |
 | `mira_recent` | Recent activity across projects |
-| `mira_init` | Session initialization with custodian profile |
+| `mira_init` | Session initialization - user profile, prerequisites, danger zones |
 | `mira_status` | Ingestion stats and system health |
-| `mira_error_lookup` | Search past errors and solutions |
-| `mira_decisions` | Search architectural decisions |
+| `mira_error_lookup` | Search past errors and their solutions |
+| `mira_decisions` | Search architectural decisions with reasoning |
+
+**Note:** `mira_init` is called automatically via the SessionStart hook. You don't need to call it manually unless context seems stale.
 
 ## Requirements
 
