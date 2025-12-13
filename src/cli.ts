@@ -28,7 +28,8 @@ An MCP server for Claude Code conversation history with semantic search.
 
 Usage:
   claude-mira3                          Start the MCP server (default)
-  claude-mira3 --init                   Run mira_init and output JSON (for hooks)
+  claude-mira3 --init                   Run mira_init and output hookSpecificOutput JSON
+  claude-mira3 --init --raw             Run init and output raw JSON (no wrapper)
   claude-mira3 --init --project=PATH    Run init with project context
   claude-mira3 --init --quiet           Suppress log output (JSON only)
   claude-mira3 --setup                  Manually configure SessionStart hook
@@ -37,7 +38,8 @@ Usage:
 
 Init Mode:
   The --init flag runs mira_init directly and outputs JSON to stdout.
-  This is designed for use in Claude Code SessionStart hooks.
+  Output is wrapped in hookSpecificOutput format for Claude Code hooks.
+  Use --raw for plain JSON output (debugging/testing).
   The hook runs on all session starts (startup, resume, clear, compact).
 
 Auto-Setup:
@@ -159,7 +161,7 @@ function ensureSessionStartHook(force: boolean = false): boolean {
     hooks.SessionStart.push({
       hooks: [{
         type: "command",
-        command: `npx claude-mira3 --init --project="$CLAUDE_PROJECT_DIR" --quiet 2>/dev/null || echo '{"guidance":{"actions":["MIRA unavailable"]}}'`,
+        command: `npx claude-mira3 --init --project="$CLAUDE_PROJECT_DIR" --quiet 2>/dev/null || echo '{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"MIRA context unavailable - check server logs"}}'`,
         timeout: 30000
       }]
     });

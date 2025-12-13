@@ -14,9 +14,34 @@ class TestCliInitMode:
     """Tests for the --init CLI mode."""
 
     def test_init_outputs_valid_json(self):
-        """--init should output valid JSON."""
+        """--init should output valid JSON in hookSpecificOutput format."""
         result = subprocess.run(
             ["python", "python/mira_backend.py", "--init", "--quiet"],
+            capture_output=True,
+            text=True,
+            timeout=60
+        )
+
+        # Should exit successfully
+        assert result.returncode == 0
+
+        # Output should be valid JSON with hookSpecificOutput wrapper
+        output = result.stdout.strip()
+        data = json.loads(output)
+
+        # Should have hookSpecificOutput format
+        assert "hookSpecificOutput" in data
+        hook_output = data["hookSpecificOutput"]
+        assert hook_output["hookEventName"] == "SessionStart"
+        assert "additionalContext" in hook_output
+        # additionalContext should be a formatted string
+        assert isinstance(hook_output["additionalContext"], str)
+        assert "MIRA Session Context" in hook_output["additionalContext"]
+
+    def test_init_raw_outputs_plain_json(self):
+        """--init --raw should output plain JSON without wrapper."""
+        result = subprocess.run(
+            ["python", "python/mira_backend.py", "--init", "--raw", "--quiet"],
             capture_output=True,
             text=True,
             timeout=60
@@ -29,14 +54,14 @@ class TestCliInitMode:
         output = result.stdout.strip()
         data = json.loads(output)
 
-        # Should have expected top-level keys
+        # Should have expected top-level keys (no wrapper)
         assert "guidance" in data
         assert "core" in data
 
     def test_init_includes_usage_triggers(self):
-        """--init output should include mira_usage_triggers."""
+        """--init --raw output should include mira_usage_triggers."""
         result = subprocess.run(
-            ["python", "python/mira_backend.py", "--init", "--quiet"],
+            ["python", "python/mira_backend.py", "--init", "--raw", "--quiet"],
             capture_output=True,
             text=True,
             timeout=60
@@ -61,9 +86,9 @@ class TestCliInitMode:
             assert trigger["priority"] in ["critical", "recommended", "optional"]
 
     def test_init_includes_tool_quick_reference(self):
-        """--init output should include tool_quick_reference."""
+        """--init --raw output should include tool_quick_reference."""
         result = subprocess.run(
-            ["python", "python/mira_backend.py", "--init", "--quiet"],
+            ["python", "python/mira_backend.py", "--init", "--raw", "--quiet"],
             capture_output=True,
             text=True,
             timeout=60
@@ -84,9 +109,9 @@ class TestCliInitMode:
             assert "when" in tools[tool]
 
     def test_init_with_project_path(self):
-        """--init should accept --project argument."""
+        """--init --raw should accept --project argument."""
         result = subprocess.run(
-            ["python", "python/mira_backend.py", "--init", "--project=/tmp/test", "--quiet"],
+            ["python", "python/mira_backend.py", "--init", "--raw", "--project=/tmp/test", "--quiet"],
             capture_output=True,
             text=True,
             timeout=60
@@ -269,7 +294,7 @@ class TestUsageTriggers:
     def test_triggers_have_dynamic_counts(self):
         """Trigger reasons should include actual counts when available."""
         result = subprocess.run(
-            ["python", "python/mira_backend.py", "--init", "--quiet"],
+            ["python", "python/mira_backend.py", "--init", "--raw", "--quiet"],
             capture_output=True,
             text=True,
             timeout=60
@@ -291,7 +316,7 @@ class TestUsageTriggers:
     def test_danger_zone_trigger_generated(self):
         """If danger_zones exist, a trigger should be generated for them."""
         result = subprocess.run(
-            ["python", "python/mira_backend.py", "--init", "--quiet"],
+            ["python", "python/mira_backend.py", "--init", "--raw", "--quiet"],
             capture_output=True,
             text=True,
             timeout=60

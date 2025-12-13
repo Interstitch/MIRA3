@@ -296,7 +296,140 @@ def run_backend():
                 print(json.dumps(error_response), flush=True)
 
 
-def run_init_cli(project_path: str, quiet: bool = False):
+def _format_mira_context(result: dict) -> str:
+    """
+    Format MIRA init result as a readable string for Claude Code hooks.
+
+    Claude Code injects additionalContext as a string, so we need to format
+    the structured data into a readable format that Claude can understand.
+    """
+    lines = []
+
+    # Header
+    lines.append("=== MIRA Session Context ===")
+    lines.append("")
+
+    # Guidance section (most important)
+    guidance = result.get("guidance", {})
+    if guidance:
+        lines.append("## How to Use This Context")
+        lines.append(guidance.get("how_to_use_this", ""))
+        lines.append("")
+
+        # Actions (immediate priorities)
+        actions = guidance.get("actions", [])
+        if actions:
+            lines.append("### Immediate Actions")
+            for action in actions:
+                lines.append(f"- {action}")
+            lines.append("")
+
+        # Usage triggers
+        triggers = guidance.get("mira_usage_triggers", [])
+        if triggers:
+            lines.append("### When to Consult MIRA")
+            for trigger in triggers:
+                priority = trigger.get("priority", "optional")
+                situation = trigger.get("situation", "")
+                action = trigger.get("action", "")
+                reason = trigger.get("reason", "")
+                lines.append(f"- [{priority.upper()}] {situation}")
+                lines.append(f"  Action: {action}")
+                if reason:
+                    lines.append(f"  Reason: {reason}")
+            lines.append("")
+
+        # Tool quick reference
+        tools = guidance.get("tool_quick_reference", {})
+        if tools:
+            lines.append("### MIRA Tools Quick Reference")
+            for tool_name, tool_info in tools.items():
+                purpose = tool_info.get("purpose", "")
+                when = tool_info.get("when", "")
+                lines.append(f"- {tool_name}: {purpose}")
+                lines.append(f"  Use when: {when}")
+            lines.append("")
+
+    # Alerts section
+    alerts = result.get("alerts", [])
+    if alerts:
+        lines.append("## Alerts")
+        for alert in alerts:
+            priority = alert.get("priority", "info")
+            message = alert.get("message", "")
+            suggestion = alert.get("suggestion", "")
+            lines.append(f"- [{priority.upper()}] {message}")
+            if suggestion:
+                lines.append(f"  Suggestion: {suggestion}")
+        lines.append("")
+
+    # Core context
+    core = result.get("core", {})
+    if core:
+        # Custodian (user profile)
+        custodian = core.get("custodian", {})
+        if custodian:
+            lines.append("## User Profile (Custodian)")
+            name = custodian.get("name", "Unknown")
+            lines.append(f"Name: {name}")
+            summary = custodian.get("summary", "")
+            if summary:
+                lines.append(f"Summary: {summary}")
+            lifecycle = custodian.get("development_lifecycle", "")
+            if lifecycle:
+                lines.append(f"Development Lifecycle: {lifecycle}")
+            tips = custodian.get("interaction_tips", [])
+            if tips:
+                lines.append("Interaction Tips:")
+                for tip in tips[:5]:
+                    lines.append(f"  - {tip}")
+            danger_zones = custodian.get("danger_zones", [])
+            if danger_zones:
+                lines.append("Danger Zones (proceed carefully):")
+                for zone in danger_zones:
+                    lines.append(f"  - {zone}")
+            lines.append("")
+
+        # Current work context
+        work = core.get("current_work", {})
+        if work:
+            recent_topics = work.get("recent_topics", [])
+            active_tasks = work.get("active_tasks", [])
+            if recent_topics or active_tasks:
+                lines.append("## Current Work Context")
+                if recent_topics:
+                    lines.append("Recent Topics:")
+                    for topic in recent_topics[:5]:
+                        lines.append(f"  - {topic}")
+                if active_tasks:
+                    lines.append("Active Tasks:")
+                    for task in active_tasks[:5]:
+                        lines.append(f"  - {task}")
+                lines.append("")
+
+    # Storage mode
+    storage_info = result.get("storage", {})
+    if storage_info:
+        mode = storage_info.get("mode", "unknown")
+        description = storage_info.get("description", "")
+        lines.append(f"## Storage Mode: {mode}")
+        if description:
+            lines.append(description)
+        lines.append("")
+
+    # Indexing status
+    indexing = result.get("indexing", {})
+    if indexing:
+        indexed = indexing.get("indexed", 0)
+        total = indexing.get("total", 0)
+        pending = indexing.get("pending", 0)
+        lines.append(f"## Indexing Status: {indexed}/{total} sessions ({pending} pending)")
+        lines.append("")
+
+    return "\n".join(lines)
+
+
+def run_init_cli(project_path: str, quiet: bool = False, raw: bool = False):
     """
     Run mira_init directly and output JSON.
 
@@ -305,11 +438,16 @@ def run_init_cli(project_path: str, quiet: bool = False):
     2. Initializes storage (read-only is fine)
     3. Runs schema migrations
     4. Calls handle_init
-    5. Outputs JSON to stdout
+    5. Outputs JSON to stdout (wrapped in hookSpecificOutput format)
     6. Exits
 
     Designed for use in SessionStart hooks.
     Note: MIRA_QUIET is set in main() before this is called.
+
+    Args:
+        project_path: The project path for context
+        quiet: Suppress log output
+        raw: Output raw JSON instead of hookSpecificOutput format
     """
     try:
         # Ensure directories exist
@@ -331,8 +469,20 @@ def run_init_cli(project_path: str, quiet: bool = False):
         # Call handle_init
         result = handle_init({'project_path': project_path}, None, storage)
 
-        # Output JSON to stdout
-        print(json.dumps(result, indent=2))
+        # Output based on mode
+        if raw:
+            # Raw mode: output plain JSON (for debugging/testing)
+            print(json.dumps(result, indent=2))
+        else:
+            # Hook mode: wrap in hookSpecificOutput for Claude Code
+            formatted_context = _format_mira_context(result)
+            hook_output = {
+                "hookSpecificOutput": {
+                    "hookEventName": "SessionStart",
+                    "additionalContext": formatted_context
+                }
+            }
+            print(json.dumps(hook_output))
 
         # Clean exit
         try:
@@ -343,17 +493,34 @@ def run_init_cli(project_path: str, quiet: bool = False):
         sys.exit(0)
 
     except Exception as e:
-        # Output error as JSON for hook to handle
-        error_response = {
-            "error": str(e),
-            "guidance": {
-                "how_to_use_this": "MIRA init failed - proceeding without context",
-                "mira_usage_triggers": [],
-                "tool_quick_reference": {},
-                "actions": ["MIRA context unavailable - check server logs"]
+        # Output error in hookSpecificOutput format
+        error_context = f"""=== MIRA Session Context ===
+
+## Error
+MIRA initialization failed: {str(e)}
+
+## Fallback Guidance
+MIRA context is unavailable for this session. You can still use MIRA tools manually if the MCP server is running.
+"""
+        if raw:
+            error_response = {
+                "error": str(e),
+                "guidance": {
+                    "how_to_use_this": "MIRA init failed - proceeding without context",
+                    "mira_usage_triggers": [],
+                    "tool_quick_reference": {},
+                    "actions": ["MIRA context unavailable - check server logs"]
+                }
             }
-        }
-        print(json.dumps(error_response, indent=2))
+            print(json.dumps(error_response, indent=2))
+        else:
+            hook_output = {
+                "hookSpecificOutput": {
+                    "hookEventName": "SessionStart",
+                    "additionalContext": error_context
+                }
+            }
+            print(json.dumps(hook_output))
         sys.exit(1)
 
 
@@ -389,6 +556,12 @@ Examples:
         help='Suppress log output (JSON only)'
     )
 
+    parser.add_argument(
+        '--raw',
+        action='store_true',
+        help='Output raw JSON instead of hookSpecificOutput format'
+    )
+
     return parser.parse_args()
 
 
@@ -412,7 +585,7 @@ def main():
 
         if args.init:
             # Init mode: run mira_init and output JSON
-            run_init_cli(args.project, quiet=args.quiet)
+            run_init_cli(args.project, quiet=args.quiet, raw=args.raw)
         else:
             # Default: run MCP JSON-RPC server
             run_backend()
