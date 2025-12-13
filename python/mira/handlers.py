@@ -385,6 +385,13 @@ def _build_claude_guidance(
     })
 
     triggers.append({
+        "situation": "About to say 'I don't know' or 'I'm not familiar with' ANY name, term, or concept",
+        "action": "STOP - first call mira_search(query='<unknown term>') before admitting ignorance",
+        "reason": "The user may have discussed this in past sessions - NEVER say 'I don't know' without searching MIRA first",
+        "priority": "critical"
+    })
+
+    triggers.append({
         "situation": "Making architectural, technology, or design decisions",
         "action": "Call mira_decisions(query='<decision topic>') to check precedents",
         "reason": f"{decision_count} past decisions with reasoning are logged - maintain project consistency" if decision_count > 0 else "Past decisions may be logged - check for precedents",
@@ -1916,6 +1923,15 @@ def handle_status(params: dict, collection, storage=None) -> dict:
                 "complete": indexed_of_indexable >= indexable_files and len(active_ingestions) == 0,
                 "percent": min(100, round(100 * indexed_of_indexable / indexable_files)) if indexable_files > 0 else 100,
                 "total_in_db": indexed_global,             # Historical: all sessions ever indexed
+                "_note": "Local ingestion only (files → SQLite). See central_sync for remote sync status.",
+            },
+            "central_sync": {
+                "pending": sync_queue_stats.get('total_pending', 0),
+                "failed": sync_queue_stats.get('total_failed', 0),
+                "status": "idle" if sync_queue_stats.get('total_pending', 0) == 0 and sync_queue_stats.get('total_failed', 0) == 0
+                         else "syncing" if sync_queue_stats.get('total_pending', 0) > 0
+                         else "has_failures",
+                "_note": "Remote sync (SQLite → Postgres/Qdrant). Failed items retry on restart.",
             },
             "archived": archived,
             "artifacts": artifact_stats['global'],
