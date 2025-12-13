@@ -1,6 +1,6 @@
 {
   "name": "claude-mira3",
-  "version": "0.2.24",
+  "version": "0.2.25",
   "description": "MCP server for Claude Code conversation history with semantic search via ChromaDB",
   "type": "module",
   "main": "dist/cli.js",
@@ -18,7 +18,8 @@
     "dev": "tsc --watch",
     "test": "vitest",
     "lint": "eslint src/",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "postinstall": "node dist/cli.js --setup 2>/dev/null || true"
   },
   "keywords": [
     "mcp",
