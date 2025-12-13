@@ -86,10 +86,33 @@ class QdrantBackend:
         self._last_health_check = 0
         self._health_check_interval = 60  # seconds
 
+    def _quick_tcp_check(self, timeout: float = 0.5) -> bool:
+        """
+        Quick TCP reachability check before attempting expensive client creation.
+
+        Returns True if the port is reachable, False otherwise.
+        This prevents 30-second timeouts when the host is unreachable
+        (e.g., Tailscale not running).
+        """
+        import socket
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(timeout)
+            result = sock.connect_ex((self.host, self.port))
+            sock.close()
+            return result == 0
+        except Exception:
+            return False
+
     def _get_client(self):
         """Get or create Qdrant client (lazy initialization)."""
         if self._client is not None:
             return self._client
+
+        # Quick TCP check FIRST - before expensive qdrant-client import
+        # This avoids 1+ second import time when host is unreachable
+        if not self._quick_tcp_check():
+            raise ConnectionError(f"Host {self.host}:{self.port} is not reachable (quick check failed)")
 
         qdrant = _get_qdrant_module()
         if qdrant is None:

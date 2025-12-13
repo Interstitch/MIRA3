@@ -581,9 +581,9 @@ def sync_from_central() -> int:
         Number of name candidates synced
     """
     try:
-        from .storage import Storage
-        storage = Storage()
-        if not storage._init_central() or not storage._postgres:
+        from .storage import get_storage
+        storage = get_storage()
+        if not storage.using_central or not storage.postgres:
             return 0
 
         db = get_db_manager()
@@ -591,7 +591,7 @@ def sync_from_central() -> int:
 
         # Sync name candidates from central
         try:
-            candidates = storage._postgres.get_all_name_candidates()
+            candidates = storage.postgres.get_all_name_candidates()
             for candidate in candidates:
                 try:
                     db.execute_write(
@@ -2144,27 +2144,37 @@ def check_prerequisites_and_alert() -> list:
     applicable = get_applicable_prerequisites()
     alerts = []
 
+    # Cache check results to avoid running same command multiple times
+    check_cache = {}
+
     for prereq in applicable:
         check_cmd = prereq.get('check_command')
 
         # If we have a check command, verify the prerequisite
         if check_cmd:
-            try:
-                result = subprocess.run(
-                    check_cmd,
-                    shell=True,
-                    capture_output=True,
-                    timeout=5
-                )
-                if result.returncode == 0:
-                    # Prerequisite met, no alert needed
+            # Use cached result if we've already run this command
+            if check_cmd in check_cache:
+                if check_cache[check_cmd]:
+                    continue  # Prerequisite met
+            else:
+                try:
+                    result = subprocess.run(
+                        check_cmd,
+                        shell=True,
+                        capture_output=True,
+                        timeout=1  # Quick timeout - don't block startup
+                    )
+                    check_cache[check_cmd] = (result.returncode == 0)
+                    if result.returncode == 0:
+                        # Prerequisite met, no alert needed
+                        continue
+                except subprocess.TimeoutExpired:
+                    # Check timed out - treat as unmet
+                    check_cache[check_cmd] = False
+                except Exception as e:
+                    log(f"Error checking prerequisite '{prereq['action']}': {e}")
+                    check_cache[check_cmd] = False
                     continue
-            except subprocess.TimeoutExpired:
-                # Check timed out - treat as unmet
-                pass
-            except Exception as e:
-                log(f"Error checking prerequisite '{prereq['action']}': {e}")
-                continue
 
         # Prerequisite not met (or no check command) - generate alert
         priority = 'high' if prereq.get('confidence', 0) > 0.75 else 'medium'

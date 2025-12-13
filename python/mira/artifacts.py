@@ -330,29 +330,104 @@ def extract_file_operations_from_messages(
     return ops_stored
 
 
-def get_artifact_stats() -> dict:
-    """Get statistics about stored artifacts."""
+def get_artifact_stats(project_path: str = None) -> dict:
+    """
+    Get statistics about stored artifacts.
+
+    Args:
+        project_path: Optional project path to get project-specific stats.
+                      If provided, returns both 'global' and 'project' keys.
+                      If not provided, returns flat stats (backwards compatible).
+
+    Returns:
+        If project_path is None: {'total': N, 'by_type': {...}, ...}
+        If project_path is set: {'global': {...}, 'project': {...}}
+    """
     db = get_db_manager()
 
-    stats = {'total': 0, 'by_type': {}, 'by_language': {}, 'file_operations': 0}
+    def _get_stats(session_ids: list = None) -> dict:
+        """Get stats, optionally filtered by session_ids."""
+        stats = {'total': 0, 'by_type': {}, 'by_language': {}, 'file_operations': 0}
 
-    # Count artifacts
-    row = db.execute_read_one(ARTIFACTS_DB, 'SELECT COUNT(*) as cnt FROM artifacts')
-    stats['total'] = row['cnt'] if row else 0
+        if session_ids is not None and len(session_ids) == 0:
+            # No sessions for this project - return zeros
+            return stats
 
-    rows = db.execute_read(ARTIFACTS_DB, 'SELECT artifact_type, COUNT(*) as cnt FROM artifacts GROUP BY artifact_type')
-    for row in rows:
-        stats['by_type'][row['artifact_type']] = row['cnt']
+        # Build WHERE clause for session filtering
+        if session_ids:
+            placeholders = ','.join('?' * len(session_ids))
+            session_filter = f" WHERE session_id IN ({placeholders})"
+            session_params = tuple(session_ids)
+        else:
+            session_filter = ""
+            session_params = ()
 
-    rows = db.execute_read(ARTIFACTS_DB, 'SELECT language, COUNT(*) as cnt FROM artifacts WHERE language IS NOT NULL GROUP BY language')
-    for row in rows:
-        stats['by_language'][row['language']] = row['cnt']
+        # Count artifacts
+        row = db.execute_read_one(
+            ARTIFACTS_DB,
+            f'SELECT COUNT(*) as cnt FROM artifacts{session_filter}',
+            session_params
+        )
+        stats['total'] = row['cnt'] if row else 0
 
-    # Count file operations
-    row = db.execute_read_one(ARTIFACTS_DB, 'SELECT COUNT(*) as cnt FROM file_operations')
-    stats['file_operations'] = row['cnt'] if row else 0
+        rows = db.execute_read(
+            ARTIFACTS_DB,
+            f'SELECT artifact_type, COUNT(*) as cnt FROM artifacts{session_filter} GROUP BY artifact_type',
+            session_params
+        )
+        for row in rows:
+            stats['by_type'][row['artifact_type']] = row['cnt']
 
-    return stats
+        rows = db.execute_read(
+            ARTIFACTS_DB,
+            f'SELECT language, COUNT(*) as cnt FROM artifacts WHERE language IS NOT NULL{" AND session_id IN (" + placeholders + ")" if session_ids else ""} GROUP BY language',
+            session_params
+        )
+        for row in rows:
+            stats['by_language'][row['language']] = row['cnt']
+
+        # Count file operations
+        row = db.execute_read_one(
+            ARTIFACTS_DB,
+            f'SELECT COUNT(*) as cnt FROM file_operations{session_filter}',
+            session_params
+        )
+        stats['file_operations'] = row['cnt'] if row else 0
+
+        return stats
+
+    # Always get global stats
+    global_stats = _get_stats()
+
+    if not project_path:
+        # Backwards compatible: return flat stats
+        return global_stats
+
+    # Get project-specific stats
+    from .local_store import get_project_id, LOCAL_DB
+
+    project_id = get_project_id(project_path)
+    if not project_id:
+        # Project not found - return global only with empty project
+        return {
+            'global': global_stats,
+            'project': {'total': 0, 'by_type': {}, 'by_language': {}, 'file_operations': 0}
+        }
+
+    # Get session_ids for this project
+    rows = db.execute_read(
+        LOCAL_DB,
+        "SELECT session_id FROM sessions WHERE project_id = ?",
+        (project_id,)
+    )
+    session_ids = [row['session_id'] for row in rows]
+
+    project_stats = _get_stats(session_ids)
+
+    return {
+        'global': global_stats,
+        'project': project_stats
+    }
 
 
 def get_journey_stats() -> dict:

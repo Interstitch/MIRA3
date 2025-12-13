@@ -17,7 +17,7 @@ from .utils import log, get_mira_path
 from .db_manager import get_db_manager
 
 # Current schema version
-CURRENT_VERSION = 3
+CURRENT_VERSION = 4
 
 # Migration registry
 MIGRATIONS_DB = "migrations.db"
@@ -130,6 +130,46 @@ def migrate_v3(db_manager):
         log(f"Migration v3 error: {e}")
         # Don't fail - table might already exist
         pass
+
+    return True
+
+
+@migration(4, "add_missing_custodian_columns")
+def migrate_v4(db_manager):
+    """Add missing columns to custodian tables (rules, identity)."""
+    log("Migration v4: Adding missing columns to custodian tables")
+
+    from .custodian import CUSTODIAN_DB
+
+    # Helper to add column if it doesn't exist
+    def add_column_if_missing(table: str, column: str, definition: str):
+        try:
+            row = db_manager.execute_read_one(
+                CUSTODIAN_DB,
+                f"SELECT COUNT(*) as cnt FROM pragma_table_info('{table}') WHERE name='{column}'",
+                ()
+            )
+            if row and row['cnt'] == 0:
+                db_manager.execute_write(
+                    CUSTODIAN_DB,
+                    f"ALTER TABLE {table} ADD COLUMN {column} {definition}",
+                    ()
+                )
+                log(f"  Added {column} to {table}")
+                return True
+        except Exception as e:
+            log(f"  Failed to add {column} to {table}: {e}")
+        return False
+
+    # Add missing columns to rules table
+    add_column_if_missing("rules", "normalized_text", "TEXT")
+    add_column_if_missing("rules", "scope", "TEXT")
+    add_column_if_missing("rules", "confidence", "REAL DEFAULT 0.8")
+    add_column_if_missing("rules", "revoked", "INTEGER DEFAULT 0")
+    add_column_if_missing("rules", "revoked_at", "TEXT")
+
+    # Add confidence to identity table if missing
+    add_column_if_missing("identity", "confidence", "REAL DEFAULT 0.5")
 
     return True
 

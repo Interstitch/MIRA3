@@ -158,8 +158,8 @@ def handle_init(params: dict, collection, storage=None) -> dict:
         except Exception:
             pass
 
-    # Get artifact stats
-    artifact_stats = get_artifact_stats()
+    # Get artifact stats (global and project-scoped)
+    artifact_stats = get_artifact_stats(project_path)
 
     # Get insights stats for guidance (decision count for triggers)
     decision_stats = get_decision_stats()
@@ -238,8 +238,18 @@ def handle_init(params: dict, collection, storage=None) -> dict:
         details['codebase_knowledge'] = filtered_knowledge
 
     # Artifact stats - add to guidance if significant (tells Claude there's searchable history)
-    artifact_total = artifact_stats.get('total', 0)
-    error_count = artifact_stats.get('by_type', {}).get('error', 0)
+    # artifact_stats has 'global' and 'project' keys when project_path is provided
+    if 'global' in artifact_stats:
+        global_artifact_total = artifact_stats['global'].get('total', 0)
+        global_error_count = artifact_stats['global'].get('by_type', {}).get('error', 0)
+        project_artifact_total = artifact_stats['project'].get('total', 0)
+        project_error_count = artifact_stats['project'].get('by_type', {}).get('error', 0)
+    else:
+        # Backwards compatible: flat stats (no project_path provided)
+        global_artifact_total = artifact_stats.get('total', 0)
+        global_error_count = artifact_stats.get('by_type', {}).get('error', 0)
+        project_artifact_total = 0
+        project_error_count = 0
 
     # Check if storage is concerning (>500MB data or >1GB total)
     data_bytes = storage_stats.get('data_bytes', 0)
@@ -263,7 +273,8 @@ def handle_init(params: dict, collection, storage=None) -> dict:
     # Build guidance for Claude on how to use this context
     guidance = _build_claude_guidance(
         custodian_data, alerts, work_context,
-        artifact_total=artifact_total, error_count=error_count,
+        global_artifact_total=global_artifact_total, global_error_count=global_error_count,
+        project_artifact_total=project_artifact_total, project_error_count=project_error_count,
         decision_count=decision_count
     )
 
@@ -390,7 +401,9 @@ def handle_init(params: dict, collection, storage=None) -> dict:
 
 def _build_claude_guidance(
     custodian: dict, alerts: list, work_context: dict,
-    artifact_total: int = 0, error_count: int = 0, decision_count: int = 0
+    global_artifact_total: int = 0, global_error_count: int = 0,
+    project_artifact_total: int = 0, project_error_count: int = 0,
+    decision_count: int = 0
 ) -> dict:
     """
     Build actionable guidance for Claude on how to use the MIRA context.
@@ -418,14 +431,14 @@ def _build_claude_guidance(
     triggers.append({
         "situation": "Encountering an error, exception, or unexpected failure",
         "action": "BEFORE attempting to debug, call mira_error_lookup(query='<error message>')",
-        "reason": f"Past solutions exist for {error_count} resolved errors - avoid duplicate debugging work" if error_count > 0 else "Past solutions may exist - check before debugging from scratch",
+        "reason": f"Past solutions exist for {global_error_count} resolved errors - avoid duplicate debugging work" if global_error_count > 0 else "Past solutions may exist - check before debugging from scratch",
         "priority": "critical"
     })
 
     triggers.append({
         "situation": "User asks about unfamiliar system, process, or code area",
         "action": "PAUSE and call mira_search(query='<topic>') before exploring codebase",
-        "reason": f"{artifact_total} artifacts from past sessions may document this - check memory first" if artifact_total > 0 else "Past sessions may document this - check memory before investigation",
+        "reason": f"{global_artifact_total} artifacts from past sessions may document this - check memory first" if global_artifact_total > 0 else "Past sessions may document this - check memory before investigation",
         "priority": "critical"
     })
 
@@ -536,17 +549,37 @@ def _build_claude_guidance(
     # === BUILD ACTIONS (existing logic) ===
 
     # Artifact guidance - tell Claude there's searchable history
-    if artifact_total > 100:
-        if error_count > 20:
+    # Show both project-specific and global counts for clarity
+    if global_artifact_total > 100:
+        # Build the message showing both scopes
+        if project_artifact_total > 0:
+            # Have project-specific data
+            msg_parts = [f"Searchable history: {global_artifact_total} artifacts"]
+            if global_error_count > 0:
+                msg_parts.append(f"including {global_error_count} resolved errors")
+            msg_parts[0] = msg_parts[0] + " (global)"
+
+            # Add project-specific counts
+            project_msg = f"{project_artifact_total} for this project"
+            if project_error_count > 0:
+                project_msg += f" ({project_error_count} errors)"
+            msg_parts.append(project_msg)
+
             guidance["actions"].append(
-                f"Searchable history: {artifact_total} artifacts including {error_count} resolved errors. "
-                "Use mira_search or mira_error_lookup for past solutions."
+                f"{', '.join(msg_parts)}. Use mira_search or mira_error_lookup for past solutions."
             )
         else:
-            guidance["actions"].append(
-                f"Searchable history: {artifact_total} artifacts available. "
-                "Use mira_search for past code, decisions, or patterns."
-            )
+            # No project data, just show global
+            if global_error_count > 20:
+                guidance["actions"].append(
+                    f"Searchable history: {global_artifact_total} artifacts (global) including {global_error_count} resolved errors. "
+                    "Use mira_search or mira_error_lookup for past solutions."
+                )
+            else:
+                guidance["actions"].append(
+                    f"Searchable history: {global_artifact_total} artifacts (global). "
+                    "Use mira_search for past code, decisions, or patterns."
+                )
 
     # User identity guidance - include session count to convey shared history
     name = custodian.get('name')
@@ -712,7 +745,7 @@ def _get_actionable_alerts(mira_path: Path, project_path: str, custodian_profile
             cwd=project_root,
             capture_output=True,
             text=True,
-            timeout=5
+            timeout=2  # Quick - don't block startup
         )
         if result.returncode == 0 and result.stdout.strip():
             lines = result.stdout.strip().split('\n')
@@ -753,7 +786,7 @@ def _get_actionable_alerts(mira_path: Path, project_path: str, custodian_profile
                 cwd=project_root,
                 capture_output=True,
                 text=True,
-                timeout=5
+                timeout=2  # Quick - don't block startup
             )
             if result.returncode == 0:
                 recent_files = result.stdout.strip().split('\n')

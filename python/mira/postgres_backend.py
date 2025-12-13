@@ -122,10 +122,33 @@ class PostgresBackend:
         # Pool warmup config
         self._min_connections = 2  # Keep warm connections ready
 
+    def _quick_tcp_check(self, timeout: float = 0.5) -> bool:
+        """
+        Quick TCP reachability check before attempting expensive pool creation.
+
+        Returns True if the port is reachable, False otherwise.
+        This prevents 30-second timeouts when the host is unreachable
+        (e.g., Tailscale not running).
+        """
+        import socket
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(timeout)
+            result = sock.connect_ex((self.host, self.port))
+            sock.close()
+            return result == 0
+        except Exception:
+            return False
+
     def _get_pool(self):
         """Get or create connection pool (lazy initialization)."""
         if self._pool is not None:
             return self._pool
+
+        # Quick TCP check FIRST - before expensive psycopg2 import
+        # This avoids 1+ second import time when host is unreachable
+        if not self._quick_tcp_check():
+            raise ConnectionError(f"Host {self.host}:{self.port} is not reachable (quick check failed)")
 
         pg = _get_psycopg2()
         if pg is None:
