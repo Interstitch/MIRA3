@@ -148,6 +148,95 @@ def extract_keywords(messages: list) -> list:
     return list(keywords)[:50]  # Limit to 50 keywords
 
 
+def extract_accomplishments(messages: list) -> list:
+    """
+    Extract accomplishments from conversation - things that were completed/achieved.
+
+    Looks for:
+    - Commit messages
+    - ✅ emoji patterns
+    - "Fixed/Implemented/Added" statements
+    - Test results
+    - Deployment/publish success
+    - Version bumps
+    """
+    accomplishments = []
+    seen = set()
+
+    # Patterns for accomplishment extraction
+    patterns = [
+        # Commit messages
+        (re.compile(r'git commit.*?["\']([^"\']{10,100})["\']', re.IGNORECASE), 'commit'),
+        (re.compile(r'committed[:\s]+["\']?([^"\'.\n]{10,80})', re.IGNORECASE), 'commit'),
+
+        # Emoji checkmarks with context
+        (re.compile(r'✅\s*([^\n]{5,80})'), 'done'),
+        (re.compile(r'✓\s*([^\n]{5,80})'), 'done'),
+
+        # Fixed/resolved patterns
+        (re.compile(r'(?:fixed|resolved|solved)[:\s]+([^\n.]{10,80})', re.IGNORECASE), 'fix'),
+        (re.compile(r'(?:the )?(?:bug|issue|error|problem) (?:is |was |has been )?(?:fixed|resolved|solved)', re.IGNORECASE), 'fix'),
+
+        # Implementation patterns
+        (re.compile(r'(?:implemented|added|created|built)[:\s]+([^\n.]{10,80})', re.IGNORECASE), 'implement'),
+        (re.compile(r'(?:successfully |now )?(?:implemented|added|created) (?:the |a )?([^\n.]{10,60})', re.IGNORECASE), 'implement'),
+
+        # Completion patterns
+        (re.compile(r'(?:completed|finished|done with)[:\s]+([^\n.]{10,80})', re.IGNORECASE), 'complete'),
+
+        # Test results
+        (re.compile(r'(\d+)\s*(?:tests?|specs?)\s*(?:passed|passing)', re.IGNORECASE), 'test'),
+        (re.compile(r'all\s*(?:tests?|specs?)\s*(?:pass(?:ed|ing)?|green)', re.IGNORECASE), 'test'),
+
+        # Version/publish patterns
+        (re.compile(r'(?:published|released|deployed)\s+(?:v(?:ersion)?\s*)?(\d+\.\d+(?:\.\d+)?)', re.IGNORECASE), 'release'),
+        (re.compile(r'v(\d+\.\d+\.\d+)\s*(?:published|released|deployed)', re.IGNORECASE), 'release'),
+        (re.compile(r'bumped?\s*(?:to\s*)?v?(\d+\.\d+\.\d+)', re.IGNORECASE), 'release'),
+    ]
+
+    for msg in messages:
+        if msg.get('role') != 'assistant':
+            continue
+        content = msg.get('content', '')
+
+        for pattern, acc_type in patterns:
+            matches = pattern.findall(content)
+            for match in matches:
+                # Clean and normalize
+                if isinstance(match, tuple):
+                    match = match[0] if match else ''
+                text = match.strip() if isinstance(match, str) else str(match)
+
+                # Skip if too short, too long, or already seen
+                if len(text) < 5 or len(text) > 100:
+                    continue
+
+                # Normalize for dedup
+                normalized = text.lower()[:50]
+                if normalized in seen:
+                    continue
+                seen.add(normalized)
+
+                # Format based on type
+                if acc_type == 'test' and text.isdigit():
+                    accomplishments.append(f"{text} tests passed")
+                elif acc_type == 'release':
+                    accomplishments.append(f"Released v{text}")
+                elif acc_type == 'commit':
+                    accomplishments.append(text)
+                else:
+                    # Capitalize first letter
+                    accomplishments.append(text[0].upper() + text[1:] if text else text)
+
+                if len(accomplishments) >= 10:
+                    break
+
+        if len(accomplishments) >= 10:
+            break
+
+    return accomplishments[:10]
+
+
 def extract_key_facts(messages: list) -> list:
     """
     Extract key facts, rules, and important decisions from assistant messages.
@@ -522,6 +611,9 @@ def extract_metadata(conversation: dict, file_info: dict) -> dict:
     # Extract key facts
     key_facts = extract_key_facts(messages)
 
+    # Extract accomplishments (commits, fixes, implementations)
+    accomplishments = extract_accomplishments(messages)
+
     # Build task description
     task_description = clean_task_description(first_msg)
 
@@ -548,4 +640,5 @@ def extract_metadata(conversation: dict, file_info: dict) -> dict:
         'tools_used': list(session_meta.get('tools_used', {}).keys()) if isinstance(session_meta.get('tools_used'), dict) else session_meta.get('tools_used', []),
         'files_touched': files_touched[:50],
         'todo_topics': todo_topics,
+        'accomplishments': accomplishments,
     }

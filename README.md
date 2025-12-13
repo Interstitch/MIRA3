@@ -58,9 +58,27 @@ Claude: [Searches across projects] Found it in api-gateway (Dec 2). You used a
 - **Zero-configuration context** - Claude knows who you are the moment a session starts
 - **Semantic search** - Find "that auth conversation" even if you never used that word
 - **Cross-machine sync** - Your history follows you across laptop, desktop, Codespaces
-- **Error pattern recognition** - Search 88+ past errors before debugging from scratch
+- **Error pattern database** - Indexed errors linked to solutions, not just ad-hoc search
 - **Danger zone warnings** - Claude warns before touching files that caused past issues
 - **Workflow enforcement** - MIRA detects your dev pattern (test first? plan first?) and Claude enforces it
+- **Decision journal** - Track architectural decisions with reasoning for future reference
+- **Accomplishment tracking** - Know what you shipped: commits, fixes, releases
+
+## Why MIRA?
+
+Other conversation history tools require you to manually search. **MIRA is proactive:**
+
+| Capability | MIRA | Others |
+|------------|------|--------|
+| Claude knows your name at session start | ✅ Automatic | ❌ You must ask |
+| Learns your workflow preferences | ✅ Detects patterns | ❌ Stateless |
+| Warns about problematic files | ✅ Danger zones | ❌ No tracking |
+| Cross-machine history sync | ✅ Central storage | ❌ Local only |
+| Meaning-based search | ✅ Semantic vectors | ❌ Keywords only |
+| Error → solution linking | ✅ Indexed database | ❌ Ad-hoc search |
+| Decision tracking | ✅ Searchable journal | ❌ Not captured |
+
+**The difference:** Other tools are passive archives you query. MIRA actively shapes Claude's behavior - enforcing your workflow, warning about past mistakes, and never letting Claude say "I don't know" without checking your history first.
 
 ## Claude Knows You From the Start
 

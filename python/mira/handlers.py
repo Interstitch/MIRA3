@@ -63,7 +63,8 @@ def handle_recent(params: dict, storage=None) -> dict:
                         "session_id": session.get("session_id", ""),
                         "summary": session.get("summary", ""),
                         "project_path": project,
-                        "timestamp": str(session.get("started_at", ""))
+                        "timestamp": str(session.get("started_at", "")),
+                        "accomplishments": session.get("accomplishments", []),
                     })
 
                 source = "central" if storage.using_central else "local_sqlite"
@@ -101,7 +102,8 @@ def handle_recent(params: dict, storage=None) -> dict:
                     "session_id": meta_file.stem,
                     "summary": meta.get("summary", ""),
                     "project_path": _format_project_path(raw_path),
-                    "timestamp": meta.get("extracted_at", "")
+                    "timestamp": meta.get("extracted_at", ""),
+                    "accomplishments": meta.get("accomplishments", []),
                 })
             except (json.JSONDecodeError, IOError, OSError):
                 pass
