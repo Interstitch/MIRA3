@@ -309,11 +309,8 @@ def run_init_cli(project_path: str, quiet: bool = False):
     6. Exits
 
     Designed for use in SessionStart hooks.
+    Note: MIRA_QUIET is set in main() before this is called.
     """
-    # Suppress logs in quiet mode
-    if quiet:
-        os.environ['MIRA_QUIET'] = '1'
-
     try:
         # Ensure directories exist
         mira_path = get_mira_path()
@@ -399,6 +396,10 @@ def main():
     """Main entry point with bootstrap."""
     # Parse arguments first (before bootstrap might re-exec)
     args = parse_args()
+
+    # Set quiet mode early, before any logging
+    if args.quiet:
+        os.environ['MIRA_QUIET'] = '1'
 
     try:
         # Bootstrap: ensure venv and deps
