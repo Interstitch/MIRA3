@@ -15,6 +15,7 @@ import { homedir } from "os";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
+// Marker to identify MIRA SessionStart hooks in command
 const HOOK_MARKER = "claude-mira3 --init";
 
 const args = process.argv.slice(2);
@@ -37,6 +38,7 @@ Usage:
 Init Mode:
   The --init flag runs mira_init directly and outputs JSON to stdout.
   This is designed for use in Claude Code SessionStart hooks.
+  The hook runs on all session starts (startup, resume, clear, compact).
 
 Auto-Setup:
   MIRA automatically configures the SessionStart hook on first MCP start.
@@ -63,10 +65,10 @@ if (args.includes("--version") || args.includes("-v")) {
 if (args.includes("--setup")) {
   const configured = ensureSessionStartHook(true);
   if (configured) {
-    console.log("[MIRA] ✓ SessionStart hook configured successfully");
+    console.log("[MIRA] ✓ SessionStart hook configured/fixed successfully");
     console.log("[MIRA]   Restart Claude Code to activate");
   } else {
-    console.log("[MIRA] SessionStart hook already configured");
+    console.log("[MIRA] SessionStart hook already configured correctly");
   }
   process.exit(0);
 }
@@ -118,12 +120,32 @@ function ensureSessionStartHook(force: boolean = false): boolean {
     }
 
     // Check if hook already exists
-    const hasHook = JSON.stringify(settings).includes(HOOK_MARKER);
+    const settingsStr = JSON.stringify(settings);
+    const hasHook = settingsStr.includes(HOOK_MARKER);
+
     if (hasHook) {
+      // Check for old format with matcher (needs fixing)
+      const sessionStartHooks = (settings.hooks as Record<string, unknown[]>)?.SessionStart || [];
+      let needsFix = false;
+
+      for (let i = 0; i < sessionStartHooks.length; i++) {
+        const hook = sessionStartHooks[i] as Record<string, unknown>;
+        if (hook.matcher && JSON.stringify(hook).includes(HOOK_MARKER)) {
+          // Found old format - remove matcher
+          delete hook.matcher;
+          needsFix = true;
+          console.error("[MIRA] Fixed SessionStart hook format (removed invalid matcher)");
+        }
+      }
+
+      if (needsFix) {
+        writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + "\n");
+      }
+
       // Mark as configured so we don't check again
       mkdirSync(claudeDir, { recursive: true });
       writeFileSync(markerPath, new Date().toISOString());
-      return false;
+      return needsFix;  // Return true if we fixed something
     }
 
     // Initialize hooks structure
@@ -132,8 +154,9 @@ function ensureSessionStartHook(force: boolean = false): boolean {
     if (!hooks.SessionStart) hooks.SessionStart = [];
 
     // Add MIRA hook
+    // Note: SessionStart hooks don't use matchers - the source field in input
+    // indicates startup/resume/clear/compact. We run on all session starts.
     hooks.SessionStart.push({
-      matcher: { type: ["startup", "compact"] },
       hooks: [{
         type: "command",
         command: `npx claude-mira3 --init --project="$CLAUDE_PROJECT_DIR" --quiet 2>/dev/null || echo '{"guidance":{"actions":["MIRA unavailable"]}}'`,

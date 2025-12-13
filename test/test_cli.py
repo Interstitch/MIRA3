@@ -151,10 +151,12 @@ class TestAutoSetupHook:
         assert len(settings["hooks"]["SessionStart"]) > 0
 
         # Check hook has correct structure
+        # Note: SessionStart hooks don't use matchers
         hook = settings["hooks"]["SessionStart"][0]
-        assert "matcher" in hook
         assert "hooks" in hook
-        assert hook["matcher"]["type"] == ["startup", "compact"]
+        assert "matcher" not in hook  # SessionStart doesn't use matchers
+        assert hook["hooks"][0]["type"] == "command"
+        assert "claude-mira3 --init" in hook["hooks"][0]["command"]
 
     def test_setup_is_idempotent(self, temp_claude_dir):
         """Running --setup twice should not duplicate the hook."""
@@ -182,12 +184,11 @@ class TestAutoSetupHook:
         """--setup should not overwrite existing hooks."""
         settings_path = temp_claude_dir / "settings.json"
 
-        # Create settings with existing hook
+        # Create settings with existing hook (no matcher - correct format)
         existing_settings = {
             "hooks": {
                 "SessionStart": [
                     {
-                        "matcher": {"type": ["startup"]},
                         "hooks": [{"type": "command", "command": "echo existing"}]
                     }
                 ]
