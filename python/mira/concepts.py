@@ -1059,3 +1059,25 @@ def get_codebase_knowledge(project_path: str = "") -> Dict:
     """
     store = ConceptStore(project_path)
     return store.get_concepts_for_init()
+
+
+def get_concepts_stats() -> Dict:
+    """Get global statistics about stored concepts (for mira_status)."""
+    db = get_db_manager()
+
+    try:
+        row = db.execute_read_one(CONCEPTS_DB, "SELECT COUNT(*) as cnt FROM codebase_concepts")
+        total = row['cnt'] if row else 0
+
+        rows = db.execute_read(CONCEPTS_DB, """
+            SELECT concept_type, COUNT(*) as cnt
+            FROM codebase_concepts
+            GROUP BY concept_type
+            ORDER BY cnt DESC
+        """)
+        by_type = {row['concept_type']: row['cnt'] for row in rows}
+
+        return {'total': total, 'by_type': by_type}
+    except Exception as e:
+        log(f"Error getting concept stats: {e}")
+        return {'total': 0, 'by_type': {}}

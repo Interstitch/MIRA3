@@ -676,6 +676,25 @@ def store_artifact(session_id: str, artifact_type: str, content: str,
         conn = sqlite3.connect(str(db_path))
         cur = conn.cursor()
         try:
+            # Ensure table exists
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS artifacts (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    session_id TEXT NOT NULL,
+                    artifact_type TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    content_hash TEXT NOT NULL,
+                    language TEXT,
+                    title TEXT,
+                    line_count INTEGER,
+                    char_count INTEGER,
+                    role TEXT,
+                    message_index INTEGER,
+                    timestamp TEXT,
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(session_id, content_hash)
+                )
+            """)
             cur.execute("""
                 INSERT OR IGNORE INTO artifacts
                 (session_id, artifact_type, content, content_hash, language, title,
@@ -1141,13 +1160,75 @@ def extract_artifacts_from_messages(messages: list, session_id: str,
     if not all_artifacts:
         return 0
 
-    # LOCAL-FIRST: Always queue artifacts for sync (batch for performance)
-    # Artifacts depend on sessions, which are synced first by sync_worker
-    # Direct central insert would fail if session hasn't synced yet
+    # LOCAL-FIRST: Store locally first, then queue for central sync
+    stored_count = 0
+
+    # 1. Batch insert to local SQLite
+    try:
+        import sqlite3
+        import hashlib
+        from .utils import get_mira_path
+
+        db_path = get_mira_path() / "artifacts.db"
+        conn = sqlite3.connect(str(db_path))
+        cur = conn.cursor()
+
+        # Ensure table exists
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS artifacts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL,
+                artifact_type TEXT NOT NULL,
+                content TEXT NOT NULL,
+                content_hash TEXT NOT NULL,
+                language TEXT,
+                title TEXT,
+                line_count INTEGER,
+                char_count INTEGER,
+                role TEXT,
+                message_index INTEGER,
+                timestamp TEXT,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(session_id, content_hash)
+            )
+        """)
+
+        # Batch insert
+        for artifact in all_artifacts:
+            meta = artifact.get('metadata', {})
+            try:
+                cur.execute("""
+                    INSERT OR IGNORE INTO artifacts
+                    (session_id, artifact_type, content, content_hash, language, title,
+                     line_count, char_count, role, message_index, timestamp)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    artifact.get('session_id'),
+                    artifact.get('artifact_type'),
+                    artifact.get('content'),
+                    meta.get('content_hash'),
+                    artifact.get('language'),
+                    meta.get('title'),
+                    meta.get('line_count'),
+                    meta.get('char_count'),
+                    meta.get('role'),
+                    meta.get('message_index'),
+                    meta.get('timestamp'),
+                ))
+                if cur.rowcount > 0:
+                    stored_count += 1
+            except Exception:
+                pass  # Ignore duplicates
+
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        log(f"Local artifact batch storage failed: {e}")
+
+    # 2. Queue for central sync
     try:
         from .sync_queue import get_sync_queue
         queue = get_sync_queue()
-        import hashlib
 
         # Prepare batch of (data_type, item_hash, payload) tuples
         batch_items = []
@@ -1156,7 +1237,8 @@ def extract_artifacts_from_messages(messages: list, session_id: str,
             item_hash = hashlib.sha256(hash_input.encode()).hexdigest()[:32]
             batch_items.append(("artifact", item_hash, artifact))
 
-        return queue.batch_enqueue(batch_items)
+        queue.batch_enqueue(batch_items)
     except Exception as e:
-        log(f"Failed to queue artifacts: {e}")
-        return 0
+        log(f"Failed to queue artifacts for sync: {e}")
+
+    return stored_count or len(all_artifacts)

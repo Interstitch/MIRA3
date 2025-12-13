@@ -12,10 +12,10 @@ from collections import Counter
 from .utils import log, get_mira_path, get_custodian
 from .search import handle_search
 from .artifacts import get_artifact_stats, get_journey_stats
-from .custodian import get_full_custodian_profile, get_danger_zones_for_files
+from .custodian import get_full_custodian_profile, get_danger_zones_for_files, get_custodian_stats
 from .rules import format_rule_for_display, RULE_TYPES
 from .insights import search_error_solutions, search_decisions, get_error_stats, get_decision_stats
-from .concepts import get_codebase_knowledge, ConceptStore
+from .concepts import get_codebase_knowledge, ConceptStore, get_concepts_stats
 from .ingestion import get_active_ingestions
 from .guidance import (
     build_claude_guidance,
@@ -836,6 +836,8 @@ def handle_status(params: dict, collection, storage=None) -> dict:
     # Get insights stats (local SQLite - always global for now)
     error_stats = get_error_stats()
     decision_stats = get_decision_stats()
+    concepts_stats = get_concepts_stats()
+    custodian_stats = get_custodian_stats()
 
     # Get health check info
     health = {}
@@ -1059,6 +1061,8 @@ def handle_status(params: dict, collection, storage=None) -> dict:
             "decisions": decision_stats_central['global'],
             "file_operations": file_ops_stats['global'],
             "errors": error_stats,  # Local SQLite, always global
+            "concepts": concepts_stats,  # Local SQLite, codebase concepts
+            "custodian": custodian_stats,  # Local SQLite, user profile data
         },
     }
 

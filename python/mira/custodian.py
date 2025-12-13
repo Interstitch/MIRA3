@@ -1458,4 +1458,49 @@ def get_danger_zones_for_files(file_paths: list) -> list:
     return warnings
 
 
+def get_custodian_stats() -> dict:
+    """Get statistics about custodian data (for mira_status)."""
+    db = get_db_manager()
+
+    stats = {
+        'name': None,
+        'preferences': 0,
+        'rules': 0,
+        'danger_zones': 0,
+        'work_patterns': 0,
+        'name_candidates': 0,
+    }
+
+    try:
+        # Get name
+        best_name = compute_best_name()
+        if best_name:
+            stats['name'] = best_name[0]
+
+        # Count preferences
+        row = db.execute_read_one(CUSTODIAN_DB, "SELECT COUNT(*) as cnt FROM preferences_new")
+        stats['preferences'] = row['cnt'] if row else 0
+
+        # Count rules (all rule types)
+        row = db.execute_read_one(CUSTODIAN_DB, "SELECT COUNT(*) as cnt FROM rules")
+        stats['rules'] = row['cnt'] if row else 0
+
+        # Count danger zones
+        row = db.execute_read_one(CUSTODIAN_DB, "SELECT COUNT(*) as cnt FROM danger_zones")
+        stats['danger_zones'] = row['cnt'] if row else 0
+
+        # Count work patterns
+        row = db.execute_read_one(CUSTODIAN_DB, "SELECT COUNT(*) as cnt FROM work_patterns")
+        stats['work_patterns'] = row['cnt'] if row else 0
+
+        # Count name candidates
+        row = db.execute_read_one(CUSTODIAN_DB, "SELECT COUNT(*) as cnt FROM name_candidates")
+        stats['name_candidates'] = row['cnt'] if row else 0
+
+    except Exception as e:
+        log(f"Error getting custodian stats: {e}")
+
+    return stats
+
+
 # =============================================================================
