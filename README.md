@@ -1,19 +1,21 @@
 # MIRA3 - Memory Information Retriever and Archiver
 
-An MCP server that archives and searches your Claude Code conversation history with automatic context injection.
+An MCP server that gives Claude Code persistent memory across sessions, machines, and projects.
 
 ## Overview
 
-MIRA watches `~/.claude/projects/`, archives conversations, extracts metadata (summaries, keywords, decisions), and provides full-text search. Works offline with SQLite. Optional remote storage adds semantic search.
+MIRA watches your Claude Code conversations, learns your preferences, indexes errors and solutions, and makes everything searchable. With remote storage, you get semantic search ("that auth conversation") and seamless history across all your machines.
 
 **Key Features:**
-- **Automatic context injection** - SessionStart hook provides user profile and history at session start
+- **Semantic search** - Find conversations by meaning, not just keywords (requires remote storage)
+- **Cross-machine sync** - Your full history follows you across laptop, desktop, Codespaces
+- **Automatic context injection** - Claude knows your name, workflow, and preferences from session start
+- **Error pattern recognition** - Search 88+ resolved errors before debugging from scratch
 - **Learned prerequisites** - MIRA learns environment-specific setup (e.g., "start tailscaled in Codespaces")
-- **Optimized search** - Compact response format uses ~79% fewer tokens
-- **Cross-machine sync** - Optional remote storage for seamless history across devices
 
-**Source Directory:** `~/.claude/projects/<project-path>/`
-**Storage Directory:** `<workspace>/.mira/`
+**Storage modes:**
+- **Remote (recommended)** - Postgres + Qdrant for semantic search and cross-machine sync
+- **Local-only** - SQLite FTS5 for offline/air-gapped environments
 
 ## Installation
 
@@ -21,11 +23,11 @@ MIRA watches `~/.claude/projects/`, archives conversations, extracts metadata (s
 claude mcp add claude-mira3 -- npx claude-mira3
 ```
 
-That's it. On first use, MIRA3 creates a lightweight Python environment with minimal dependencies.
+The SessionStart hook auto-configures on install, injecting MIRA context at the start of every Claude Code session.
 
-The SessionStart hook is auto-configured on install, injecting MIRA context at the start of every Claude Code session.
+**Next step:** [Set up remote storage](#remote-storage) to unlock semantic search and cross-machine sync.
 
-### Alternative: Manual Configuration
+### Manual MCP Configuration (Alternative)
 
 Add to your MCP settings (`~/.claude/settings.json`):
 
@@ -39,6 +41,58 @@ Add to your MCP settings (`~/.claude/settings.json`):
   }
 }
 ```
+
+## Remote Storage
+
+Remote storage unlocks MIRA's full potential:
+
+- **Semantic search** - Find "that conversation about authentication" even if you never used that word
+- **Cross-project search** - Search all your projects at once
+- **Cross-machine sync** - Seamless history across laptop, desktop, and Codespaces
+- **Persistent memory** - Rebuild a Codespace and your full history is already there
+
+### Quick Setup
+
+**On your server** (any Linux machine with Docker):
+
+```bash
+curl -sL https://raw.githubusercontent.com/Interstitch/MIRA3/master/server/install.sh | bash
+```
+
+The script prompts for:
+- Server IP address
+- PostgreSQL password
+- Qdrant API key
+
+Then starts Postgres, Qdrant, and an embedding service via Docker Compose.
+
+**On each dev machine**, create `.mira/server.json` with the credentials you set:
+
+```json
+{
+  "version": 1,
+  "central": {
+    "enabled": true,
+    "qdrant": { "host": "YOUR_SERVER_IP", "port": 6333, "api_key": "YOUR_QDRANT_KEY" },
+    "postgres": { "host": "YOUR_SERVER_IP", "password": "YOUR_PG_PASSWORD" }
+  }
+}
+```
+
+```bash
+chmod 600 ~/.mira/server.json  # Protect credentials
+```
+
+**Full guide:** [SERVER_SETUP.md](SERVER_SETUP.md) covers firewall ports, verification, and troubleshooting.
+
+### Local-Only Mode
+
+Without remote storage, MIRA works locally with SQLite FTS5 keyword search. This is useful for:
+- Air-gapped environments
+- Quick evaluation before setting up a server
+- Offline work (syncs when reconnected if remote is configured)
+
+Local mode creates `.mira/.venv/` and SQLite databases (~50MB) on first use.
 
 ## Data Locations
 
@@ -98,7 +152,14 @@ MIRA3 maintains its own storage in the workspace:
 
 ## Search
 
-Uses SQLite FTS5 for keyword search. Searches conversation content, summaries, and artifacts.
+MIRA provides two search modes:
+
+| Mode | Storage | Capability |
+|------|---------|------------|
+| **Semantic** | Remote | Find by meaning - "auth conversation" matches "login flow discussion" |
+| **Keyword** | Local/Remote | FTS5 full-text search on exact terms |
+
+With remote storage, searches use semantic similarity first, then keyword fallback. Local-only mode uses keyword search.
 
 **Optimized responses:** Search results use a compact format by default, reducing token usage by ~79%. Each result includes:
 - Short session ID (8 chars)
@@ -109,18 +170,21 @@ Uses SQLite FTS5 for keyword search. Searches conversation content, summaries, a
 
 Pass `compact: false` to get verbose format for debugging.
 
-**First run:** Creates `.mira/.venv/`, installs `watchdog`, creates SQLite databases (~50MB total). Takes under a minute.
-
-**Want semantic search?** Set up [remote storage](#remote-storage-optional).
-
 ## Architecture
 
 ```
-Claude Code → Node.js MCP Server → Python Backend (SQLite/FTS5, file watcher)
+Claude Code → Node.js MCP Server → Python Backend
+                                        ↓
+                    ┌───────────────────┴───────────────────┐
+                    ↓                                       ↓
+              Local Storage                          Remote Storage
+           (SQLite FTS5 search)            (Postgres + Qdrant semantic search)
 ```
 
 - **Node.js layer**: MCP protocol, spawns Python backend
 - **Python layer**: File watching, ingestion, search, metadata extraction
+- **Local storage**: SQLite databases with FTS5 full-text search
+- **Remote storage**: Postgres for metadata, Qdrant for vector embeddings, embedding service for semantic search
 
 ## What Gets Indexed
 
@@ -166,7 +230,16 @@ MIRA indexes errors and their solutions from conversations. Search past errors w
 
 ## Decision Journal
 
-MIRA extracts architectural decisions (technology choices, patterns, implementation approaches) with reasoning. Search with `mira_decisions` to understand past choices and maintain consistency.
+MIRA extracts architectural decisions with reasoning. Record decisions explicitly for high confidence:
+
+```
+"Decision: use PostgreSQL for the database"
+"ADR: all API responses include meta field"
+"Policy: configs in YAML format"
+"Going forward, use pnpm instead of npm"
+```
+
+Search with `mira_decisions` to understand past choices and maintain consistency.
 
 ## Artifacts
 
@@ -176,12 +249,22 @@ MIRA detects and indexes structured content: code blocks, commands, configs, tab
 
 | Tool | Purpose |
 |------|---------|
-| `mira_search` | Full-text search across conversations (compact format by default) |
-| `mira_recent` | Recent activity across projects |
+| `mira_search` | Search conversations. Params: `query`, `limit`, `project_path`, `days`, `compact` |
+| `mira_recent` | Recent sessions. Params: `limit`, `days` (e.g., `days: 7` for last week) |
 | `mira_init` | Session initialization - user profile, prerequisites, danger zones |
 | `mira_status` | Ingestion stats and system health |
-| `mira_error_lookup` | Search past errors and their solutions |
-| `mira_decisions` | Search architectural decisions with reasoning |
+| `mira_error_lookup` | Search past errors and their solutions. Params: `query`, `limit` |
+| `mira_decisions` | Search architectural decisions. Params: `query`, `category`, `limit` |
+
+### Search Parameters
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `query` | string | required | Search query |
+| `limit` | number | 10 | Maximum results |
+| `project_path` | string | - | Filter to specific project |
+| `days` | number | - | Filter to last N days |
+| `compact` | boolean | true | Compact format (~79% smaller) |
 
 **Note:** `mira_init` is called automatically via the SessionStart hook. You don't need to call it manually unless context seems stale.
 
@@ -190,23 +273,6 @@ MIRA detects and indexes structured content: code blocks, commands, configs, tab
 - Node.js >= 20.0.0
 - Python >= 3.8
 - Claude Code
-
-## Remote Storage (Optional)
-
-Run your own server to unlock:
-
-- **Semantic search** - Find "that conversation about authentication" even if you never used that word
-- **Cross-project search** - Search all your projects at once
-- **Cross-machine sync** - Seamless history across laptop, desktop, and Codespaces
-- **Persistent memory** - Rebuild a Codespace and your full history is already there
-
-```bash
-curl -sL https://raw.githubusercontent.com/Interstitch/MIRA3/master/server/install.sh | bash
-```
-
-Then create `~/.mira/server.json` on your dev machines pointing to the server.
-
-**Full guide:** [SERVER_SETUP.md](SERVER_SETUP.md)
 
 ## License
 

@@ -18,10 +18,13 @@ const SearchSchema = z.object({
   query: z.string().describe("Search query for finding conversations"),
   limit: z.number().optional().default(10).describe("Maximum number of results"),
   project_path: z.string().optional().describe("Optional: filter to specific project path"),
+  compact: z.boolean().optional().default(true).describe("Return compact format (default true, ~79% smaller)"),
+  days: z.number().optional().describe("Filter to sessions from last N days"),
 });
 
 const RecentSchema = z.object({
   limit: z.number().optional().default(10).describe("Maximum number of recent sessions"),
+  days: z.number().optional().describe("Filter to sessions from last N days (e.g., 7 for last week)"),
 });
 
 const InitSchema = z.object({
@@ -63,16 +66,16 @@ export async function startServer(): Promise<void> {
   // Register tools
   server.tool(
     "mira_search",
-    "Search conversation history by keywords. Uses ChromaDB semantic search with cosine similarity.",
+    "Search conversation history by keywords. Uses semantic search (with remote storage) or FTS5 keyword search (local).",
     SearchSchema.shape,
-    async ({ query, limit, project_path }) => {
+    async ({ query, limit, project_path, compact, days }) => {
       if (!backendReady) {
         return {
           content: [{ type: "text", text: "Error: Python backend not ready. Ensure Python 3.8+ is installed." }],
         };
       }
       try {
-        const result = await callRpc("search", { query, limit, project_path });
+        const result = await callRpc("search", { query, limit, project_path, compact, days });
         return {
           content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
         };
@@ -88,14 +91,14 @@ export async function startServer(): Promise<void> {
     "mira_recent",
     "Show recent conversation sessions grouped by project.",
     RecentSchema.shape,
-    async ({ limit }) => {
+    async ({ limit, days }) => {
       if (!backendReady) {
         return {
           content: [{ type: "text", text: "Error: Python backend not ready. Ensure Python 3.8+ is installed." }],
         };
       }
       try {
-        const result = await callRpc("recent", { limit });
+        const result = await callRpc("recent", { limit, days });
         return {
           content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
         };

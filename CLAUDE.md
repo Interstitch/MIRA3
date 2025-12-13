@@ -198,6 +198,21 @@ MIRA extracts and indexes error patterns from conversations, linking them to the
 
 MIRA extracts architectural and design decisions from conversations via `mira_decisions`:
 
+**Explicit Recording (High Confidence):**
+Record decisions explicitly and they'll be captured with 0.95 confidence:
+```
+"Decision: use PostgreSQL for the primary database"
+"ADR: all API responses include a meta field for pagination"
+"For the record, we're using React Query for data fetching"
+"Policy: all configs must be in YAML format"
+"Going forward, use pnpm instead of npm"
+```
+
+**Implicit Extraction (Lower Confidence):**
+MIRA also extracts decisions from assistant responses:
+- "I decided to use X because..." (0.75 confidence)
+- "I recommend using X" (0.65 confidence)
+
 **Decision Categories:**
 - `architecture`: System design, component structure
 - `technology`: Library/framework choices
@@ -210,7 +225,7 @@ MIRA extracts architectural and design decisions from conversations via `mira_de
 **What MIRA Captures:**
 - **Decision text**: The actual choice made
 - **Reasoning**: Why this approach was chosen (from discussion context)
-- **Alternatives**: Other options that were considered
+- **Confidence**: How explicit the recording was (0.60-0.95)
 - **Source session**: Which conversation made this decision
 
 **How It Helps:**

@@ -346,30 +346,42 @@ def get_archive(session_uuid: str) -> Optional[str]:
 
 def get_recent_sessions(
     project_id: Optional[int] = None,
-    limit: int = 10
+    limit: int = 10,
+    since: Optional[datetime] = None,
 ) -> List[Dict[str, Any]]:
-    """Get recent sessions, optionally filtered by project."""
+    """Get recent sessions, optionally filtered by project and time.
+
+    Args:
+        project_id: Optional filter by project
+        limit: Maximum number of results
+        since: Optional datetime cutoff (only return sessions after this time)
+    """
     init_local_db()
     db = get_db_manager()
 
-    if project_id:
-        rows = db.execute_read(
-            LOCAL_DB,
-            """SELECT s.*, p.path as project_path FROM sessions s
-               JOIN projects p ON s.project_id = p.id
-               WHERE s.project_id = ?
-               ORDER BY s.started_at DESC LIMIT ?""",
-            (project_id, limit)
-        )
-    else:
-        rows = db.execute_read(
-            LOCAL_DB,
-            """SELECT s.*, p.path as project_path FROM sessions s
-               JOIN projects p ON s.project_id = p.id
-               ORDER BY s.started_at DESC LIMIT ?""",
-            (limit,)
-        )
+    # Build query dynamically based on filters
+    conditions = []
+    params = []
 
+    if project_id:
+        conditions.append("s.project_id = ?")
+        params.append(project_id)
+
+    if since:
+        conditions.append("s.started_at >= ?")
+        params.append(since.isoformat())
+
+    where_clause = ""
+    if conditions:
+        where_clause = "WHERE " + " AND ".join(conditions)
+
+    query = f"""SELECT s.*, p.path as project_path FROM sessions s
+               JOIN projects p ON s.project_id = p.id
+               {where_clause}
+               ORDER BY s.started_at DESC LIMIT ?"""
+    params.append(limit)
+
+    rows = db.execute_read(LOCAL_DB, query, tuple(params))
     return [_session_row_to_dict(row) for row in rows]
 
 

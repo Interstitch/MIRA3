@@ -31,7 +31,7 @@ class QdrantConfig:
     """Qdrant vector database connection settings."""
     host: str
     port: int = 6333
-    collection: str = "mira"
+    collection: str = "mira_sessions"
     timeout_seconds: int = 30
     api_key: Optional[str] = None  # Optional API key for auth
 
@@ -202,8 +202,9 @@ def load_config() -> ServerConfig:
         qdrant = QdrantConfig(
             host=qdrant_data.get("host", ""),
             port=qdrant_data.get("port", 6333),
-            collection=qdrant_data.get("collection", "mira"),
+            collection=qdrant_data.get("collection", "mira_sessions"),
             timeout_seconds=qdrant_data.get("timeout_seconds", 30),
+            api_key=qdrant_data.get("api_key"),
         )
 
         # Parse Postgres config

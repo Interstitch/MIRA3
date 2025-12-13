@@ -5,7 +5,8 @@
     "qdrant": {
       "host": "100.107.224.88",
       "port": 6333,
-      "collection": "mira",
+      "api_key": "REPLACE_WITH_QDRANT_API_KEY",
+      "collection": "mira_sessions",
       "timeout_seconds": 30
     },
     "postgres": {

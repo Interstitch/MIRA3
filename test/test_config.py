@@ -26,7 +26,7 @@ class TestConfig:
         qdrant = QdrantConfig(host="localhost", port=6333)
         assert qdrant.host == "localhost"
         assert qdrant.port == 6333
-        assert qdrant.collection == "mira"  # default
+        assert qdrant.collection == "mira_sessions"  # default (matches server)
         assert qdrant.api_key is None  # default
 
         postgres = PostgresConfig(host="localhost", password="secret")

@@ -349,36 +349,45 @@ class PostgresBackend:
         self,
         project_id: Optional[int] = None,
         limit: int = 10,
+        since: Optional[datetime] = None,
     ) -> List[Dict[str, Any]]:
-        """Get recent sessions, optionally filtered by project."""
+        """Get recent sessions, optionally filtered by project and time.
+
+        Args:
+            project_id: Optional filter by project
+            limit: Maximum number of results
+            since: Optional datetime cutoff (only return sessions after this time)
+        """
         with self._get_connection() as conn:
             with conn.cursor() as cur:
-                if project_id:
-                    cur.execute(
-                        """
-                        SELECT s.id, s.session_id, s.summary, s.keywords,
-                               s.started_at, s.ended_at, p.path as project_path
-                        FROM sessions s
-                        JOIN projects p ON s.project_id = p.id
-                        WHERE s.project_id = %s
-                        ORDER BY s.started_at DESC NULLS LAST
-                        LIMIT %s
-                        """,
-                        (project_id, limit)
-                    )
-                else:
-                    cur.execute(
-                        """
-                        SELECT s.id, s.session_id, s.summary, s.keywords,
-                               s.started_at, s.ended_at, p.path as project_path
-                        FROM sessions s
-                        JOIN projects p ON s.project_id = p.id
-                        ORDER BY s.started_at DESC NULLS LAST
-                        LIMIT %s
-                        """,
-                        (limit,)
-                    )
+                # Build query dynamically based on filters
+                conditions = []
+                params = []
 
+                if project_id:
+                    conditions.append("s.project_id = %s")
+                    params.append(project_id)
+
+                if since:
+                    conditions.append("s.started_at >= %s")
+                    params.append(since)
+
+                where_clause = ""
+                if conditions:
+                    where_clause = "WHERE " + " AND ".join(conditions)
+
+                query = f"""
+                    SELECT s.id, s.session_id, s.summary, s.keywords,
+                           s.started_at, s.ended_at, p.path as project_path
+                    FROM sessions s
+                    JOIN projects p ON s.project_id = p.id
+                    {where_clause}
+                    ORDER BY s.started_at DESC NULLS LAST
+                    LIMIT %s
+                """
+                params.append(limit)
+
+                cur.execute(query, tuple(params))
                 columns = [desc[0] for desc in cur.description]
                 return [dict(zip(columns, row)) for row in cur.fetchall()]
 

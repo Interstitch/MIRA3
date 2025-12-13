@@ -212,17 +212,26 @@ def handle_search(params: dict, collection, storage=None) -> dict:
             - limit: Max results (default 10)
             - project_path: Optional project filter
             - compact: Return compact format (default True, ~79% smaller)
+            - days: Filter to sessions from last N days
         collection: Deprecated - kept for API compatibility, ignored
         storage: Storage instance
 
     Returns:
         Dict with results, total, and query (compact) or artifacts/search_type (verbose)
     """
+    from datetime import datetime, timedelta
+
     query = params.get("query", "")
     limit = params.get("limit", 10)
     project_path = params.get("project_path")  # Optional: filter to specific project
     compact = params.get("compact", True)  # Default to compact for token efficiency
+    days = params.get("days")  # Optional: filter to last N days
     mira_path = get_mira_path()
+
+    # Calculate cutoff time if days specified
+    cutoff_time = None
+    if days is not None and days > 0:
+        cutoff_time = datetime.now() - timedelta(days=days)
 
     if not query:
         return {"results": [], "total": 0}
@@ -369,21 +378,51 @@ def handle_search(params: dict, collection, storage=None) -> dict:
         except Exception as e:
             log(f"Fulltext fallback failed: {e}")
 
+    # Apply time filter if days specified
+    if cutoff_time and results:
+        filtered_results = []
+        for r in results:
+            # Try to parse timestamp from various fields
+            ts_str = r.get("timestamp") or r.get("started_at") or ""
+            if ts_str:
+                try:
+                    # Handle various timestamp formats
+                    ts_str = str(ts_str)
+                    if "T" in ts_str:
+                        ts = datetime.fromisoformat(ts_str.replace("Z", "+00:00").split("+")[0])
+                    else:
+                        ts = datetime.fromisoformat(ts_str)
+                    if ts >= cutoff_time:
+                        filtered_results.append(r)
+                except (ValueError, TypeError):
+                    # If we can't parse, include the result
+                    filtered_results.append(r)
+            else:
+                # No timestamp, include the result
+                filtered_results.append(r)
+        results = filtered_results
+
     # Apply compact transformation if requested (default)
     if compact:
-        return {
+        response = {
             "results": _compact_results(results, query),
             "total": len(results),
             "query": query,  # Include query for context
         }
+        if days:
+            response["filtered_to_days"] = days
+        return response
     else:
         # Verbose format for debugging
-        return {
+        response = {
             "results": results,
             "total": len(results),
             "search_type": search_type,
             "artifacts": artifact_results
         }
+        if days:
+            response["filtered_to_days"] = days
+        return response
 
 
 def _extract_excerpts(content: str, query: str, max_excerpts: int = 3) -> List[str]:

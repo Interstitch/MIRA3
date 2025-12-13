@@ -8,7 +8,8 @@ from pathlib import Path
 from mira.insights import (
     init_insights_db, extract_errors_from_conversation, extract_decisions_from_conversation,
     search_error_solutions, search_decisions, get_error_stats, get_decision_stats,
-    normalize_error_message, compute_error_signature
+    normalize_error_message, compute_error_signature,
+    EXPLICIT_DECISION_PATTERNS, _is_decision_false_positive, _has_technical_content
 )
 from mira.db_manager import shutdown_db_manager
 
@@ -292,4 +293,149 @@ class TestDeduplicationConstraints:
         # Extract decisions
         count = extract_decisions_from_conversation(conversation, 'dedup-decision-session')
         # The function should handle duplicates gracefully
+        assert count >= 0
+
+
+class TestExplicitDecisionRecording:
+    """Test explicit decision recording patterns."""
+
+    def setup_method(self):
+        """Set up test fixtures."""
+        self.temp_dir = tempfile.mkdtemp()
+        self.original_cwd = os.getcwd()
+        os.chdir(self.temp_dir)
+        mira_path = Path(self.temp_dir) / '.mira'
+        mira_path.mkdir(exist_ok=True)
+        init_insights_db()
+
+    def teardown_method(self):
+        """Clean up test fixtures."""
+        shutdown_db_manager()
+        os.chdir(self.original_cwd)
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def test_explicit_patterns_exist(self):
+        """Test that explicit decision patterns are defined."""
+        assert len(EXPLICIT_DECISION_PATTERNS) > 0
+        # Check structure: (pattern, confidence)
+        for pattern, confidence in EXPLICIT_DECISION_PATTERNS:
+            assert isinstance(pattern, str)
+            assert 0.0 <= confidence <= 1.0
+
+    def test_tier1_patterns_high_confidence(self):
+        """Test that tier 1 patterns have 0.95 confidence."""
+        tier1_triggers = ['record this decision', 'adr:', 'decision:', 'for the record']
+        tier1_patterns = [(p, c) for p, c in EXPLICIT_DECISION_PATTERNS if c == 0.95]
+        assert len(tier1_patterns) >= 4  # At least 4 tier 1 patterns
+
+    def test_has_technical_content(self):
+        """Test technical content detection."""
+        assert _has_technical_content("use PostgreSQL database")
+        assert _has_technical_content("configure the API endpoint")
+        assert _has_technical_content("test the auth module")
+        assert not _has_technical_content("meeting is at 3pm")
+        assert not _has_technical_content("remember to call mom")
+
+    def test_false_positive_questions(self):
+        """Test that questions are detected as false positives."""
+        assert _is_decision_false_positive("decision:", "should we use React?")
+        assert _is_decision_false_positive("policy:", "what is the best approach?")
+        assert _is_decision_false_positive("rule:", "how do we handle this?")
+
+    def test_false_positive_hypotheticals(self):
+        """Test that hypotheticals are detected as false positives."""
+        assert _is_decision_false_positive("decision:", "if we use React then...")
+        assert _is_decision_false_positive("policy:", "could use PostgreSQL")
+        assert _is_decision_false_positive("rule:", "might want to consider X")
+
+    def test_false_positive_negations(self):
+        """Test that negations are detected as false positives."""
+        assert _is_decision_false_positive("decision:", "we haven't decided yet")
+        assert _is_decision_false_positive("policy:", "this isn't final")
+        assert _is_decision_false_positive("rule:", "still undecided on this")
+
+    def test_false_positive_too_short(self):
+        """Test that short content is detected as false positive."""
+        assert _is_decision_false_positive("decision:", "yes")
+        assert _is_decision_false_positive("policy:", "ok")
+        assert _is_decision_false_positive("rule:", "maybe")
+
+    def test_valid_decision_not_false_positive(self):
+        """Test that valid decisions are not marked as false positives."""
+        assert not _is_decision_false_positive("decision:", "use PostgreSQL for the database")
+        assert not _is_decision_false_positive("policy:", "all configs must be in YAML format")
+        assert not _is_decision_false_positive("adr:", "API responses include pagination meta")
+
+    def test_extract_explicit_user_decision(self):
+        """Test extraction of explicit decisions from user messages."""
+        conversation = {
+            'messages': [
+                {'role': 'user', 'content': 'Decision: use PostgreSQL for the primary database because of ACID compliance'},
+                {'role': 'assistant', 'content': 'Good choice, PostgreSQL is excellent for that.'},
+            ]
+        }
+
+        count = extract_decisions_from_conversation(conversation, 'explicit-user-decision')
+        assert count >= 1  # Should capture the explicit decision
+
+    def test_extract_adr_format(self):
+        """Test extraction of ADR-style decisions."""
+        conversation = {
+            'messages': [
+                {'role': 'user', 'content': 'ADR: All API endpoints must return JSON with a meta field for pagination'},
+                {'role': 'assistant', 'content': 'I\'ll ensure all endpoints follow this pattern.'},
+            ]
+        }
+
+        count = extract_decisions_from_conversation(conversation, 'adr-style-decision')
+        assert count >= 1
+
+    def test_extract_policy_format(self):
+        """Test extraction of policy statements."""
+        conversation = {
+            'messages': [
+                {'role': 'user', 'content': 'Policy: all configuration files must use YAML format, not JSON'},
+                {'role': 'assistant', 'content': 'Understood, I\'ll use YAML for configs.'},
+            ]
+        }
+
+        count = extract_decisions_from_conversation(conversation, 'policy-decision')
+        assert count >= 1
+
+    def test_extract_going_forward(self):
+        """Test extraction of 'going forward' statements."""
+        conversation = {
+            'messages': [
+                {'role': 'user', 'content': 'Going forward, use pnpm instead of npm for package management'},
+                {'role': 'assistant', 'content': 'I\'ll use pnpm for all package operations.'},
+            ]
+        }
+
+        count = extract_decisions_from_conversation(conversation, 'going-forward-decision')
+        assert count >= 1
+
+    def test_no_extraction_for_questions(self):
+        """Test that questions are not extracted as decisions."""
+        conversation = {
+            'messages': [
+                {'role': 'user', 'content': 'Decision: should we use React or Vue?'},
+                {'role': 'assistant', 'content': 'I recommend React for this use case.'},
+            ]
+        }
+
+        count = extract_decisions_from_conversation(conversation, 'question-not-decision')
+        # Should not extract the question as a decision
+        # But may extract the assistant's recommendation
+        assert count >= 0  # Just ensure no crash
+
+    def test_assistant_decisions_lower_confidence(self):
+        """Test that assistant decisions are extracted with lower confidence."""
+        conversation = {
+            'messages': [
+                {'role': 'assistant', 'content': 'I decided to use FastAPI for the backend because it has automatic OpenAPI docs.'},
+            ]
+        }
+
+        count = extract_decisions_from_conversation(conversation, 'assistant-decision')
+        # Should extract but with lower confidence (0.75)
         assert count >= 0

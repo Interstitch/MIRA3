@@ -482,6 +482,76 @@ def get_error_stats() -> Dict:
 # DECISION JOURNAL
 # =============================================================================
 
+# Explicit decision recording patterns - scanned in USER messages
+# These are intentional recording commands with high confidence
+EXPLICIT_DECISION_PATTERNS = [
+    # Tier 1: Direct recording commands (confidence 0.95)
+    (r"(?:record (?:this )?decision|log (?:this )?decision|document (?:this )?decision|capture (?:this )?decision)[:\s]+(.{10,300})", 0.95),
+    (r"(?:ADR|architecture decision(?: record)?|design decision|technical decision)[:\s-]+(.{10,300})", 0.95),
+    (r"(?:decision|final decision|our decision|team decision)[:\s]+(.{10,300})", 0.95),
+    (r"for the record[,:\s]+(.{10,300})", 0.95),
+    (r"(?:MIRA,? record|for MIRA)[:\s]+(.{10,300})", 0.95),
+
+    # Tier 2: Strong declarations (confidence 0.90)
+    (r"(?:policy|rule|standard|convention|guideline)[:\s]+(.{10,300})", 0.90),
+    (r"(?:going forward|from now on|henceforth)[,:\s]+(.{10,300})", 0.90),
+    (r"(?:we commit to|our commitment is|we are committing to)[:\s]+(.{10,300})", 0.90),
+    (r"(?:requirement|mandate|mandatory)[:\s]+(.{10,300})", 0.90),
+
+    # Tier 3: Clear statements (confidence 0.85)
+    (r"we (?:will always|will never|must always|must never)\s+(.{10,200})", 0.85),
+    (r"(?:always use|never use|always do|never do)\s+(.{10,200})", 0.85),
+    (r"(?:resolution|resolved|we've resolved that|conclusion|we conclude that)[:\s]+(.{10,300})", 0.85),
+    (r"(?:chosen approach|selected approach|final choice)[:\s]+(.{10,300})", 0.85),
+]
+
+# Technical terms that make casual triggers more likely to be real decisions
+DECISION_TECH_TERMS = [
+    'api', 'database', 'db', 'code', 'function', 'class', 'file', 'config',
+    'deploy', 'test', 'build', 'architecture', 'framework', 'library',
+    'component', 'service', 'module', 'package', 'dependency', 'schema',
+    'endpoint', 'route', 'model', 'controller', 'view', 'template',
+    'query', 'cache', 'storage', 'auth', 'permission', 'security',
+]
+
+
+def _is_decision_false_positive(trigger_match: str, content: str) -> bool:
+    """Check if a decision match is a false positive."""
+    content_stripped = content.strip()
+
+    # Questions are not decisions
+    if content_stripped.endswith('?'):
+        return True
+    if re.search(r'\b(should we|what|how|which|can we|do we|are we)\b', content_stripped, re.I):
+        return True
+
+    # Hypotheticals are not decisions
+    if re.match(r'^(if|could|might|would|may|maybe)\b', content_stripped, re.I):
+        return True
+
+    # Negations indicate no decision was made
+    if re.search(r"\b(haven't|hasn't|not yet|isn't final|undecided|uncertain)\b", content_stripped, re.I):
+        return True
+
+    # Too short to be meaningful
+    if len(content_stripped) < 10:
+        return True
+
+    # Skip if it looks like code
+    if content_stripped.startswith('{') or content_stripped.startswith('['):
+        return True
+    if re.match(r'^(const|let|var|function|class|def|import)\b', content_stripped):
+        return True
+
+    return False
+
+
+def _has_technical_content(content: str) -> bool:
+    """Check if content contains technical terms."""
+    content_lower = content.lower()
+    return any(term in content_lower for term in DECISION_TECH_TERMS)
+
+
 def extract_decisions_from_conversation(
     conversation: dict,
     session_id: str,
@@ -492,10 +562,9 @@ def extract_decisions_from_conversation(
     """
     Extract architectural and design decisions from a conversation.
 
-    Looks for:
-    - Explicit decision statements
-    - Reasoning patterns
-    - Alternative considerations
+    Scans BOTH user and assistant messages:
+    - User messages: Explicit recording commands (high confidence)
+    - Assistant messages: Decision patterns and recommendations
 
     Uses central Postgres if available, falls back to local SQLite.
     """
@@ -526,95 +595,148 @@ def extract_decisions_from_conversation(
     decisions_found = 0
     seen_hashes = set()  # Dedupe within this conversation
 
-    # CONSERVATIVE decision patterns - require clear decision indicators
-    # Only capture actual architectural/design decisions, not casual explanations
-    decision_patterns = [
-        # Explicit decisions with architectural terms
-        (r"(?:I (?:decided|chose|went with)|We (?:decided|chose) to use|The (?:best|chosen) approach is)\s+([^.!?\n]{15,150}(?:architecture|pattern|approach|design|structure|framework|library|database|api|storage)[^.!?\n]{0,50}[.!?])", 'explicit'),
-        # Recommendations with specific tech/design terms
-        (r"(?:I recommend|I suggest|My recommendation is)\s+(using [^.!?\n]{10,100}|to use [^.!?\n]{10,100})", 'recommendation'),
-        # Explicit "instead of" with tech terms (not casual usage)
-        (r"(?:instead of|rather than)\s+(using \w+[^.!?\n]{10,60}(?:because|since|for)[^.!?\n]{10,60})", 'alternative'),
-    ]
+    # Collect text from user and assistant messages separately
+    user_text = []
+    assistant_text = []
+    for msg in messages:
+        content = msg.get('content', '')
+        if isinstance(content, list):
+            content = ' '.join(
+                item.get('text', '') for item in content
+                if isinstance(item, dict) and item.get('type') == 'text'
+            )
+        if msg.get('role') == 'user':
+            user_text.append(content)
+        elif msg.get('role') == 'assistant':
+            assistant_text.append(content)
 
+    combined_user_text = '\n'.join(user_text)
+    combined_assistant_text = '\n'.join(assistant_text)
+
+    def store_decision(decision_text: str, context: str, confidence: float) -> bool:
+        """Store a decision and return True if successful."""
+        nonlocal decisions_found
+
+        decision_hash = hashlib.md5(decision_text[:100].lower().encode()).hexdigest()
+
+        # Skip duplicates within this conversation
+        if decision_hash in seen_hashes:
+            return False
+        seen_hashes.add(decision_hash)
+
+        category = _categorize_decision(decision_text)
+
+        # Store in central Postgres
+        if use_central and project_id:
+            try:
+                storage.postgres.insert_decision(
+                    project_id=project_id,
+                    decision=decision_text[:200],
+                    category=category,
+                    reasoning=context[:500] if context else None,
+                    session_id=postgres_session_id,
+                    confidence=confidence,
+                )
+                decisions_found += 1
+                return True
+            except Exception as e:
+                log(f"Central decision storage failed: {e}")
+
+        # Fallback to local SQLite
+        def insert_decision(cursor):
+            cursor.execute("SELECT id FROM decisions WHERE decision_hash = ?", (decision_hash,))
+            if cursor.fetchone():
+                return 0
+
+            cursor.execute("""
+                INSERT INTO decisions
+                (decision_hash, decision_summary, context, category, session_id, timestamp, confidence)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            """, (decision_hash, decision_text[:200], context[:500], category, session_id, now, confidence))
+
+            cursor.execute("""
+                INSERT INTO decisions_fts(rowid, decision_summary, reasoning, context)
+                VALUES (last_insert_rowid(), ?, ?, ?)
+            """, (decision_text[:200], '', context[:500]))
+            return 1
+
+        result = db.execute_write_func(INSIGHTS_DB, insert_decision)
+        if result:
+            decisions_found += 1
+        return result > 0
+
+    # ==========================================================================
+    # PHASE 1: Scan USER messages for explicit recording patterns (high confidence)
+    # ==========================================================================
     try:
-        all_text = []
-        for msg in messages:
-            if msg.get('role') == 'assistant':
-                content = msg.get('content', '')
-                if isinstance(content, list):
-                    content = ' '.join(
-                        item.get('text', '') for item in content
-                        if isinstance(item, dict) and item.get('type') == 'text'
-                    )
-                all_text.append(content)
-
-        combined_text = '\n'.join(all_text)
-
-        for pattern, decision_type in decision_patterns:
-            matches = re.findall(pattern, combined_text, re.IGNORECASE)
-            for match in matches[:5]:
+        for pattern, confidence in EXPLICIT_DECISION_PATTERNS:
+            matches = re.findall(pattern, combined_user_text, re.IGNORECASE | re.MULTILINE)
+            for match in matches[:10]:  # Limit per pattern
                 decision_text = match.strip()
-                if len(decision_text) < 15:
+
+                if _is_decision_false_positive(pattern, decision_text):
                     continue
 
-                if decision_text.count('(') > 2 or '{' in decision_text:
+                # For lower-confidence patterns, require technical content
+                if confidence < 0.90 and not _has_technical_content(decision_text):
                     continue
 
-                decision_hash = hashlib.md5(decision_text[:100].lower().encode()).hexdigest()
-
-                # Skip duplicates within this conversation
-                if decision_hash in seen_hashes:
-                    continue
-                seen_hashes.add(decision_hash)
-
+                # Extract context around the decision
                 context_match = re.search(
                     rf".{{0,100}}{re.escape(decision_text[:30])}.{{0,100}}",
-                    combined_text,
+                    combined_user_text,
                     re.IGNORECASE | re.DOTALL
                 )
                 context = context_match.group(0) if context_match else ""
 
-                category = _categorize_decision(decision_text)
-
-                # Store in central Postgres
-                if use_central and project_id:
-                    try:
-                        storage.postgres.insert_decision(
-                            project_id=project_id,
-                            decision=decision_text[:200],
-                            category=category,
-                            reasoning=context[:500] if context else None,
-                            session_id=postgres_session_id,
-                            confidence=0.5,
-                        )
-                        decisions_found += 1
-                        continue
-                    except Exception as e:
-                        log(f"Central decision storage failed: {e}")
-
-                # Fallback to local SQLite
-                def insert_decision(cursor):
-                    cursor.execute("SELECT id FROM decisions WHERE decision_hash = ?", (decision_hash,))
-                    if cursor.fetchone():
-                        return 0
-
-                    cursor.execute("""
-                        INSERT INTO decisions
-                        (decision_hash, decision_summary, context, category, session_id, timestamp, confidence)
-                        VALUES (?, ?, ?, ?, ?, ?, ?)
-                    """, (decision_hash, decision_text[:200], context[:500], category, session_id, now, 0.5))
-
-                    cursor.execute("""
-                        INSERT INTO decisions_fts(rowid, decision_summary, reasoning, context)
-                        VALUES (last_insert_rowid(), ?, ?, ?)
-                    """, (decision_text[:200], '', context[:500]))
-                    return 1
-
-                decisions_found += db.execute_write_func(INSIGHTS_DB, insert_decision)
+                store_decision(decision_text, context, confidence)
 
     except Exception as e:
-        log(f"Error extracting decisions: {e}")
+        log(f"Error extracting explicit decisions from user messages: {e}")
+
+    # ==========================================================================
+    # PHASE 2: Scan ASSISTANT messages for decision patterns (lower confidence)
+    # ==========================================================================
+
+    # Assistant decision patterns with confidence tiers
+    # These are less explicit than user recording commands
+    assistant_decision_patterns = [
+        # Tier 4: Explicit decisions (0.75)
+        (r"(?:I (?:decided|chose|went with)|We (?:decided|chose) to use|The (?:best|chosen) approach is)\s+([^.!?\n]{15,150}[.!?])", 0.75),
+        # Tier 5: Recommendations (0.65)
+        (r"(?:I recommend|I suggest|My recommendation is)\s+(using [^.!?\n]{10,100}|to use [^.!?\n]{10,100})", 0.65),
+        # Tier 5: Alternative explanations (0.60)
+        (r"(?:instead of|rather than)\s+(using \w+[^.!?\n]{10,60}(?:because|since|for)[^.!?\n]{10,60})", 0.60),
+    ]
+
+    try:
+        for pattern, confidence in assistant_decision_patterns:
+            matches = re.findall(pattern, combined_assistant_text, re.IGNORECASE)
+            for match in matches[:5]:  # Limit per pattern
+                decision_text = match.strip()
+
+                if len(decision_text) < 15:
+                    continue
+
+                # Skip if too much code-like content
+                if decision_text.count('(') > 2 or '{' in decision_text:
+                    continue
+
+                if _is_decision_false_positive(pattern, decision_text):
+                    continue
+
+                # Extract context around the decision
+                context_match = re.search(
+                    rf".{{0,100}}{re.escape(decision_text[:30])}.{{0,100}}",
+                    combined_assistant_text,
+                    re.IGNORECASE | re.DOTALL
+                )
+                context = context_match.group(0) if context_match else ""
+
+                store_decision(decision_text, context, confidence)
+
+    except Exception as e:
+        log(f"Error extracting decisions from assistant messages: {e}")
 
     return decisions_found
 

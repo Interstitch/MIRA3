@@ -289,11 +289,17 @@ class Storage:
         self,
         project_path: Optional[str] = None,
         limit: int = 10,
+        since: Optional[datetime] = None,
     ) -> List[Dict[str, Any]]:
         """
         Get recent sessions.
 
         Tries central first (cross-machine data), falls back to local.
+
+        Args:
+            project_path: Optional filter by project
+            limit: Maximum number of results
+            since: Optional datetime cutoff (only return sessions after this time)
         """
         if self._init_central() and self._postgres:
             try:
@@ -303,6 +309,7 @@ class Storage:
                 return self._postgres.get_recent_sessions(
                     project_id=project_id,
                     limit=limit,
+                    since=since,
                 )
             except Exception as e:
                 log.error(f"Central get_recent_sessions failed: {e}")
@@ -316,6 +323,7 @@ class Storage:
             return local_store.get_recent_sessions(
                 project_id=project_id,
                 limit=limit,
+                since=since,
             )
         except Exception as e:
             log.error(f"Local get_recent_sessions failed: {e}")

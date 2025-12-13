@@ -33,13 +33,25 @@ def handle_recent(params: dict, storage=None) -> dict:
     """Get recent conversation sessions.
 
     Tries central Postgres first, falls back to local SQLite, then local metadata files.
+
+    Args:
+        params: dict with 'limit' (int) and optional 'days' (int) to filter by time
+        storage: Storage instance
     """
+    from datetime import datetime, timedelta
+
     limit = params.get("limit", 10)
+    days = params.get("days")  # Optional: filter to last N days
+
+    # Calculate cutoff time if days specified
+    cutoff_time = None
+    if days is not None and days > 0:
+        cutoff_time = datetime.now() - timedelta(days=days)
 
     # Try storage (central or local SQLite via storage abstraction)
     if storage:
         try:
-            sessions = storage.get_recent_sessions(limit=limit)
+            sessions = storage.get_recent_sessions(limit=limit, since=cutoff_time)
             if sessions:
                 # Group by project
                 projects = {}
@@ -55,11 +67,14 @@ def handle_recent(params: dict, storage=None) -> dict:
                     })
 
                 source = "central" if storage.using_central else "local_sqlite"
-                return {
+                result = {
                     "projects": [{"path": k, "sessions": v} for k, v in projects.items()],
                     "total": len(sessions),
                     "source": source
                 }
+                if days:
+                    result["filtered_to_days"] = days
+                return result
         except Exception as e:
             log(f"Storage recent query failed: {e}")
 
@@ -69,7 +84,16 @@ def handle_recent(params: dict, storage=None) -> dict:
 
     sessions = []
     if metadata_path.exists():
-        for meta_file in sorted(metadata_path.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)[:limit]:
+        for meta_file in sorted(metadata_path.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True):
+            # Check time filter first (before limit)
+            if cutoff_time:
+                file_mtime = datetime.fromtimestamp(meta_file.stat().st_mtime)
+                if file_mtime < cutoff_time:
+                    continue  # Skip files older than cutoff
+
+            if len(sessions) >= limit:
+                break
+
             try:
                 meta = json.loads(meta_file.read_text())
                 raw_path = meta.get("project_path", "")
@@ -90,11 +114,14 @@ def handle_recent(params: dict, storage=None) -> dict:
             projects[project] = []
         projects[project].append(session)
 
-    return {
+    result = {
         "projects": [{"path": k, "sessions": v} for k, v in projects.items()],
         "total": len(sessions),
         "source": "local"
     }
+    if days:
+        result["filtered_to_days"] = days
+    return result
 
 
 def handle_init(params: dict, collection, storage=None) -> dict:
