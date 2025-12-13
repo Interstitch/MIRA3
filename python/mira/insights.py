@@ -109,49 +109,154 @@ def normalize_error_message(error_msg: str) -> str:
     """
     Normalize an error message for comparison.
 
-    Removes line numbers, file paths, memory addresses, etc.
+    Removes variable parts (line numbers, file paths, memory addresses, etc.)
+    to allow matching similar errors across different contexts.
     """
     normalized = error_msg
 
-    # Remove file paths
-    normalized = re.sub(r'(?:/[^\s:]+)+\.[a-z]+', '<FILE>', normalized)
-    normalized = re.sub(r'[A-Z]:\\[^\s:]+', '<FILE>', normalized)
+    # Remove file paths (Unix and Windows) - FIRST to avoid path:line confusion
+    normalized = re.sub(r'(?:/[^\s:,\)]+)+(?:\.[a-zA-Z0-9]+)?', '<FILE>', normalized)
+    normalized = re.sub(r'[A-Z]:\\[^\s:,\)]+', '<FILE>', normalized)
+    # Go-style paths: package/subpackage/file.go
+    normalized = re.sub(r'\b[a-z][a-z0-9_]*(?:/[a-z][a-z0-9_]*)+\.go\b', '<FILE>', normalized)
 
-    # Remove line numbers
+    # Remove timestamps BEFORE line numbers (timestamps have :NN:NN that would match line patterns)
+    normalized = re.sub(r'\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?', '<TIME>', normalized)
+    normalized = re.sub(r'\d{2}/\d{2}/\d{4}\s+\d{2}:\d{2}:\d{2}', '<TIME>', normalized)
+    normalized = re.sub(r'\[\d{2}:\d{2}:\d{2}\]', '[<TIME>]', normalized)
+
+    # Remove port numbers BEFORE generic line numbers (ports are :NNNN at end of hostnames)
+    normalized = re.sub(r'(localhost|[\w.-]+):(\d{4,5})\b', r'\1:<PORT>', normalized)
+
+    # Remove IP addresses (before line numbers to avoid IP:port confusion)
+    normalized = re.sub(r'\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b', '<IP>', normalized)
+
+    # Remove line/column numbers in various formats
     normalized = re.sub(r'line \d+', 'line <N>', normalized, flags=re.IGNORECASE)
+    normalized = re.sub(r':\d+:\d+:\d+', ':<N>:<N>:<N>', normalized)  # file:line:col:pos
     normalized = re.sub(r':\d+:\d+', ':<N>:<N>', normalized)
-    normalized = re.sub(r':\d+', ':<N>', normalized)
+    normalized = re.sub(r':\d+\b', ':<N>', normalized)
+    normalized = re.sub(r'\bLine \d+\b', 'Line <N>', normalized)
+    normalized = re.sub(r'\bline=\d+', 'line=<N>', normalized)
+    normalized = re.sub(r'\brow \d+', 'row <N>', normalized, flags=re.IGNORECASE)
+    normalized = re.sub(r'\bcolumn \d+', 'column <N>', normalized, flags=re.IGNORECASE)
 
-    # Remove memory addresses
+    # Remove memory addresses (various formats)
     normalized = re.sub(r'0x[0-9a-fA-F]+', '<ADDR>', normalized)
+    normalized = re.sub(r'\bat [0-9a-fA-F]{8,16}\b', 'at <ADDR>', normalized)
 
     # Remove UUIDs
     normalized = re.sub(r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}', '<UUID>', normalized, flags=re.IGNORECASE)
 
-    # Remove timestamps
-    normalized = re.sub(r'\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}', '<TIME>', normalized)
+    # Remove process/thread IDs
+    normalized = re.sub(r'\bpid[=: ]\d+', 'pid=<N>', normalized, flags=re.IGNORECASE)
+    normalized = re.sub(r'\btid[=: ]\d+', 'tid=<N>', normalized, flags=re.IGNORECASE)
+    normalized = re.sub(r'\bthread[- ]?\d+', 'thread-<N>', normalized, flags=re.IGNORECASE)
+    normalized = re.sub(r'\bgoroutine \d+', 'goroutine <N>', normalized)
 
-    # Remove specific variable values in quotes
+    # Remove error codes that are variable
+    normalized = re.sub(r'\berror code[=: ]\d+', 'error code=<N>', normalized, flags=re.IGNORECASE)
+    normalized = re.sub(r'\berrno[=: ]\d+', 'errno=<N>', normalized, flags=re.IGNORECASE)
+    normalized = re.sub(r'\bstatus[=: ]\d{3}\b', 'status=<N>', normalized, flags=re.IGNORECASE)
+
+    # Remove specific variable values in quotes (long values only)
     normalized = re.sub(r"'[^']{20,}'", "'<VALUE>'", normalized)
     normalized = re.sub(r'"[^"]{20,}"', '"<VALUE>"', normalized)
+
+    # Remove request/transaction IDs
+    normalized = re.sub(r'\brequest[_-]?id[=: ][^\s,]+', 'request_id=<ID>', normalized, flags=re.IGNORECASE)
+    normalized = re.sub(r'\btx[_-]?id[=: ][^\s,]+', 'tx_id=<ID>', normalized, flags=re.IGNORECASE)
+
+    # Remove Java-style package paths but preserve class names
+    normalized = re.sub(r'(?:at )?(?:[a-z][a-z0-9_]*\.)+([A-Z][a-zA-Z0-9_]*)', r'\1', normalized)
 
     return normalized.strip()
 
 
 def extract_error_type(error_msg: str) -> Optional[str]:
-    """Extract the error type from an error message."""
+    """
+    Extract the error type from an error message.
+
+    Supports many languages and formats:
+    - Python: TypeError, ValueError, Exception
+    - JavaScript: TypeError, ReferenceError, SyntaxError
+    - Java: NullPointerException, IOException
+    - Go: panic, fatal error
+    - Rust: error[E####]
+    - Ruby: NoMethodError, ArgumentError
+    - And many more
+    """
+    # Ordered by specificity - most specific patterns first
     patterns = [
-        r'^(\w+Error):',
-        r'^(\w+Exception):',
-        r'^(\w+Warning):',
-        r'(\w+Error)\s*:',
-        r'(\w+Exception)\s*:',
-        r'(TypeError|ReferenceError|SyntaxError|ValueError|KeyError|AttributeError|ImportError|ModuleNotFoundError)',
-        r'(Error|Exception|Panic|Fatal|Failed)',
+        # Python/Ruby/JS style - TypeNameError or TypeNameException
+        r'^((?:[A-Z][a-z]+)+Error)(?:\s*:|\s*\()',
+        r'^((?:[A-Z][a-z]+)+Exception)(?:\s*:|\s*\()',
+        r'((?:[A-Z][a-z]+)+Error)\s*:',
+        r'((?:[A-Z][a-z]+)+Exception)\s*:',
+
+        # Go errors
+        r'\b(panic):\s',
+        r'^(fatal error):\s',
+        r'\b(runtime error):\s',
+
+        # Rust errors with codes
+        r'(error\[E\d{4}\])',
+
+        # Java/JVM specific
+        r'(java\.lang\.\w+Exception)',
+        r'(java\.io\.\w+Exception)',
+        r'(java\.util\.\w+Exception)',
+        r'(kotlin\.\w+Exception)',
+        r'(scala\.\w+Error)',
+
+        # C/C++ specific
+        r'\b(segmentation fault)',
+        r'\b(SIGSEGV|SIGABRT|SIGBUS|SIGFPE)',
+        r'\b(undefined reference)',
+        r'\b(core dumped)',
+
+        # Database errors
+        r'\b(SQLITE_\w+)',
+        r'\b(ERROR \d{4,5})',  # MySQL error codes
+        r'(MongoError|MongoServerError)',
+        r'(PG::Error|PGError)',
+
+        # Build tool errors
+        r'(BUILD FAILURE)',
+        r'(FAILURE: Build failed)',
+        r'(CMake Error)',
+        r'(error: linker)',
+
+        # Package manager errors
+        r'(npm ERR!)',
+        r'(yarn error)',
+        r'(ERR_PNPM_\w+)',
+        r'(pip\._internal\.exceptions\.\w+)',
+
+        # TypeScript errors
+        r'(error TS\d{4})',
+
+        # ESLint/linter errors
+        r'(error\s+[a-z-]+/[a-z-]+)',  # eslint rule format
+
+        # HTTP errors
+        r'\b(HTTP [45]\d{2})',
+        r'\b([45]\d{2} \w+)',  # "404 Not Found"
+
+        # Cloud/infra errors
+        r'(Error from server)',
+        r'(AccessDenied|AccessDeniedException)',
+        r'(ResourceNotFoundException)',
+
+        # Generic fallbacks (less specific, checked last)
+        r'^(Error):\s+[A-Z]',
+        r'^(FATAL|Fatal):\s',
+        r'^(FAILED|Failed):\s',
+        r'\b(Error|Exception|Panic|Fatal|Failed)\b',
     ]
 
     for pattern in patterns:
-        match = re.search(pattern, error_msg)
+        match = re.search(pattern, error_msg, re.IGNORECASE if 'IGNORECASE' in pattern else 0)
         if match:
             return match.group(1)
 
@@ -167,6 +272,257 @@ def compute_error_signature(error_msg: str) -> str:
     return f"{error_type}:{msg_hash}"
 
 
+# =============================================================================
+# ERROR PATTERN DEFINITIONS - Organized by confidence tier
+# =============================================================================
+
+# Tier 1: HIGH CONFIDENCE (0.95) - Very specific formats, almost no false positives
+# These have unique syntax that doesn't appear in normal prose
+ERROR_PATTERNS_TIER1 = [
+    # Python tracebacks - unmistakable format
+    (r'(Traceback \(most recent call last\):[\s\S]*?(?:\w+Error|\w+Exception):[^\n]+)', 'python_traceback'),
+
+    # Rust errors with codes - error[E0001]: message
+    (r'(error\[E\d{4}\]:[^\n]{10,200})', 'rust_error'),
+
+    # TypeScript errors - error TS2345: message
+    (r'(error TS\d{4}:[^\n]{10,200})', 'typescript_error'),
+
+    # Go panic with goroutine dump
+    (r'(panic:.*?goroutine \d+[^\n]*(?:\n[^\n]*){1,5})', 'go_panic'),
+
+    # Java/JVM stack traces - "Exception in thread" or "at com.package.Class"
+    (r'((?:Exception in thread "[^"]+"|Caused by:)\s+[\w.]+(?:Exception|Error):[^\n]*(?:\n\s+at [^\n]+){1,5})', 'java_stacktrace'),
+
+    # MySQL error codes - ERROR 1045 (28000)
+    (r'(ERROR \d{4} \(\d+\)[^\n]{10,150})', 'mysql_error'),
+
+    # PostgreSQL errors - ERROR: message / FATAL: message
+    (r'((?:ERROR|FATAL|PANIC):\s{2}[^\n]{10,200})', 'postgres_error'),
+
+    # Docker daemon errors - unmistakable prefix
+    (r'(Error response from daemon:[^\n]{10,200})', 'docker_error'),
+
+    # Kubernetes errors
+    (r'(Error from server \([^)]+\):[^\n]{10,200})', 'k8s_error'),
+
+    # CMake errors with specific format
+    (r'(CMake Error at [^\n]+:\d+[^\n]*(?:\n[^\n]{2,})*)', 'cmake_error'),
+
+    # Make errors - make: *** [target] Error N
+    (r'(make: \*\*\* \[[^\]]+\] Error \d+)', 'make_error'),
+
+    # Linker errors - undefined reference to `symbol'
+    (r"(undefined reference to [`'][^'`]+[`'][^\n]*)", 'linker_error'),
+
+    # Segmentation fault with signal info
+    (r'((?:Segmentation fault|SIGSEGV|SIGABRT|SIGBUS)(?:\s*\([^)]+\))?(?:[^\n]*core dumped)?)', 'segfault'),
+]
+
+# Tier 2: GOOD CONFIDENCE (0.85) - Specific prefixes with content requirements
+ERROR_PATTERNS_TIER2 = [
+    # Python-style errors - TypeNameError: message (requires content)
+    (r'((?:[A-Z][a-z]+)+Error:\s+[^\n]{15,200})', 'python_error'),
+    (r'((?:[A-Z][a-z]+)+Exception:\s+[^\n]{15,200})', 'python_exception'),
+
+    # npm errors with content
+    (r'(npm ERR! [A-Z][^\n]{15,150})', 'npm_error'),
+
+    # yarn errors
+    (r'(error An unexpected error occurred:[^\n]{10,150})', 'yarn_error'),
+
+    # pnpm errors with specific prefix
+    (r'(ERR_PNPM_[A-Z_]+[^\n]{10,150})', 'pnpm_error'),
+
+    # pip errors
+    (r'(ERROR: (?:Could not|Cannot|Failed to|No matching)[^\n]{10,150})', 'pip_error'),
+
+    # Git fatal errors
+    (r'(fatal: [^\n]{15,150})', 'git_fatal'),
+
+    # Git errors (less specific than fatal)
+    (r'(error: [a-z][^\n]{15,150})', 'git_error'),
+
+    # Gradle build failures
+    (r'(FAILURE: Build failed with an exception[^\n]*(?:\n[*>\s][^\n]*){1,5})', 'gradle_error'),
+
+    # Maven build failures
+    (r'(\[ERROR\] (?:Failed to execute|Could not|Cannot)[^\n]{10,150})', 'maven_error'),
+
+    # Ruby errors
+    (r'((?:NoMethodError|ArgumentError|NameError|RuntimeError|LoadError):[^\n]{10,150})', 'ruby_error'),
+
+    # Elixir/Erlang errors
+    (r'(\*\* \((?:\w+Error|\w+Exception)\)[^\n]{10,150})', 'elixir_error'),
+
+    # PHP errors
+    (r'((?:Fatal error|Parse error|Warning):\s+[^\n]{15,150}\s+in\s+[^\n]+)', 'php_error'),
+
+    # C# / .NET errors
+    (r'(System\.\w+Exception:[^\n]{10,150})', 'dotnet_error'),
+    (r'(Unhandled exception\.[^\n]{10,150})', 'dotnet_unhandled'),
+
+    # Swift/Objective-C
+    (r'(Fatal error:[^\n]{15,150})', 'swift_fatal'),
+    (r'(NSException[^\n]{10,150})', 'objc_exception'),
+
+    # Terraform errors
+    (r'(Error: (?:Invalid|Cannot|Failed|Missing|Error)[^\n]{15,150})', 'terraform_error'),
+
+    # Ansible errors
+    (r'(fatal: \[[^\]]+\]:[^\n]{10,150})', 'ansible_fatal'),
+
+    # Shell/Bash errors
+    (r'(bash: [^\n]{10,100}: (?:command not found|No such file|Permission denied))', 'bash_error'),
+    (r'(zsh: [^\n]{10,100}: (?:command not found|no such file|permission denied))', 'zsh_error'),
+
+    # SSL/TLS errors
+    (r'(SSL[_: ](?:error|Error|ERROR)[^\n]{10,150})', 'ssl_error'),
+    (r'(certificate verify failed[^\n]{0,100})', 'cert_error'),
+
+    # CORS errors
+    (r'((?:Access to|Cross-Origin|CORS)[^\n]*(?:blocked|denied|policy)[^\n]{10,100})', 'cors_error'),
+
+    # MongoDB errors
+    (r'(MongoError:[^\n]{10,150})', 'mongo_error'),
+    (r'(MongoServerError:[^\n]{10,150})', 'mongo_server_error'),
+
+    # Redis errors
+    (r'((?:WRONGTYPE|ERR|NOSCRIPT)[^\n]{10,100})', 'redis_error'),
+
+    # AWS errors
+    (r'(An error occurred \([^)]+\)[^\n]{10,150})', 'aws_error'),
+    (r'(AccessDenied(?:Exception)?:[^\n]{10,150})', 'aws_access_denied'),
+]
+
+# Tier 3: MODERATE CONFIDENCE (0.70) - More generic patterns, require additional validation
+ERROR_PATTERNS_TIER3 = [
+    # Generic Error: with capital letter start and minimum content
+    (r'(Error: [A-Z][^\n]{20,150})', 'generic_error'),
+
+    # Failed: patterns
+    (r'((?:FAILED|Failed):\s+[^\n]{15,150})', 'failed_status'),
+
+    # Build failures (generic)
+    (r'(Build failed[^\n]{10,100})', 'build_failed'),
+
+    # Connection errors
+    (r'((?:Connection|Connect) (?:refused|failed|timed out|reset)[^\n]{0,100})', 'connection_error'),
+
+    # Permission errors
+    (r'(Permission denied[^\n]{0,100})', 'permission_error'),
+    (r'(Access denied[^\n]{0,100})', 'access_denied'),
+
+    # Not found errors
+    (r'((?:File|Module|Package|Command|Resource) not found[^\n]{0,100})', 'not_found'),
+
+    # Timeout errors
+    (r'((?:Timeout|timed out)[^\n]{10,100})', 'timeout_error'),
+
+    # Out of memory
+    (r'((?:Out of memory|OOM|Cannot allocate memory)[^\n]{0,100})', 'oom_error'),
+
+    # Assertion failures
+    (r'((?:Assertion|Assert) failed[^\n]{10,150})', 'assertion_failed'),
+    (r'(AssertionError:[^\n]{10,150})', 'assertion_error'),
+]
+
+# Combine all patterns with their confidence levels
+ERROR_PATTERNS_ALL = (
+    [(p, t, 0.95) for p, t in ERROR_PATTERNS_TIER1] +
+    [(p, t, 0.85) for p, t in ERROR_PATTERNS_TIER2] +
+    [(p, t, 0.70) for p, t in ERROR_PATTERNS_TIER3]
+)
+
+
+def _is_error_false_positive(error_text: str, full_content: str) -> bool:
+    """
+    Check if an error match is likely a false positive.
+
+    Returns True if the match should be rejected.
+    """
+    error_lower = error_text.lower().strip()
+    content_lower = full_content.lower()
+
+    # Too short to be a real error
+    if len(error_text.strip()) < 10:
+        return True
+
+    # Markdown headers that contain error-like words
+    if re.match(r'^#+\s', error_text.strip()):
+        return True
+
+    # Code comments explaining error handling
+    if re.match(r'^\s*(//|#|/\*|\*|<!--)', error_text.strip()):
+        return True
+
+    # Documentation patterns
+    doc_patterns = [
+        r'^\s*\*\s',  # JSDoc
+        r'^\s*:param',  # Python docstring
+        r'^\s*@throws',  # Java doc
+        r'^\s*@raises',  # Python doc
+        r'^\s*raises:',  # Python docstring
+        r'returns?\s+an?\s+error',  # "returns an error"
+        r'throws?\s+an?\s+error',  # "throws an error"
+        r'error\s+handling',  # discussion of error handling
+        r'error\s+message',  # discussing error messages
+    ]
+    for pattern in doc_patterns:
+        if re.search(pattern, error_lower):
+            return True
+
+    # Example/sample indicators - check if error appears right after example words
+    # No need to require "error" in pattern since the error text follows context_before
+    example_patterns = [
+        r'\bfor example\b',
+        r'\bexample[,:]',
+        r'\bsample\b',
+        r'\bsuch as\b',
+        r'\blike\b.{0,10}$',  # "like" near end of context (close to error)
+        r'for instance',
+        r'e\.g\.',
+        r'you might see',
+        r'you could get',
+    ]
+    # Check if it's in an example context (within 50 chars before)
+    error_pos = content_lower.find(error_lower[:30])
+    if error_pos > 0:
+        context_before = content_lower[max(0, error_pos - 50):error_pos]
+        for pattern in example_patterns:
+            if re.search(pattern, context_before):
+                return True
+
+    # Variable/function names that happen to contain "error"
+    # Check ORIGINAL case - real error types are CamelCase (TypeError, ValueError)
+    # while variables are snake_case (my_error, handle_error) or start lowercase
+    error_stripped = error_text.strip()
+    if re.match(r'^[a-z_]+error[a-z_]*\s*[=(]', error_stripped):  # snake_case variable assignment
+        return True
+    if re.match(r'^[a-z]+Error[a-zA-Z]*\s*[=(]', error_stripped):  # camelCase function call
+        return True
+
+    # Import statements
+    if re.match(r'^\s*(import|from|require|use)\b', error_text.strip()):
+        return True
+
+    # Conditional/test patterns (checking for errors, not actual errors)
+    check_patterns = [
+        r'if.*error',
+        r'when.*error',
+        r'catch.*error',
+        r'expect.*error',
+        r'assert.*error',
+        r'should.*error',
+        r'test.*error',
+    ]
+    for pattern in check_patterns:
+        if re.match(pattern, error_lower):
+            return True
+
+    return False
+
+
 def extract_errors_from_conversation(
     conversation: dict,
     session_id: str,
@@ -176,9 +532,15 @@ def extract_errors_from_conversation(
     """
     Extract error patterns and solutions from a conversation.
 
-    Looks for:
-    - Error messages in user messages
-    - Solutions in subsequent assistant messages
+    Uses tiered pattern matching:
+    - Tier 1 (0.95): Very specific formats (tracebacks, error codes)
+    - Tier 2 (0.85): Language-specific patterns with content requirements
+    - Tier 3 (0.70): Generic patterns with additional validation
+
+    Applies false positive detection to filter out:
+    - Markdown headers, code comments, documentation
+    - Example/sample mentions
+    - Error handling code (not actual errors)
 
     Uses central Postgres if available, falls back to local SQLite.
     """
@@ -207,22 +569,7 @@ def extract_errors_from_conversation(
     now = datetime.now().isoformat()
 
     errors_found = 0
-
-    # CONSERVATIVE error patterns - only match actual errors, not markdown headers
-    error_patterns = [
-        # Python tracebacks and errors - require specific error format
-        r'(Traceback \(most recent call last\):[^\n]*(?:\n[^\n]*){1,10})',
-        r'((?:\w+Error|\w+Exception):\s+[^\n]{10,200})',  # Require content after colon
-        # JavaScript/Node errors
-        r'(npm ERR! [A-Z][^\n]{10,150})',  # npm errors with content
-        r'(TypeError:|ReferenceError:|SyntaxError:)\s+([^\n]{10,150})',
-        # Rust errors
-        r'(error\[E\d{4}\]:[^\n]{10,150})',  # Rust errors with code
-        # Git errors
-        r'(fatal: [^\n]{10,150})',
-        # Generic but require specific formats
-        r'(Error: [A-Z][^\n]{15,150})',  # Error with capital letter start and content
-    ]
+    seen_signatures = set()  # Dedupe within this conversation
 
     try:
         for i, msg in enumerate(messages):
@@ -236,83 +583,114 @@ def extract_errors_from_conversation(
                     if isinstance(item, dict) and item.get('type') == 'text'
                 )
 
-            for pattern in error_patterns:
-                matches = re.findall(pattern, content, re.IGNORECASE)
-                for error_match in matches:
-                    error_msg = error_match.strip()
-                    if len(error_msg) < 10:
-                        continue
+            # Skip very short messages
+            if len(content) < 20:
+                continue
 
-                    signature = compute_error_signature(error_msg)
-                    error_type = extract_error_type(error_msg)
+            # Try each pattern tier, collecting matches with confidence
+            for pattern, error_category, confidence in ERROR_PATTERNS_ALL:
+                try:
+                    # Use DOTALL for multiline patterns (tracebacks)
+                    flags = re.DOTALL if r'[\s\S]' in pattern else 0
+                    matches = re.findall(pattern, content, flags)
 
-                    solution_summary = None
-                    if i + 1 < len(messages):
-                        next_msg = messages[i + 1]
-                        if next_msg.get('role') == 'assistant':
-                            solution_details = next_msg.get('content', '')
-                            if isinstance(solution_details, list):
-                                solution_details = ' '.join(
-                                    item.get('text', '') for item in solution_details
-                                    if isinstance(item, dict) and item.get('type') == 'text'
-                                )
-                            solution_summary = _extract_solution_summary(solution_details)
-
-                    # Store in central Postgres
-                    if use_central and project_id:
-                        try:
-                            storage.postgres.upsert_error_pattern(
-                                project_id=project_id,
-                                signature=signature,
-                                error_type=error_type,
-                                error_text=error_msg[:500],
-                                solution=solution_summary,
-                            )
-                            errors_found += 1
-                            continue
-                        except Exception as e:
-                            log(f"Central error storage failed: {e}")
-
-                    # Fallback to local SQLite
-                    normalized = normalize_error_message(error_msg)
-
-                    def upsert_error(cursor):
-                        cursor.execute("""
-                            SELECT id, occurrence_count, source_sessions FROM error_patterns
-                            WHERE error_signature = ?
-                        """, (signature,))
-
-                        row = cursor.fetchone()
-                        if row:
-                            pattern_id, count, sources = row
-                            sources_list = json.loads(sources) if sources else []
-                            if session_id not in sources_list:
-                                sources_list.append(session_id)
-
-                            cursor.execute("""
-                                UPDATE error_patterns
-                                SET occurrence_count = ?, last_seen = ?, source_sessions = ?,
-                                    solution_summary = COALESCE(?, solution_summary)
-                                WHERE id = ?
-                            """, (count + 1, now, json.dumps(sources_list[-10:]),
-                                  solution_summary, pattern_id))
-                            return 0
+                    for error_match in matches:
+                        # Handle tuple matches (from groups)
+                        if isinstance(error_match, tuple):
+                            error_msg = error_match[0].strip()
                         else:
-                            cursor.execute("""
-                                INSERT INTO error_patterns
-                                (error_signature, error_type, error_message, normalized_message,
-                                 solution_summary, first_seen, last_seen, source_sessions)
-                                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                            """, (signature, error_type, error_msg[:500], normalized[:500],
-                                  solution_summary, now, now, json.dumps([session_id])))
+                            error_msg = error_match.strip()
 
-                            cursor.execute("""
-                                INSERT INTO errors_fts(rowid, error_message, solution_summary, file_context)
-                                VALUES (last_insert_rowid(), ?, ?, ?)
-                            """, (error_msg[:500], solution_summary or '', ''))
-                            return 1
+                        # Skip if too short
+                        if len(error_msg) < 10:
+                            continue
 
-                    errors_found += db.execute_write_func(INSIGHTS_DB, upsert_error)
+                        # Apply false positive detection
+                        if _is_error_false_positive(error_msg, content):
+                            continue
+
+                        # Compute signature for deduplication
+                        signature = compute_error_signature(error_msg)
+
+                        # Skip if already seen in this conversation
+                        if signature in seen_signatures:
+                            continue
+                        seen_signatures.add(signature)
+
+                        error_type = extract_error_type(error_msg)
+
+                        # Extract solution from next assistant message
+                        solution_summary = None
+                        if i + 1 < len(messages):
+                            next_msg = messages[i + 1]
+                            if next_msg.get('role') == 'assistant':
+                                solution_details = next_msg.get('content', '')
+                                if isinstance(solution_details, list):
+                                    solution_details = ' '.join(
+                                        item.get('text', '') for item in solution_details
+                                        if isinstance(item, dict) and item.get('type') == 'text'
+                                    )
+                                solution_summary = _extract_solution_summary(solution_details)
+
+                        # Store in central Postgres
+                        if use_central and project_id:
+                            try:
+                                storage.postgres.upsert_error_pattern(
+                                    project_id=project_id,
+                                    signature=signature,
+                                    error_type=error_type,
+                                    error_text=error_msg[:500],
+                                    solution=solution_summary,
+                                )
+                                errors_found += 1
+                                continue
+                            except Exception as e:
+                                log(f"Central error storage failed: {e}")
+
+                        # Fallback to local SQLite
+                        normalized = normalize_error_message(error_msg)
+
+                        def upsert_error(cursor):
+                            cursor.execute("""
+                                SELECT id, occurrence_count, source_sessions FROM error_patterns
+                                WHERE error_signature = ?
+                            """, (signature,))
+
+                            row = cursor.fetchone()
+                            if row:
+                                pattern_id, count, sources = row
+                                sources_list = json.loads(sources) if sources else []
+                                if session_id not in sources_list:
+                                    sources_list.append(session_id)
+
+                                cursor.execute("""
+                                    UPDATE error_patterns
+                                    SET occurrence_count = ?, last_seen = ?, source_sessions = ?,
+                                        solution_summary = COALESCE(?, solution_summary)
+                                    WHERE id = ?
+                                """, (count + 1, now, json.dumps(sources_list[-10:]),
+                                      solution_summary, pattern_id))
+                                return 0
+                            else:
+                                cursor.execute("""
+                                    INSERT INTO error_patterns
+                                    (error_signature, error_type, error_message, normalized_message,
+                                     solution_summary, first_seen, last_seen, source_sessions)
+                                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                                """, (signature, error_type, error_msg[:500], normalized[:500],
+                                      solution_summary, now, now, json.dumps([session_id])))
+
+                                cursor.execute("""
+                                    INSERT INTO errors_fts(rowid, error_message, solution_summary, file_context)
+                                    VALUES (last_insert_rowid(), ?, ?, ?)
+                                """, (error_msg[:500], solution_summary or '', ''))
+                                return 1
+
+                        errors_found += db.execute_write_func(INSIGHTS_DB, upsert_error)
+
+                except Exception as pattern_error:
+                    # Log but continue with other patterns
+                    pass
 
     except Exception as e:
         log(f"Error extracting error patterns: {e}")
@@ -325,30 +703,84 @@ def _extract_solution_summary(solution_text: str) -> Optional[str]:
 
     Only extracts if the response actually contains solution-like content.
     Returns None if no clear solution is found.
+
+    Uses tiered patterns:
+    - Direct fix statements ("The fix is...", "To fix this...")
+    - Action descriptions ("I changed...", "Updated the...")
+    - Root cause with fix ("The issue was... so I...")
+    - Command/code fixes ("Run:", "Try:", "Install:")
     """
     if not solution_text or len(solution_text) < 50:
         return None
 
-    # Must contain solution-indicating words
-    solution_indicators = ['fix', 'solve', 'resolv', 'chang', 'updat', 'replac', 'add', 'remov', 'correct']
+    # Expanded solution-indicating words
+    solution_indicators = [
+        'fix', 'solve', 'resolv', 'chang', 'updat', 'replac', 'add', 'remov',
+        'correct', 'install', 'upgrad', 'downgrad', 'set', 'configur', 'modif',
+        'adjust', 'run', 'execut', 'creat', 'delet', 'restart', 'reload',
+        'clear', 'reset', 'rebuild', 'recompil', 'missing', 'need to', 'should',
+    ]
     text_lower = solution_text.lower()
     if not any(ind in text_lower for ind in solution_indicators):
         return None
 
-    # CONSERVATIVE solution patterns - require clear fix language
-    solution_patterns = [
-        r"(?:The (?:fix|solution) (?:is|was))[:\s]+([^.!?\n]{20,200}[.!?])",
-        r"(?:I (?:fixed|resolved|corrected) (?:this|it|the error) by)[:\s]+([^.!?\n]{20,200}[.!?])",
-        r"(?:To fix this)[,:\s]+([^.!?\n]{20,200}[.!?])",
-        r"(?:The (?:issue|problem) was)[:\s]+([^.!?\n]{20,200}[.!?])",
-        r"(?:Changed|Updated|Fixed|Replaced|Added|Removed)\s+([^.!?\n]{20,150}[.!?])",
+    # Tier 1: Direct fix statements (high confidence)
+    direct_fix_patterns = [
+        r"(?:The (?:fix|solution|answer) (?:is|was))[:\s]+([^.!?\n]{20,200}[.!?])",
+        r"(?:To (?:fix|solve|resolve) (?:this|the|it))[,:\s]+([^.!?\n]{20,200}[.!?])",
+        r"(?:The (?:issue|problem|error|bug) (?:is|was))[:\s]+([^.!?\n]{20,200}[.!?])",
+        r"(?:This (?:happens|occurs|is caused) (?:because|when|due to))[:\s]+([^.!?\n]{20,200}[.!?])",
     ]
 
-    for pattern in solution_patterns:
+    # Tier 2: Action descriptions
+    action_patterns = [
+        r"(?:I (?:fixed|resolved|corrected|changed|updated|modified) (?:this|it|the))[:\s]+([^.!?\n]{20,200}[.!?])",
+        r"(?:Changed|Updated|Fixed|Replaced|Added|Removed|Modified|Deleted|Created)\s+([^.!?\n]{20,150}[.!?])",
+        r"(?:You (?:need|should|must|can) (?:to )?(?:change|update|fix|add|remove|install))\s+([^.!?\n]{15,150}[.!?])",
+        r"(?:(?:Try|Run|Execute|Install|Use))[:\s]+([^.!?\n`]{15,150})",
+    ]
+
+    # Tier 3: Root cause explanations with solutions
+    root_cause_patterns = [
+        r"(?:This (?:error|issue|problem) (?:means|indicates|suggests))[:\s]+([^.!?\n]{20,200}[.!?])",
+        r"(?:The (?:root cause|reason|cause) (?:is|was))[:\s]+([^.!?\n]{20,200}[.!?])",
+        r"(?:This (?:is|was) (?:because|caused by|due to))[:\s]+([^.!?\n]{20,200}[.!?])",
+    ]
+
+    # Tier 4: Command/code fixes (extract first actionable line)
+    command_patterns = [
+        r"```(?:bash|sh|shell|console)?\n([^\n`]{10,100})",  # First line of code block
+        r"(?:Run|Execute|Try|Install|Use):\s*`([^`]{10,100})`",  # Inline code after action word
+        r"(?:Run|Execute|Try|Install|Use):\s*\n```\s*\n?([^\n`]{10,100})",  # Code block after action
+    ]
+
+    # Language-specific fix patterns
+    language_fix_patterns = [
+        # npm/yarn/pnpm
+        r"(?:npm|yarn|pnpm) (?:install|add|update|remove|run)\s+([^\n]{10,100})",
+        # pip
+        r"pip (?:install|uninstall|upgrade)\s+([^\n]{10,100})",
+        # apt/brew/yum
+        r"(?:apt|brew|yum|dnf) (?:install|update|remove)\s+([^\n]{10,100})",
+        # git
+        r"git (?:checkout|reset|revert|pull|fetch)\s+([^\n]{10,100})",
+        # docker
+        r"docker (?:run|pull|build|compose)\s+([^\n]{10,100})",
+        # cargo
+        r"cargo (?:add|install|update|build)\s+([^\n]{10,100})",
+    ]
+
+    # Try each tier in order
+    all_patterns = direct_fix_patterns + action_patterns + root_cause_patterns + command_patterns + language_fix_patterns
+
+    for pattern in all_patterns:
         match = re.search(pattern, solution_text, re.IGNORECASE)
         if match:
             summary = match.group(1).strip()
-            if 20 < len(summary) < 200:
+            # Clean up: remove leading/trailing punctuation noise
+            summary = re.sub(r'^[:\-\s]+', '', summary)
+            summary = re.sub(r'[:\-\s]+$', '', summary)
+            if 15 < len(summary) < 250:
                 return summary
 
     # Don't fall back to arbitrary sentences - too noisy

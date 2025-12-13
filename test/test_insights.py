@@ -439,3 +439,279 @@ class TestExplicitDecisionRecording:
         count = extract_decisions_from_conversation(conversation, 'assistant-decision')
         # Should extract but with lower confidence (0.75)
         assert count >= 0
+
+
+class TestExpandedErrorPatterns:
+    """Test the expanded error pattern recognition."""
+
+    def setup_method(self):
+        """Set up test fixtures."""
+        self.temp_dir = tempfile.mkdtemp()
+        self.original_cwd = os.getcwd()
+        os.chdir(self.temp_dir)
+        mira_path = Path(self.temp_dir) / '.mira'
+        mira_path.mkdir(exist_ok=True)
+        init_insights_db()
+
+    def teardown_method(self):
+        """Clean up test fixtures."""
+        shutdown_db_manager()
+        os.chdir(self.original_cwd)
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def test_python_traceback_extraction(self):
+        """Test extraction of Python tracebacks."""
+        conversation = {
+            'messages': [
+                {'role': 'user', 'content': '''I got this error:
+Traceback (most recent call last):
+  File "app.py", line 42, in main
+    result = process_data(data)
+  File "utils.py", line 15, in process_data
+    return data['key']
+KeyError: 'key'
+'''},
+                {'role': 'assistant', 'content': 'The fix is to check if the key exists before accessing it.'},
+            ]
+        }
+        count = extract_errors_from_conversation(conversation, 'traceback-test')
+        assert count >= 1
+
+    def test_rust_error_extraction(self):
+        """Test extraction of Rust errors with codes."""
+        conversation = {
+            'messages': [
+                {'role': 'user', 'content': 'error[E0382]: borrow of moved value: `data` at line 42 in main.rs'},
+                {'role': 'assistant', 'content': 'You need to clone the data or use a reference.'},
+            ]
+        }
+        count = extract_errors_from_conversation(conversation, 'rust-test')
+        assert count >= 1
+
+    def test_typescript_error_extraction(self):
+        """Test extraction of TypeScript errors."""
+        conversation = {
+            'messages': [
+                {'role': 'user', 'content': "error TS2345: Argument of type 'string' is not assignable to parameter of type 'number'."},
+                {'role': 'assistant', 'content': 'You need to convert the string to a number first.'},
+            ]
+        }
+        count = extract_errors_from_conversation(conversation, 'ts-test')
+        assert count >= 1
+
+    def test_docker_error_extraction(self):
+        """Test extraction of Docker errors."""
+        conversation = {
+            'messages': [
+                {'role': 'user', 'content': 'Error response from daemon: conflict: unable to delete image, image is being used by running container abc123'},
+                {'role': 'assistant', 'content': 'Stop the container first with docker stop abc123.'},
+            ]
+        }
+        count = extract_errors_from_conversation(conversation, 'docker-test')
+        assert count >= 1
+
+    def test_npm_error_extraction(self):
+        """Test extraction of npm errors."""
+        conversation = {
+            'messages': [
+                {'role': 'user', 'content': 'npm ERR! Could not resolve dependency: peer react@"^18.0.0" from some-package@1.0.0'},
+                {'role': 'assistant', 'content': 'Install React 18 or use --legacy-peer-deps.'},
+            ]
+        }
+        count = extract_errors_from_conversation(conversation, 'npm-test')
+        assert count >= 1
+
+    def test_git_fatal_error_extraction(self):
+        """Test extraction of Git fatal errors."""
+        conversation = {
+            'messages': [
+                {'role': 'user', 'content': "fatal: refusing to merge unrelated histories when I try to pull"},
+                {'role': 'assistant', 'content': 'Use git pull --allow-unrelated-histories.'},
+            ]
+        }
+        count = extract_errors_from_conversation(conversation, 'git-test')
+        assert count >= 1
+
+    def test_postgres_error_extraction(self):
+        """Test extraction of PostgreSQL errors."""
+        conversation = {
+            'messages': [
+                {'role': 'user', 'content': 'ERROR:  duplicate key value violates unique constraint "users_email_key"'},
+                {'role': 'assistant', 'content': 'The email already exists in the database.'},
+            ]
+        }
+        count = extract_errors_from_conversation(conversation, 'postgres-test')
+        assert count >= 1
+
+    def test_connection_error_extraction(self):
+        """Test extraction of connection errors."""
+        conversation = {
+            'messages': [
+                {'role': 'user', 'content': 'Connection refused when trying to connect to localhost:5432'},
+                {'role': 'assistant', 'content': 'Make sure PostgreSQL is running.'},
+            ]
+        }
+        count = extract_errors_from_conversation(conversation, 'connection-test')
+        assert count >= 1
+
+
+class TestFalsePositiveDetection:
+    """Test that false positives are properly filtered."""
+
+    def test_markdown_header_not_extracted(self):
+        """Test that markdown headers are not extracted as errors."""
+        from mira.insights import _is_error_false_positive
+
+        assert _is_error_false_positive("## Error Handling", "## Error Handling\n\nThis section covers...")
+        assert _is_error_false_positive("# TypeError Prevention", "# TypeError Prevention\n\nAlways check...")
+
+    def test_code_comment_not_extracted(self):
+        """Test that code comments are not extracted as errors."""
+        from mira.insights import _is_error_false_positive
+
+        assert _is_error_false_positive("// Handle TypeError here", "code // Handle TypeError here")
+        assert _is_error_false_positive("# This error occurs when...", "# This error occurs when...")
+
+    def test_documentation_not_extracted(self):
+        """Test that documentation is not extracted as errors."""
+        from mira.insights import _is_error_false_positive
+
+        assert _is_error_false_positive("@throws TypeError if invalid", "@throws TypeError if invalid")
+        assert _is_error_false_positive("returns an error if failed", "This function returns an error if failed")
+
+    def test_example_context_not_extracted(self):
+        """Test that examples are not extracted as errors."""
+        from mira.insights import _is_error_false_positive
+
+        # Check context before the error mention
+        full_content = "For example, you might see TypeError: Cannot read property"
+        assert _is_error_false_positive("TypeError: Cannot read property", full_content)
+
+    def test_conditional_code_not_extracted(self):
+        """Test that error checking code is not extracted."""
+        from mira.insights import _is_error_false_positive
+
+        assert _is_error_false_positive("if error: handle_error()", "if error: handle_error()")
+        assert _is_error_false_positive("catch error:", "try:\n  ...\ncatch error:")
+
+    def test_real_error_not_filtered(self):
+        """Test that real errors are not filtered out."""
+        from mira.insights import _is_error_false_positive
+
+        # These should NOT be filtered
+        assert not _is_error_false_positive(
+            "TypeError: Cannot read property 'foo' of undefined",
+            "I got this error: TypeError: Cannot read property 'foo' of undefined"
+        )
+        assert not _is_error_false_positive(
+            "npm ERR! Could not resolve dependency",
+            "Running npm install gives: npm ERR! Could not resolve dependency"
+        )
+
+
+class TestErrorNormalization:
+    """Test error message normalization."""
+
+    def test_normalize_file_paths(self):
+        """Test that file paths are normalized."""
+        error = "Error in /home/user/project/src/main.py at line 42"
+        normalized = normalize_error_message(error)
+        assert '<FILE>' in normalized
+        assert '/home/user' not in normalized
+
+    def test_normalize_line_numbers(self):
+        """Test that line numbers are normalized."""
+        error = "Error at line 42, column 15"
+        normalized = normalize_error_message(error)
+        assert 'line <N>' in normalized
+        assert 'column <N>' in normalized
+
+    def test_normalize_memory_addresses(self):
+        """Test that memory addresses are normalized."""
+        error = "Object at 0x7fff5fbff8c0 is invalid"
+        normalized = normalize_error_message(error)
+        assert '<ADDR>' in normalized
+        assert '0x7fff' not in normalized
+
+    def test_normalize_timestamps(self):
+        """Test that timestamps are normalized."""
+        error = "Error occurred at 2025-12-13T10:30:00Z"
+        normalized = normalize_error_message(error)
+        assert '<TIME>' in normalized
+        assert '2025-12-13' not in normalized
+
+    def test_normalize_uuids(self):
+        """Test that UUIDs are normalized."""
+        error = "Request 550e8400-e29b-41d4-a716-446655440000 failed"
+        normalized = normalize_error_message(error)
+        assert '<UUID>' in normalized
+        assert '550e8400' not in normalized
+
+    def test_normalize_ip_addresses(self):
+        """Test that IP addresses are normalized."""
+        error = "Connection to 192.168.1.100 failed"
+        normalized = normalize_error_message(error)
+        assert '<IP>' in normalized
+        assert '192.168' not in normalized
+
+    def test_normalize_port_numbers(self):
+        """Test that port numbers are normalized."""
+        error = "Failed to connect to localhost:5432"
+        normalized = normalize_error_message(error)
+        assert '<PORT>' in normalized
+        assert '5432' not in normalized
+
+
+class TestSolutionExtraction:
+    """Test solution extraction from assistant responses."""
+
+    def test_extract_direct_fix(self):
+        """Test extraction of direct fix statements."""
+        from mira.insights import _extract_solution_summary
+
+        solution = "The fix is to add the missing import statement at the top of the file."
+        result = _extract_solution_summary(solution)
+        assert result is not None
+        assert 'import' in result.lower()
+
+    def test_extract_action_description(self):
+        """Test extraction of action descriptions."""
+        from mira.insights import _extract_solution_summary
+
+        solution = "I changed the configuration to use environment variables instead of hardcoded values."
+        result = _extract_solution_summary(solution)
+        assert result is not None
+
+    def test_extract_command_fix(self):
+        """Test extraction of command-based fixes."""
+        from mira.insights import _extract_solution_summary
+
+        # Needs to be at least 50 chars for solution extraction
+        solution = "To fix this dependency issue, you should run: npm install --save-dev typescript"
+        result = _extract_solution_summary(solution)
+        assert result is not None
+        assert 'npm' in result.lower() or 'typescript' in result.lower()
+
+    def test_extract_pip_command(self):
+        """Test extraction of pip commands."""
+        from mira.insights import _extract_solution_summary
+
+        solution = "You need to install the package. Run pip install requests to fix this."
+        result = _extract_solution_summary(solution)
+        assert result is not None
+
+    def test_no_extraction_for_unrelated(self):
+        """Test that unrelated content doesn't produce solutions."""
+        from mira.insights import _extract_solution_summary
+
+        solution = "This is just a regular conversation without any fixes or solutions mentioned."
+        result = _extract_solution_summary(solution)
+        assert result is None
+
+    def test_no_extraction_for_short_content(self):
+        """Test that short content doesn't produce solutions."""
+        from mira.insights import _extract_solution_summary
+
+        solution = "Ok."
+        result = _extract_solution_summary(solution)
+        assert result is None
