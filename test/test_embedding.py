@@ -14,7 +14,7 @@ class TestEmbeddingClient:
         config = EmbeddingConfig(host="localhost", port=8200)
         client = EmbeddingClient(config)
 
-        # Client only does search - embedding happens automatically on GCP
+        # Client only does search - embedding happens automatically on the remote embedding service
         assert hasattr(client, 'search')
         assert hasattr(client, 'health_check')
         assert hasattr(client, 'stats')

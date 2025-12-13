@@ -386,7 +386,7 @@ def ingest_conversation(file_info: dict, collection, mira_path: Path = None, sto
         except Exception as e:
             log(f"[{short_id}] Concepts failed: {e}")
 
-        # NOTE: Vector indexing happens automatically on the GCP embedding service
+        # NOTE: Vector indexing happens automatically on the remote embedding service
         # The service polls Postgres for new sessions and indexes them to Qdrant
         # Client does NOT call the embedding service - it just writes to Postgres
 
