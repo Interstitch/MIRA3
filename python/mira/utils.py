@@ -49,6 +49,46 @@ def get_artifact_db_path() -> Path:
     return get_mira_path() / "artifacts.db"
 
 
+def get_mira_config() -> dict:
+    """
+    Load MIRA config.json settings.
+
+    Returns dict with optional keys:
+    - project_path: Restrict MIRA to only index this project path
+    """
+    config_path = get_mira_path() / "config.json"
+    if not config_path.exists():
+        return {}
+    try:
+        with open(config_path, "r") as f:
+            return json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
+def get_project_filter() -> Optional[str]:
+    """
+    Get the project_path filter from config, if set.
+
+    When set, MIRA only indexes conversations from this project.
+    Returns the encoded project path (e.g., "-workspaces-MIRA3") or None.
+    """
+    config = get_mira_config()
+    project_path = config.get("project_path")
+    if not project_path:
+        return None
+
+    # Convert filesystem path to Claude's encoded format
+    # /workspaces/MIRA3 -> -workspaces-MIRA3
+    encoded = project_path.replace("/", "-").lstrip("-")
+    return encoded
+
+
+def get_claude_projects_path() -> Path:
+    """Get the path where Claude Code stores conversations."""
+    return Path.home() / ".claude" / "projects"
+
+
 def log(message: str):
     """Log a message to stderr and to a log file for monitoring.
 

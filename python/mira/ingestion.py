@@ -479,17 +479,32 @@ def discover_conversations(claude_path: Path = None) -> list:
     """
     Discover all conversation files from Claude Code projects.
 
+    Respects project_path filter from config.json if set.
+
     Returns list of file_info dicts with:
     - session_id: Unique identifier
     - file_path: Full path to JSONL file
     - project_path: Project directory
     - last_modified: ISO timestamp
     """
+    from .utils import get_claude_projects_path, get_project_filter
+
     if claude_path is None:
-        claude_path = Path.home() / ".claude" / "projects"
+        claude_path = get_claude_projects_path()
 
     if not claude_path.exists():
         return []
+
+    # Check for project filter
+    project_filter = get_project_filter()
+    if project_filter:
+        # Narrow search to specific project directory
+        filtered_path = claude_path / project_filter
+        if filtered_path.exists():
+            claude_path = filtered_path
+            log(f"Filtering discovery to project: {project_filter}")
+        else:
+            log(f"Project filter path not found: {filtered_path}, scanning all projects")
 
     conversations = []
 

@@ -3,10 +3,17 @@ MIRA3 Search Module
 
 Handles semantic search, archive enrichment, and fulltext fallback.
 
-Primary: Central Qdrant (vector) + Postgres (FTS) for hybrid search
-Fallback: Local SQLite with FTS5 (keyword search only)
+Three-Tier Search Architecture:
+- Tier 1: Remote semantic (Qdrant + embedding-service) - cross-machine, best quality
+- Tier 2: Local semantic (sqlite-vec + fastembed) - offline, same quality
+- Tier 3: FTS5 keyword (SQLite) - always available, fast
 
-In local mode, only FTS search is available (no semantic/vector search).
+Lazy Loading:
+- Local semantic model (~100MB) only downloads when:
+  1. Remote storage is unavailable AND
+  2. User actually performs a search
+- First offline search returns FTS5 results, triggers background download
+- Subsequent searches use local semantic
 
 Response Format:
 - compact=True (default): Optimized for Claude context (~79% smaller)
@@ -351,6 +358,39 @@ def handle_search(params: dict, collection, storage=None) -> dict:
         if new_results:
             search_type = "combined" if search_type != "none" else "archive_fts"
 
+    # TIER 2: Local semantic search (if remote unavailable)
+    # Only triggered when remote is down - this is where lazy loading kicks in
+    local_semantic_notice = None
+    if not results and not storage.using_central:
+        try:
+            from .local_semantic import is_local_semantic_available, get_local_semantic, trigger_local_semantic_download
+
+            if is_local_semantic_available():
+                # Local semantic ready - use it
+                ls = get_local_semantic()
+                local_results = ls.search(query, project_path=project_path, limit=limit)
+                if local_results:
+                    for r in local_results:
+                        results.append({
+                            "session_id": r.get("session_id", ""),
+                            "summary": "",  # Will be enriched from archives
+                            "keywords": [],
+                            "relevance": r.get("score", 0.5),
+                            "timestamp": "",
+                            "project_path": "",
+                            "search_source": "local_semantic"
+                        })
+                    enriched = enrich_results_from_archives(results, query, mira_path, storage)
+                    results = enriched
+                    search_type = "local_semantic"
+            else:
+                # Local semantic not ready - trigger download, will fall through to FTS5
+                local_semantic_notice = trigger_local_semantic_download()
+
+        except Exception as e:
+            log(f"Local semantic search failed: {e}")
+            # Fall through to FTS5
+
     # TIER 3: Local FTS fallback (if central unavailable or no results)
     if not results:
         try:
@@ -415,6 +455,9 @@ def handle_search(params: dict, collection, storage=None) -> dict:
         }
         if days:
             response["filtered_to_days"] = days
+        # Include notice about local semantic download if triggered
+        if local_semantic_notice and local_semantic_notice.get("notice"):
+            response["notice"] = local_semantic_notice["notice"]
         return response
     else:
         # Verbose format for debugging
@@ -426,6 +469,9 @@ def handle_search(params: dict, collection, storage=None) -> dict:
         }
         if days:
             response["filtered_to_days"] = days
+        # Include notice about local semantic download if triggered
+        if local_semantic_notice and local_semantic_notice.get("notice"):
+            response["notice"] = local_semantic_notice["notice"]
         return response
 
 

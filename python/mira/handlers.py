@@ -402,9 +402,9 @@ def _build_claude_guidance(
     })
 
     triggers.append({
-        "situation": "User references past work ('we did this before', 'like last time', 'remember when')",
+        "situation": "User references past work ('we discussed this', 'we talked about', 'remember when', 'like last time', 'as we did before')",
         "action": "Call mira_search(query='<referenced topic>') immediately",
-        "reason": "User expects continuity across sessions - search before asking them to repeat context",
+        "reason": "User expects continuity across sessions - search MIRA before asking them to repeat context",
         "priority": "critical"
     })
 
@@ -1984,6 +1984,14 @@ def handle_status(params: dict, collection, storage=None) -> dict:
         "decisions": decision_stats_central.get('storage', 'unknown'),
         "file_operations": file_ops_stats.get('storage', 'unknown'),
     }
+
+    # Add local semantic search status
+    try:
+        from .local_semantic import get_local_semantic
+        ls = get_local_semantic()
+        result["local_semantic"] = ls.get_status()
+    except Exception as e:
+        result["local_semantic"] = {"available": False, "error": str(e)}
 
     return result
 

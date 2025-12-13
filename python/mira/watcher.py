@@ -244,10 +244,25 @@ def run_file_watcher(collection, mira_path: Path = None, storage=None):
         from .utils import get_mira_path
         mira_path = get_mira_path()
 
-    claude_path = Path.home() / ".claude" / "projects"
+    from .utils import get_claude_projects_path, get_project_filter
+
+    claude_path = get_claude_projects_path()
     if not claude_path.exists():
         log(f"Claude projects path not found: {claude_path}")
         return
+
+    # Check for project filter
+    project_filter = get_project_filter()
+    if project_filter:
+        # Watch only the specific project directory
+        watch_path = claude_path / project_filter
+        if not watch_path.exists():
+            log(f"Filtered project path not found: {watch_path}")
+            log(f"Falling back to watching all projects")
+            watch_path = claude_path
+            project_filter = None
+    else:
+        watch_path = claude_path
 
     # Create conversation watcher with debouncing
     conv_watcher = ConversationWatcher(None, mira_path, storage)
@@ -269,9 +284,13 @@ def run_file_watcher(collection, mira_path: Path = None, storage=None):
                 conv_watcher.queue_file(event.src_path)
 
     observer = Observer()
-    observer.schedule(ConversationHandler(), str(claude_path), recursive=True)
+    observer.schedule(ConversationHandler(), str(watch_path), recursive=True)
     observer.start()
-    log(f"File watcher started on {claude_path} (debounce: {WATCHER_DEBOUNCE_SECONDS}s)")
+
+    if project_filter:
+        log(f"File watcher started on {watch_path} (filtered to project, debounce: {WATCHER_DEBOUNCE_SECONDS}s)")
+    else:
+        log(f"File watcher started on {watch_path} (all projects, debounce: {WATCHER_DEBOUNCE_SECONDS}s)")
 
     # Keep thread alive
     try:

@@ -82,14 +82,14 @@ Other conversation history tools require you to manually search. **MIRA is proac
 
 ## Claude Knows You From the Start
 
-**This is MIRA's killer feature.** The SessionStart hook automatically injects context before you type anything:
+**This is where the magic happens.** The SessionStart hook automatically injects your profile before you type anything:
 
 ```
 === MIRA Session Context ===
 
 ## User Profile
-Name: Max
-Summary: Max is the sole developer (123 sessions). Prefers planning before implementation.
+Name: Alex
+Summary: Alex is the lead developer (123 sessions). Prefers planning before implementation.
 Development Lifecycle: Plan → Test → Implement → Commit (85% confidence)
 Interaction Tips:
   - Work pattern: Iterative development with frequent edits
@@ -98,6 +98,7 @@ Interaction Tips:
 ## When to Consult MIRA
 - [CRITICAL] Encountering an error → call mira_error_lookup first
 - [CRITICAL] About to say "I don't know" → search MIRA before admitting ignorance
+- [CRITICAL] User mentions past discussions → search MIRA to recall context
 - [CRITICAL] Making architectural decisions → call mira_decisions for precedents
 
 ## Alerts
@@ -109,6 +110,7 @@ Interaction Tips:
 - Claude follows your preferred workflow (test first? plan first?)
 - Claude warns before touching files that caused past issues
 - Claude searches your history before saying "I don't know"
+- Claude recalls past conversations when you reference them
 - Claude reminds you of environment-specific prerequisites
 
 No manual prompting. No "remember that I prefer..." every session. MIRA learns from your conversations and Claude just *knows*.
@@ -116,8 +118,8 @@ No manual prompting. No "remember that I prefer..." every session. MIRA learns f
 **How it works:** MIRA installs a [SessionStart hook](https://docs.anthropic.com/en/docs/claude-code/hooks) that runs `mira_init` before every conversation. The hook returns your profile, danger zones, critical reminders, and environment-specific alerts - all injected into Claude's context automatically.
 
 **Storage modes:**
-- **Remote (recommended)** - Postgres + Qdrant for semantic search and cross-machine sync
-- **Local-only** - SQLite FTS5 for offline/air-gapped environments
+- **Local** - Semantic search works out of the box with fastembed + sqlite-vec (~100MB, auto-downloads on first search)
+- **Remote (optional)** - Add Postgres + Qdrant for cross-machine sync and shared history across devices
 
 ## Installation
 
@@ -125,9 +127,9 @@ No manual prompting. No "remember that I prefer..." every session. MIRA learns f
 claude mcp add claude-mira3 -- npx claude-mira3
 ```
 
-The SessionStart hook auto-configures on install, injecting MIRA context at the start of every Claude Code session.
+The SessionStart hook auto-configures on install, injecting MIRA context at the start of every Claude Code session. Semantic search works immediately - on your first search, MIRA downloads a ~100MB embedding model in the background.
 
-**Next step:** [Set up remote storage](#remote-storage) to unlock semantic search and cross-machine sync.
+**Optional:** [Set up remote storage](#remote-storage-optional) for cross-machine sync if you work across multiple devices.
 
 ### Manual MCP Configuration (Alternative)
 
@@ -144,16 +146,18 @@ Add to your MCP settings (`~/.claude/settings.json`):
 }
 ```
 
-## Remote Storage
+## Remote Storage (Optional)
 
-Remote storage unlocks MIRA's full potential:
+Remote storage enables **cross-machine sync** - your conversation history follows you everywhere:
 
-- **Semantic search** - Find "that conversation about authentication" even if you never used that word
-- **Cross-project search** - Search all your projects at once
-- **Cross-machine sync** - Seamless history across laptop, desktop, and Codespaces
+- **Work from anywhere** - Seamless history across laptop, desktop, and Codespaces
 - **Persistent memory** - Rebuild a Codespace and your full history is already there
+- **Cross-project search** - Search all your projects from any machine
+- **Team sharing** - Multiple developers can share the same memory pool
 
-### Quick Setup
+> **Note:** Semantic search works locally without remote storage. Remote is only needed if you want history to sync across multiple machines.
+
+### Option A: Quick Setup Script
 
 **On your server** (any Linux machine with Docker):
 
@@ -161,14 +165,54 @@ Remote storage unlocks MIRA's full potential:
 curl -sL https://raw.githubusercontent.com/Interstitch/MIRA3/master/server/install.sh | bash
 ```
 
-The script prompts for:
-- Server IP address
-- PostgreSQL password
-- Qdrant API key
+The script prompts for server IP, PostgreSQL password, and Qdrant API key, then starts everything via Docker Compose.
 
-Then starts Postgres, Qdrant, and an embedding service via Docker Compose.
+### Option B: Manual Docker Compose
 
-**On each dev machine**, create `.mira/server.json` with the credentials you set:
+Create `docker-compose.yml` on your server:
+
+```yaml
+version: '3.8'
+services:
+  postgres:
+    image: postgres:15
+    environment:
+      POSTGRES_DB: mira
+      POSTGRES_USER: mira
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+
+  qdrant:
+    image: qdrant/qdrant:latest
+    environment:
+      QDRANT__SERVICE__API_KEY: ${QDRANT_API_KEY}
+    volumes:
+      - qdrant_data:/qdrant/storage
+    ports:
+      - "6333:6333"
+
+  embedding:
+    image: ghcr.io/interstitch/mira-embedding:latest
+    ports:
+      - "8100:8100"
+
+volumes:
+  postgres_data:
+  qdrant_data:
+```
+
+```bash
+export POSTGRES_PASSWORD=your-secure-password
+export QDRANT_API_KEY=your-api-key
+docker-compose up -d
+```
+
+### Connecting Your Machines
+
+**On each Claude Code machine**, create `.mira/server.json`:
 
 ```json
 {
@@ -189,12 +233,32 @@ chmod 600 ~/.mira/server.json  # Protect credentials
 
 ### Local-Only Mode
 
-Without remote storage, MIRA works locally with SQLite FTS5 keyword search. This is useful for:
-- Air-gapped environments
-- Quick evaluation before setting up a server
-- Offline work (syncs when reconnected if remote is configured)
+MIRA's default mode - **full semantic search without any server setup:**
 
-Local mode creates `.mira/.venv/` and SQLite databases (~50MB) on first use.
+- **Meaning-based search** - Find "that auth conversation" even if you never used that word
+- **Zero configuration** - Works immediately after installation
+- **Lightweight** - ~100MB embedding model (fastembed) + sqlite-vec for vector storage
+- **Lazy loading** - Model only downloads when you first search, not on install
+
+**How it works:** When you search without remote storage configured, MIRA downloads a compact ONNX-based embedding model (~100MB) in the background on first use. Vectors are stored in SQLite with the sqlite-vec extension for fast similarity search. All processing happens locally - no API calls, no external services.
+
+**When to add remote storage:** Only if you work across multiple machines (laptop + desktop + Codespaces) and want your history to sync automatically.
+
+### Configuration
+
+MIRA configuration is stored in `.mira/config.json`:
+
+```json
+{
+  "project_path": "/workspaces/MIRA3"
+}
+```
+
+| Option | Description |
+|--------|-------------|
+| `project_path` | Restrict MIRA to only index conversations from this project. Use the full filesystem path (e.g., `/workspaces/MIRA3`). When set, MIRA ignores conversations from other projects. |
+
+**When to use `project_path`:** If you work on many projects but only want MIRA memory for a specific one, set this to avoid indexing unrelated conversations. This keeps search results focused and reduces storage usage.
 
 ## Data Locations
 
@@ -214,54 +278,29 @@ Conversation files are JSONL format with one JSON object per line, containing me
 
 ### MIRA Storage (Read-Write)
 
-MIRA3 maintains its own storage in the workspace:
+MIRA maintains its own storage in `<workspace>/.mira/`:
 
-```
-<workspace>/.mira/
-├── config.json                  # MIRA configuration
-├── server.json                  # Remote storage credentials (if configured)
-├── .venv/                       # Python virtualenv (auto-created)
-├── archives/
-│   └── <session-id>.jsonl       # Full conversation copies
-├── metadata/
-│   └── <session-id>.json        # Extracted metadata per conversation
-├── local_store.db               # Main SQLite DB with FTS5 search
-├── custodian.db                 # Learned user preferences
-├── insights.db                  # Error patterns and decisions
-├── concepts.db                  # Codebase concepts
-├── artifacts.db                 # Structured content (code, lists, tables)
-├── sync_queue.db                # Pending syncs to remote (if configured)
-├── migrations.db                # Schema version tracking
-├── mira.log                     # Runtime logs
-├── mira.lock                    # Singleton lock file
-└── mira.pid                     # Process ID file
-```
-
-### Storage Components
-
-| Component | Purpose | Location |
-|-----------|---------|----------|
-| **Python venv** | Isolated environment with dependencies | `.mira/.venv/` |
-| **Local Store** | Sessions, messages, FTS5 search index | `.mira/local_store.db` |
-| **Custodian DB** | Learned user preferences and patterns | `.mira/custodian.db` |
-| **Insights DB** | Error patterns and architectural decisions | `.mira/insights.db` |
-| **Concepts DB** | Codebase concepts and patterns | `.mira/concepts.db` |
-| **Artifacts DB** | Structured content (code, lists, tables) | `.mira/artifacts.db` |
-| **Sync Queue** | Pending operations for remote sync | `.mira/sync_queue.db` |
-| **Server Config** | Remote storage connection credentials | `.mira/server.json` |
-| **Archives** | Full conversation copies | `.mira/archives/` |
-| **Metadata** | Pre-extracted summaries, keywords, facts | `.mira/metadata/` |
+| File/Directory | Purpose |
+|----------------|---------|
+| `config.json` | MIRA configuration (project_path filter, etc.) |
+| `server.json` | Remote storage credentials (if configured) |
+| `.venv/` | Python virtualenv with dependencies (~50MB) |
+| `archives/*.jsonl` | Full conversation copies for offline search |
+| `metadata/*.json` | Pre-extracted summaries, keywords, key facts |
+| `local_store.db` | Main SQLite DB with FTS5 full-text search |
+| `local_vectors.db` | Semantic search vectors (fastembed + sqlite-vec) |
+| `custodian.db` | Learned user profile, preferences, danger zones |
+| `insights.db` | Error patterns and architectural decisions |
+| `concepts.db` | Codebase concepts extracted from conversations |
+| `artifacts.db` | Indexed code blocks, commands, configs, tables |
+| `sync_queue.db` | Pending syncs to remote (if configured) |
+| `mira.log` | Runtime logs for debugging |
 
 ## Search
 
-MIRA provides two search modes:
+MIRA provides semantic search that finds conversations by meaning, not just keywords. Search for "authentication bug" and find discussions about "login issues" or "JWT token problems."
 
-| Mode | Storage | Capability |
-|------|---------|------------|
-| **Semantic** | Remote | Find by meaning - "auth conversation" matches "login flow discussion" |
-| **Keyword** | Local/Remote | FTS5 full-text search on exact terms |
-
-With remote storage, searches use semantic similarity first, then keyword fallback. Local-only mode uses keyword search.
+Semantic search works both with remote storage (cross-machine) and locally (single-machine). MIRA automatically uses the best available method.
 
 **Optimized responses:** Search results use a compact format by default, reducing token usage by ~79%. Each result includes:
 - Short session ID (8 chars)
@@ -290,15 +329,22 @@ Claude Code → Node.js MCP Server → Python Backend
 
 ## What Gets Indexed
 
-For each conversation:
-- **Summary** - From Claude's summarization or first user message
-- **Keywords** - Technical terms, file names, imports
-- **Key facts** - Rules, decisions, constraints mentioned
-- **Task description** - Cleaned first user request
-- **Full text** - All message content (FTS5 indexed)
-- **Metadata** - Git branch, models used, tools used, files touched
+When MIRA detects a new or modified conversation file, it runs an **ingestion pipeline** that extracts structured data from the raw JSONL:
 
-Skipped: file-history snapshots, agent sub-conversations, empty conversations.
+| Extraction | What It Captures | How It's Used |
+|------------|------------------|---------------|
+| **Summary** | Claude's own summarization, or synthesized from first exchange | Quick context in search results |
+| **Keywords** | Technical terms, file names, imports, libraries mentioned | FTS5 search ranking |
+| **Key Facts** | Rules, decisions, constraints stated during conversation | Custodian learning, decision journal |
+| **Task Description** | Cleaned first user request | Understanding session purpose |
+| **Error Patterns** | Errors encountered and their solutions | `mira_error_lookup` database |
+| **Artifacts** | Code blocks, commands, configs, tables, URLs | Precise retrieval of structured content |
+| **Vector Embeddings** | Semantic representation of conversation content | Meaning-based search |
+| **Metadata** | Git branch, models used, tools invoked, files touched | Filtering and context |
+
+**Automatic filtering:** MIRA skips file-history snapshots, agent sub-conversations (agent-*.jsonl), and empty conversations. Only meaningful user-Claude interactions are indexed.
+
+**Incremental updates:** When a conversation is modified (you continue a session), MIRA re-ingests only the changed content, updating summaries and adding new artifacts.
 
 ## Custodian Learning
 

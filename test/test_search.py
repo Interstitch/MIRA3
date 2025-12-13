@@ -94,8 +94,9 @@ class TestSearchHandlers:
         """Test handle_search with basic query."""
         from mira.search import handle_search
 
+        # Test with compact=False to get verbose output
         result = handle_search(
-            params={"query": "test query", "limit": 5},
+            params={"query": "test query", "limit": 5, "compact": False},
             collection=None,
             storage=None
         )
