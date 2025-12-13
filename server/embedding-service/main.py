@@ -16,6 +16,8 @@ Endpoints:
 - POST /reindex/all - Manual full reindex (admin)
 """
 
+VERSION = "0.3.1"
+
 import os
 import asyncio
 import logging
@@ -667,6 +669,7 @@ async def health():
 
     return {
         "status": status,
+        "version": VERSION,
         "qdrant": "connected" if qdrant_ok else "disconnected",
         "postgres": "connected" if postgres_ok else "disconnected",
         "model": MODEL_NAME,
