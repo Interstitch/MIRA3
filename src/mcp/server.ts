@@ -395,8 +395,8 @@ export async function startServer(): Promise<void> {
       try {
         const result = await callRpc("status", { project_path }) as any;
         const mode = result?.storage_health?.mode || "local";
-        const sessionCount = result?.sessions?.total || result?.local_stats?.sessions || 0;
-        const artifactCount = result?.artifacts?.total || result?.local_stats?.artifacts || 0;
+        const sessionCount = result?.global?.ingestion?.total_in_db || result?.sessions?.total || 0;
+        const artifactCount = result?.global?.artifacts?.total || result?.artifacts?.total || 0;
 
         // Build human-readable summary
         let summary = `${MIRA_FACES.status} MIRA Status - ${mode === "central" ? "Central Storage" : "Local Mode"}`;
