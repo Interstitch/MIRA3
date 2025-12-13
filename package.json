@@ -1,6 +1,6 @@
 {
   "name": "claude-mira3",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Persistent memory for Claude Code - semantic search, cross-machine sync, learned preferences, error tracking",
   "type": "module",
   "main": "dist/cli.js",
