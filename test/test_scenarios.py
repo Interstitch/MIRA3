@@ -10,6 +10,8 @@ from mira.artifacts import init_artifact_db
 from mira.custodian import init_custodian_db
 from mira.insights import init_insights_db
 from mira.concepts import init_concepts_db
+from mira import local_store
+from mira.local_store import init_local_db
 from mira.db_manager import shutdown_db_manager
 
 
@@ -40,6 +42,8 @@ class TestUserExperienceScenarios:
         cls.claude_path.mkdir(parents=True)
 
         # Initialize all databases for end-to-end tests
+        local_store._initialized = False  # Reset initialization flag
+        init_local_db()
         init_artifact_db()
         init_custodian_db()
         init_insights_db()
