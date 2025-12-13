@@ -760,12 +760,13 @@ def handle_status(params: dict, collection, storage=None) -> dict:
     archives_path = mira_path / "archives"
     archived = sum(1 for _ in archives_path.glob("*.jsonl")) if archives_path.exists() else 0
 
-    # Count indexed from central storage - check which current files are indexed
+    # Count indexed from storage - check which current files are indexed
     indexed_global = 0
     indexed_project = 0
     indexed_of_indexable = 0      # How many of current indexable files are in DB
     indexed_of_project = 0        # How many of current project files are in DB
     if storage and storage.using_central and storage.postgres:
+        # Query central Postgres
         try:
             with storage.postgres._get_connection() as conn:
                 with conn.cursor() as cur:
@@ -795,6 +796,40 @@ def handle_status(params: dict, collection, storage=None) -> dict:
                             project_session_ids
                         )
                         indexed_of_project = cur.fetchone()[0]
+        except Exception:
+            pass
+    else:
+        # Query local SQLite
+        try:
+            import sqlite3
+            local_db = mira_path / "local_store.db"
+            if local_db.exists():
+                conn = sqlite3.connect(str(local_db))
+                cur = conn.cursor()
+                try:
+                    # Total sessions in local DB
+                    cur.execute("SELECT COUNT(*) FROM sessions")
+                    indexed_global = cur.fetchone()[0]
+
+                    # Check which of the current indexable files are indexed
+                    if indexable_session_ids:
+                        placeholders = ','.join(['?'] * len(indexable_session_ids))
+                        cur.execute(
+                            f"SELECT COUNT(*) FROM sessions WHERE session_id IN ({placeholders})",
+                            indexable_session_ids
+                        )
+                        indexed_of_indexable = cur.fetchone()[0]
+
+                    # Check which of the current project files are indexed
+                    if project_session_ids:
+                        placeholders = ','.join(['?'] * len(project_session_ids))
+                        cur.execute(
+                            f"SELECT COUNT(*) FROM sessions WHERE session_id IN ({placeholders})",
+                            project_session_ids
+                        )
+                        indexed_of_project = cur.fetchone()[0]
+                finally:
+                    conn.close()
         except Exception:
             pass
 

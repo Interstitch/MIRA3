@@ -370,22 +370,21 @@ def ingest_conversation(file_info: dict, collection, mira_path: Path = None, sto
         except Exception as e:
             log(f"[{short_id}] Insights failed: {e}")
 
-        # Extract codebase concepts (central only - requires vector storage)
-        if storage.using_central:
-            try:
-                t0 = time.time()
-                concepts = extract_concepts_from_conversation(
-                    conversation_to_process, session_id,
-                    project_path=project_path_normalized,
-                    storage=storage
-                )
-                concept_count = concepts.get('concepts_found', 0)
-                t_concepts = (time.time() - t0) * 1000
-                if concept_count > 0:
-                    incr_note = f" (from {incr_msg_count} new msgs)" if is_incremental else ""
-                    log(f"[{short_id}] Concepts: {concept_count} ({t_concepts:.0f}ms){incr_note}")
-            except Exception as e:
-                log(f"[{short_id}] Concepts failed: {e}")
+        # Extract codebase concepts (works in both local and central mode)
+        try:
+            t0 = time.time()
+            concepts = extract_concepts_from_conversation(
+                conversation_to_process, session_id,
+                project_path=project_path_normalized,
+                storage=storage
+            )
+            concept_count = concepts.get('concepts_found', 0)
+            t_concepts = (time.time() - t0) * 1000
+            if concept_count > 0:
+                incr_note = f" (from {incr_msg_count} new msgs)" if is_incremental else ""
+                log(f"[{short_id}] Concepts: {concept_count} ({t_concepts:.0f}ms){incr_note}")
+        except Exception as e:
+            log(f"[{short_id}] Concepts failed: {e}")
 
         # NOTE: Vector indexing happens automatically on the GCP embedding service
         # The service polls Postgres for new sessions and indexes them to Qdrant

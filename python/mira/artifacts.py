@@ -633,12 +633,13 @@ def store_artifact(session_id: str, artifact_type: str, content: str,
                    postgres_session_id: int = None, storage=None,
                    project_path: str = None) -> bool:
     """
-    Store a detected artifact - tries central first, queues locally if unavailable.
+    Store a detected artifact - always stores locally, queues for central sync.
 
     Storage strategy:
-    1. Try to store directly to central Postgres
-    2. If central unavailable, queue to local sync queue
+    1. ALWAYS store to local SQLite artifacts.db first (source of truth)
+    2. Queue for central sync if central storage is configured
     3. Sync worker will flush queue to central when available
+    4. Local record stays (flagged as synced, never deleted)
 
     Args:
         session_id: The conversation session ID (string)
@@ -654,24 +655,42 @@ def store_artifact(session_id: str, artifact_type: str, content: str,
         project_path: Project path for queued items
 
     Returns:
-        True if stored (central or queued), False if failed completely
+        True if stored locally, False if failed completely
     """
     import hashlib
+    import sqlite3
+    from .utils import get_mira_path
 
-    # Build payload for both central storage and queue
+    # Build payload
     line_count = content.count('\n') + 1
-    metadata = {
-        'role': role,
-        'message_index': message_index,
-        'timestamp': timestamp,
-        'title': title,
-    }
+    char_count = len(content)
 
     # Generate hash for deduplication
     hash_input = f"{session_id}:{artifact_type}:{content[:500]}"
-    item_hash = hashlib.sha256(hash_input.encode()).hexdigest()[:32]
+    content_hash = hashlib.sha256(hash_input.encode()).hexdigest()[:32]
 
-    # Get storage if not provided
+    # 1. ALWAYS store locally first
+    local_stored = False
+    try:
+        db_path = get_mira_path() / "artifacts.db"
+        conn = sqlite3.connect(str(db_path))
+        cur = conn.cursor()
+        try:
+            cur.execute("""
+                INSERT OR IGNORE INTO artifacts
+                (session_id, artifact_type, content, content_hash, language, title,
+                 line_count, char_count, role, message_index, timestamp)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (session_id, artifact_type, content, content_hash, language, title,
+                  line_count, char_count, role, message_index, timestamp))
+            conn.commit()
+            local_stored = cur.rowcount > 0 or True  # True even if duplicate (OR IGNORE)
+        finally:
+            conn.close()
+    except Exception as e:
+        log(f"Local artifact storage failed: {e}")
+
+    # 2. Queue for central sync if configured
     if storage is None:
         try:
             from .storage import get_storage
@@ -679,48 +698,34 @@ def store_artifact(session_id: str, artifact_type: str, content: str,
         except ImportError:
             storage = None
 
-    # Try central storage first
-    if storage and storage.using_central and storage.postgres:
+    if storage and storage.central_configured:
         try:
-            storage.postgres.insert_artifact(
-                session_id=postgres_session_id,
-                artifact_type=artifact_type,
-                content=content,
-                language=language,
-                line_count=line_count,
-                metadata=metadata,
-            )
-            return True  # Success - stored in central
+            from .sync_queue import get_sync_queue
+            queue = get_sync_queue()
+
+            metadata = {
+                'role': role,
+                'message_index': message_index,
+                'timestamp': timestamp,
+                'title': title,
+            }
+
+            payload = {
+                'session_id': session_id,
+                'postgres_session_id': postgres_session_id,
+                'artifact_type': artifact_type,
+                'content': content,
+                'language': language,
+                'line_count': line_count,
+                'metadata': metadata,
+                'project_path': project_path,
+            }
+
+            queue.enqueue("artifact", content_hash, payload)
         except Exception as e:
-            # Duplicate is fine - already stored
-            if 'duplicate' in str(e).lower() or 'unique' in str(e).lower():
-                return True
-            # Other errors - fall through to queue
-            log(f"Central artifact storage failed, queueing: {e}")
+            log(f"Failed to queue artifact for sync: {e}")
 
-    # Central unavailable or failed - queue for later sync
-    try:
-        from .sync_queue import get_sync_queue
-        queue = get_sync_queue()
-
-        payload = {
-            'session_id': session_id,
-            'postgres_session_id': postgres_session_id,
-            'artifact_type': artifact_type,
-            'content': content,
-            'language': language,
-            'line_count': line_count,
-            'metadata': metadata,
-            'project_path': project_path,
-        }
-
-        queued = queue.enqueue("artifact", item_hash, payload)
-        if queued:
-            log(f"Artifact queued for sync: {artifact_type}")
-        return queued
-    except Exception as e:
-        log(f"Failed to queue artifact: {e}")
-        return False
+    return local_stored
 
 
 # Language detection patterns for code blocks
