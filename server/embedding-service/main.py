@@ -16,7 +16,7 @@ Endpoints:
 - POST /reindex/all - Manual full reindex (admin)
 """
 
-VERSION = "0.3.1"
+VERSION = "0.3.2"
 
 import os
 import asyncio
@@ -555,10 +555,11 @@ async def startup():
     logger.info(f"Model loaded. Embedding dimension: {model.get_sentence_embedding_dimension()}")
 
     # Connect to Qdrant
-    logger.info(f"Connecting to Qdrant: {QDRANT_HOST}:{QDRANT_PORT}")
+    # Use explicit URL to force HTTP (QdrantClient defaults to HTTPS when api_key is set)
+    qdrant_url = f"http://{QDRANT_HOST}:{QDRANT_PORT}"
+    logger.info(f"Connecting to Qdrant: {qdrant_url}")
     qdrant = QdrantClient(
-        host=QDRANT_HOST,
-        port=QDRANT_PORT,
+        url=qdrant_url,
         api_key=QDRANT_API_KEY  # None if not set (auth disabled)
     )
 
