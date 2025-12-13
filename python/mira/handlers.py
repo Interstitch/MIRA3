@@ -15,6 +15,7 @@ from .artifacts import get_artifact_stats, get_journey_stats
 from .custodian import get_full_custodian_profile, get_danger_zones_for_files, check_prerequisites_and_alert, format_rule_for_display, RULE_TYPES
 from .insights import search_error_solutions, search_decisions, get_error_stats, get_decision_stats
 from .concepts import get_codebase_knowledge, ConceptStore
+from .ingestion import get_active_ingestions
 
 
 def _format_project_path(encoded_path: str) -> str:
@@ -337,6 +338,47 @@ def handle_init(params: dict, collection, storage=None) -> dict:
         }
         response["guidance"]["actions"].append(
             f"Limited history: only {count} indexed sessions. Context may be sparse."
+        )
+
+    # Check for active ingestion jobs and inform Claude
+    active_jobs = get_active_ingestions()
+    if active_jobs:
+        # Add ingestion status to response
+        response["active_ingestion"] = {
+            "count": len(active_jobs),
+            "jobs": [
+                {
+                    "session_id": job["session_id"][:12] + "...",
+                    "project": job.get("project_path", "").split("-")[-1] if job.get("project_path") else "unknown",
+                    "elapsed_sec": round(job.get("elapsed_ms", 0) / 1000, 1),
+                    "worker": job.get("worker", "unknown"),
+                }
+                for job in active_jobs[:5]  # Limit to 5 jobs in output
+            ],
+        }
+
+        # Add alert for ongoing ingestion
+        if len(active_jobs) == 1:
+            job = active_jobs[0]
+            elapsed = round(job.get("elapsed_ms", 0) / 1000, 1)
+            alerts.insert(0, {
+                "type": "ingestion_active",
+                "priority": "info",
+                "message": f"MIRA is currently ingesting 1 conversation ({elapsed}s elapsed)",
+                "suggestion": "Search results may be incomplete until ingestion finishes",
+            })
+        else:
+            alerts.insert(0, {
+                "type": "ingestion_active",
+                "priority": "info",
+                "message": f"MIRA is currently ingesting {len(active_jobs)} conversations",
+                "suggestion": "Search results may be incomplete until ingestion finishes",
+            })
+
+        # Add guidance for Claude to inform user
+        response["guidance"]["actions"].insert(0,
+            f"[ACTIVE INGESTION] {len(active_jobs)} conversation(s) being processed. "
+            "Inform user that search results may be incomplete if they search for very recent work."
         )
 
     # Only include details if there's meaningful learned knowledge

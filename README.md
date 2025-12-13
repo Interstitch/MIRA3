@@ -1,5 +1,7 @@
 # MIRA3 - Memory Information Retriever and Archiver
 
+[![GitHub](https://img.shields.io/badge/GitHub-Interstitch%2FMIRA3-blue?logo=github)](https://github.com/Interstitch/MIRA3)
+
 An MCP server that gives Claude Code persistent memory across sessions, machines, and projects.
 
 ## The Problem
@@ -445,6 +447,10 @@ Just work normally. MIRA detects patterns: if you consistently write tests befor
 - Claude Code
 
 **Note:** MIRA has only been tested with Claude Code on Linux (Ubuntu, Debian, Codespaces). macOS and Windows support is untested - contributions welcome.
+
+## Known Limitations
+
+**Fresh Install Testing:** Most development and testing has been done on systems with existing MIRA data. Fresh installs (first-time setup with no prior conversation history) have received limited testing. If you encounter issues during initial setup, please [open an issue](https://github.com/Interstitch/MIRA3/issues).
 
 ## License
 
