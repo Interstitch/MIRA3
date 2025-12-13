@@ -12,7 +12,7 @@ from collections import Counter
 from .utils import log, get_mira_path, get_custodian
 from .search import handle_search
 from .artifacts import get_artifact_stats, get_journey_stats
-from .custodian import get_full_custodian_profile, get_danger_zones_for_files
+from .custodian import get_full_custodian_profile, get_danger_zones_for_files, check_prerequisites_and_alert
 from .insights import search_error_solutions, search_decisions, get_error_stats, get_decision_stats
 from .concepts import get_codebase_knowledge, ConceptStore
 
@@ -690,6 +690,14 @@ def _get_actionable_alerts(mira_path: Path, project_path: str, custodian_profile
             'priority': 'low',
             'message': f"User rule: never {never_rules[0].get('rule', '')}",
         })
+
+    # Check for environment-specific prerequisites
+    try:
+        prereq_alerts = check_prerequisites_and_alert()
+        # Insert at beginning since these are high priority
+        alerts = prereq_alerts + alerts
+    except Exception as e:
+        log(f"Error checking prerequisites: {e}")
 
     return alerts
 

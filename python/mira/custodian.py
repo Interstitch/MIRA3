@@ -70,6 +70,106 @@ LIFECYCLE_PHASE_NAMES = {
     'commit': 'Commit',
 }
 
+# =============================================================================
+# PREREQUISITE LEARNING PATTERNS
+# =============================================================================
+
+# Pattern matching for prerequisite statements in conversations
+PREREQ_STATEMENT_PATTERNS = [
+    # "In X, I need to Y"
+    r"(?:in|on|when (?:on|using|in))\s+([a-zA-Z][a-zA-Z0-9_\s-]{1,30}?),?\s+(?:i |we )?(?:need|have) to\s+(.+?)(?:\.|,|$)",
+    # "On X, run Y first"
+    r"(?:in|on)\s+([a-zA-Z][a-zA-Z0-9_\s-]{1,30}?),?\s+(?:run|start|execute)\s+(.+?)(?:\s+first)?(?:\.|,|$)",
+    # "When using X, Y must be running"
+    r"when (?:using|on|in)\s+([a-zA-Z][a-zA-Z0-9_\s-]{1,30}?),?\s+(.+?)\s+(?:must|should|needs to) be (?:running|started|active)",
+    # "X requires Y" / "For X, we need Y"
+    r"(?:for\s+)?([a-zA-Z][a-zA-Z0-9_\s-]{1,30}?)\s+(?:requires?|needs?)\s+(.+?)(?:\s+(?:to be )?running)?(?:\.|,|$)",
+    # "Before using MIRA on X, do Y"
+    r"before (?:using )?(?:mira|this|anything)(?:\s+(?:on|in)\s+([a-zA-Z][a-zA-Z0-9_\s-]{1,30}?))?,?\s+(.+?)(?:\.|,|$)",
+    # "Y doesn't auto-start in X" (reversed capture groups)
+    r"([a-zA-Z][a-zA-Z0-9_-]+)\s+(?:doesn't|does not|won't)\s+(?:auto-?start|start automatically)\s+(?:in|on)\s+([a-zA-Z][a-zA-Z0-9_\s-]{1,30})",
+    # "Remember to Y on X"
+    r"(?:remember|don't forget)\s+to\s+(.+?)\s+(?:on|in|when using)\s+([a-zA-Z][a-zA-Z0-9_\s-]{1,30})",
+    # "Always Y when on X"
+    r"always\s+(.+?)\s+when\s+(?:on|in|using)\s+([a-zA-Z][a-zA-Z0-9_\s-]{1,30})",
+    # "First thing on X is to Y"
+    r"first (?:thing|step)\s+(?:on|in)\s+([a-zA-Z][a-zA-Z0-9_\s-]{1,30}?)\s+is\s+(?:to\s+)?(.+?)(?:\.|,|$)",
+    # "X won't work until Y" / "X fails without Y"
+    r"([a-zA-Z][a-zA-Z0-9_\s-]{1,30}?)\s+(?:won't work|fails?|can't connect|doesn't work)\s+(?:until|without|unless)\s+(.+?)(?:\.|,|$)",
+]
+
+# Command extraction patterns
+PREREQ_COMMAND_PATTERNS = [
+    # Backtick inline code
+    r"`([^`]+)`",
+    # Code blocks (bash/sh/shell/zsh)
+    r"```(?:bash|sh|shell|zsh)?\n?(.*?)```",
+    # "Run: X" / "Execute: X"
+    r"(?:run|execute|type|use|try):\s*(.+?)(?:\n|$)",
+    # "the command is X"
+    r"the command is\s+(.+?)(?:\.|,|\n|$)",
+    # "I usually run X"
+    r"i (?:usually |always )?run\s+(.+?)(?:\.|,|\n|$)",
+    # Common command prefixes
+    r"\b((?:sudo\s+)?(?:docker(?:-compose)?|systemctl|tailscale[d]?|kubectl|minikube|brew|apt(?:-get)?|yum|dnf|pacman|snap|npm|yarn|pnpm|pip|cargo|make|service|launchctl)\s+[^\s]+(?:\s+[^\s]+)*)",
+]
+
+# Reason extraction patterns
+PREREQ_REASON_PATTERNS = [
+    r"\bfor\s+(?:the\s+)?(.{5,50}?)(?:\.|,|$)",
+    r"\bbecause\s+(.{5,50}?)(?:\.|,|$)",
+    r"\bso\s+(?:that\s+)?(.{5,50}?)(?:\.|,|$)",
+    r"\botherwise\s+(.{5,50}?)(?:\.|,|$)",
+    r"\b(?:required|needed|necessary)\s+(?:for|by)\s+(.{5,50}?)(?:\.|,|$)",
+    r"\bto\s+(?:connect to|access|reach|use)\s+(.{5,50}?)(?:\.|,|$)",
+]
+
+# Check command templates for known services
+PREREQ_CHECK_TEMPLATES = {
+    # Network/VPN
+    'tailscale': 'tailscale status 2>/dev/null | grep -q "offers\\|online"',
+    'tailscaled': 'pgrep -x tailscaled >/dev/null',
+    'wireguard': 'wg show >/dev/null 2>&1',
+    'openvpn': 'pgrep -x openvpn >/dev/null',
+    'vpn': 'ip route 2>/dev/null | grep -qE "tun|tap|wg"',
+    # Containers
+    'docker': 'docker info >/dev/null 2>&1',
+    'docker-compose': 'docker-compose ps 2>/dev/null | grep -q Up',
+    'podman': 'podman info >/dev/null 2>&1',
+    'colima': 'colima status 2>/dev/null | grep -q Running',
+    'orbstack': 'orb status 2>/dev/null | grep -qi running',
+    'kubernetes': 'kubectl cluster-info >/dev/null 2>&1',
+    'minikube': 'minikube status 2>/dev/null | grep -q Running',
+    'kind': 'kind get clusters 2>/dev/null | grep -q .',
+    # Databases
+    'postgres': 'pg_isready -q 2>/dev/null',
+    'postgresql': 'pg_isready -q 2>/dev/null',
+    'mysql': 'mysqladmin ping -s 2>/dev/null',
+    'mariadb': 'mysqladmin ping -s 2>/dev/null',
+    'redis': 'redis-cli ping 2>/dev/null | grep -q PONG',
+    'mongodb': 'mongosh --quiet --eval "db.runCommand({ping:1})" >/dev/null 2>&1',
+    'memcached': 'echo stats | nc -q1 localhost 11211 >/dev/null 2>&1',
+    # Web servers
+    'nginx': 'pgrep -x nginx >/dev/null || systemctl is-active --quiet nginx 2>/dev/null',
+    'apache': 'pgrep -x apache2 >/dev/null || pgrep -x httpd >/dev/null',
+    # Auth
+    'ssh-agent': 'ssh-add -l >/dev/null 2>&1',
+    # Message queues
+    'rabbitmq': 'rabbitmqctl status >/dev/null 2>&1',
+    # Search/Vector
+    'elasticsearch': 'curl -sf localhost:9200 >/dev/null',
+    'qdrant': 'curl -sf localhost:6333 >/dev/null',
+    'chromadb': 'curl -sf localhost:8000/api/v1/heartbeat >/dev/null',
+    'weaviate': 'curl -sf localhost:8080/v1/.well-known/ready >/dev/null',
+}
+
+# Keywords that suggest a prerequisite statement
+PREREQ_KEYWORDS = [
+    'need to', 'have to', 'must', 'should', 'first', 'before',
+    'start', 'run', 'launch', 'connect', "doesn't auto", "won't start",
+    'remember to', "don't forget", 'always', 'requires', 'required'
+]
+
 # Schema for custodian database
 CUSTODIAN_SCHEMA = """
 -- Identity table - who is the custodian
@@ -129,10 +229,30 @@ CREATE TABLE IF NOT EXISTS work_patterns (
     last_seen TEXT
 );
 
+-- Environment-specific prerequisites learned from conversations
+CREATE TABLE IF NOT EXISTS prerequisites (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    environment TEXT NOT NULL,          -- User-defined env name (lowercase)
+    action TEXT NOT NULL,               -- Human description of what to do
+    command TEXT,                       -- Shell command to run
+    check_command TEXT,                 -- Verification command (exit 0 = met)
+    reason TEXT,                        -- Why it's needed
+    confidence REAL DEFAULT 0.5,        -- 0.0-1.0 confidence score
+    frequency INTEGER DEFAULT 1,        -- Times mentioned/confirmed
+    source_session TEXT,                -- Session ID where first learned
+    learned_at TEXT,                    -- ISO timestamp when learned
+    last_triggered TEXT,                -- Last time shown as alert
+    last_confirmed TEXT,                -- Last user confirmation
+    suppressed INTEGER DEFAULT 0,       -- User said "don't remind me"
+    UNIQUE(environment, action)
+);
+
 -- Create indexes
 CREATE INDEX IF NOT EXISTS idx_pref_category ON preferences(category);
 CREATE INDEX IF NOT EXISTS idx_rules_type ON rules(rule_type);
 CREATE INDEX IF NOT EXISTS idx_danger_path ON danger_zones(path_pattern);
+CREATE INDEX IF NOT EXISTS idx_prereq_env ON prerequisites(environment);
+CREATE INDEX IF NOT EXISTS idx_prereq_confidence ON prerequisites(confidence DESC);
 """
 
 
@@ -176,6 +296,9 @@ def extract_custodian_learnings(conversation: dict, session_id: str) -> dict:
 
         # Learn work patterns
         learned += _learn_work_patterns(db, messages, session_id, now)
+
+        # Learn environment-specific prerequisites
+        learned += _learn_prerequisites(db, messages, session_id, now)
 
     except Exception as e:
         log(f"Error extracting custodian learnings: {e}")
@@ -910,6 +1033,169 @@ def _learn_work_patterns(db, messages: list, session_id: str, now: str) -> int:
     return learned
 
 
+def _learn_prerequisites(db, messages: list, session_id: str, now: str) -> int:
+    """
+    Learn environment-specific prerequisites from conversation.
+
+    Extracts statements like:
+    - "In Codespaces, I need to start tailscaled first"
+    - "On my home machine, run docker-compose up before tests"
+    """
+    learned = 0
+
+    for msg in messages:
+        content = msg.get('content', '')
+        if isinstance(content, list):
+            # Handle content blocks
+            content = ' '.join(
+                block.get('text', '')
+                for block in content
+                if isinstance(block, dict) and block.get('type') == 'text'
+            )
+
+        if not content or len(content) < 20:
+            continue
+
+        role = msg.get('role', '')
+        content_lower = content.lower()
+
+        # Quick check for prerequisite-related keywords
+        if not any(kw in content_lower for kw in PREREQ_KEYWORDS):
+            continue
+
+        # Try each pattern to extract prerequisite statements
+        for pattern in PREREQ_STATEMENT_PATTERNS:
+            try:
+                matches = list(re.finditer(pattern, content, re.IGNORECASE | re.MULTILINE))
+            except re.error:
+                continue
+
+            for match in matches:
+                groups = match.groups()
+                if len(groups) < 2:
+                    continue
+
+                # Extract environment and action (order depends on pattern)
+                env = None
+                action = None
+
+                # Most patterns: (env, action), some reversed
+                g1, g2 = groups[0], groups[1] if len(groups) > 1 else None
+                if g1 and g2:
+                    # Heuristic: environments are shorter, actions are longer
+                    if len(g1.strip()) < len(g2.strip()):
+                        env, action = g1.strip(), g2.strip()
+                    else:
+                        action, env = g1.strip(), g2.strip()
+                elif g1:
+                    action = g1.strip()
+
+                # Validate extraction
+                if not action or len(action) < 5 or len(action) > 200:
+                    continue
+                if env and (len(env) < 2 or len(env) > 40):
+                    continue
+                if not env:
+                    env = 'all'  # Applies to all environments
+
+                # Normalize environment name
+                env = env.lower().strip()
+
+                # Extract command if present in the message
+                command = None
+                for cmd_pattern in PREREQ_COMMAND_PATTERNS:
+                    try:
+                        cmd_match = re.search(cmd_pattern, content, re.IGNORECASE | re.DOTALL)
+                        if cmd_match:
+                            cmd = cmd_match.group(1).strip()
+                            # Validate it looks like a command
+                            if cmd and len(cmd) > 3 and len(cmd) < 500:
+                                command = cmd
+                                break
+                    except re.error:
+                        continue
+
+                # Extract reason if present
+                reason = None
+                for reason_pattern in PREREQ_REASON_PATTERNS:
+                    try:
+                        reason_match = re.search(reason_pattern, content, re.IGNORECASE)
+                        if reason_match:
+                            reason = reason_match.group(1).strip()
+                            break
+                    except re.error:
+                        continue
+
+                # Generate check command if we recognize the service
+                check_command = None
+                action_lower = action.lower()
+                cmd_lower = (command or '').lower()
+
+                for service, check in PREREQ_CHECK_TEMPLATES.items():
+                    if service in action_lower or service in cmd_lower:
+                        check_command = check
+                        break
+
+                # Calculate confidence
+                confidence = 0.5
+                if role == 'user':
+                    confidence += 0.15  # User statements more authoritative
+                if command:
+                    confidence += 0.10  # Has concrete command
+                if check_command:
+                    confidence += 0.05  # We can verify it
+                if reason:
+                    confidence += 0.05  # Explained why
+                confidence = min(1.0, confidence)
+
+                # Store the prerequisite
+                def upsert_prereq(cursor, e=env, a=action, c=command, cc=check_command,
+                                  r=reason, conf=confidence, sid=session_id, n=now):
+                    cursor.execute("""
+                        SELECT id, frequency, confidence, command, check_command, reason
+                        FROM prerequisites
+                        WHERE environment = ? AND action = ?
+                    """, (e, a))
+
+                    row = cursor.fetchone()
+                    if row:
+                        # Update existing - merge data, boost confidence
+                        new_conf = min(1.0, row[2] + 0.1)
+                        new_cmd = c or row[3]
+                        new_check = cc or row[4]
+                        new_reason = r or row[5]
+
+                        cursor.execute("""
+                            UPDATE prerequisites
+                            SET frequency = frequency + 1,
+                                confidence = ?,
+                                command = ?,
+                                check_command = ?,
+                                reason = ?,
+                                last_confirmed = ?
+                            WHERE id = ?
+                        """, (new_conf, new_cmd, new_check, new_reason, n, row[0]))
+                        return 0  # Not new
+                    else:
+                        cursor.execute("""
+                            INSERT INTO prerequisites
+                            (environment, action, command, check_command, reason,
+                             confidence, source_session, learned_at)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        """, (e, a, c, cc, r, conf, sid, n))
+                        return 1  # New learning
+
+                try:
+                    result = db.execute_write_func(CUSTODIAN_DB, upsert_prereq)
+                    learned += result
+                    if result > 0:
+                        log(f"Learned prerequisite: '{action}' for environment '{env}'")
+                except Exception as e:
+                    log(f"Error storing prerequisite: {e}")
+
+    return learned
+
+
 def get_full_custodian_profile() -> dict:
     """
     Get the complete custodian profile for providing context to Claude.
@@ -1170,3 +1456,254 @@ def get_danger_zones_for_files(file_paths: list) -> list:
         log(f"Error checking danger zones: {e}")
 
     return warnings
+
+
+# =============================================================================
+# PREREQUISITE DETECTION AND CHECKING
+# =============================================================================
+
+def detect_environment() -> list:
+    """
+    Detect current environment identifiers.
+
+    Returns list of strings that might match user-defined environment names.
+    More specific identifiers come first.
+    """
+    import os
+    import socket
+    import platform
+
+    envs = []
+
+    # === User-defined (highest priority) ===
+    user_env = os.environ.get('MIRA_ENVIRONMENT')
+    if user_env:
+        envs.extend([e.strip().lower() for e in user_env.split(',')])
+
+    # === Cloud/Container Environments ===
+    env_indicators = {
+        'CODESPACES': ['codespaces', 'github codespaces'],
+        'GITPOD_WORKSPACE_ID': ['gitpod'],
+        'CLOUD_SHELL': ['cloud shell', 'cloudshell'],
+        'REPLIT_DB_URL': ['replit'],
+        'RAILWAY_ENVIRONMENT': ['railway'],
+        'FLY_APP_NAME': ['fly', 'fly.io'],
+        'RENDER': ['render'],
+        'VERCEL': ['vercel'],
+    }
+
+    for var, identifiers in env_indicators.items():
+        if os.environ.get(var):
+            envs.extend(identifiers)
+
+    # AWS - check for execution env
+    aws_env = os.environ.get('AWS_EXECUTION_ENV')
+    if aws_env:
+        envs.extend(['aws', aws_env.lower()])
+
+    # GCP
+    if os.environ.get('GOOGLE_CLOUD_PROJECT'):
+        envs.extend(['gcp', 'google cloud'])
+
+    # Azure
+    if os.environ.get('AZURE_CLIENT_ID'):
+        envs.append('azure')
+
+    # === WSL Detection ===
+    wsl_distro = os.environ.get('WSL_DISTRO_NAME')
+    if wsl_distro:
+        envs.extend(['wsl', f'wsl-{wsl_distro.lower()}', wsl_distro.lower()])
+
+    # === SSH/Remote Detection ===
+    if os.environ.get('SSH_CONNECTION') or os.environ.get('SSH_CLIENT'):
+        envs.extend(['ssh', 'remote', 'remote-ssh'])
+
+    # === Container Detection ===
+    if os.path.exists('/.dockerenv'):
+        envs.extend(['docker', 'container'])
+    if os.path.exists('/run/.containerenv'):
+        envs.extend(['podman', 'container'])
+
+    # === VS Code Remote ===
+    if os.environ.get('VSCODE_IPC_HOOK_CLI'):
+        envs.append('vscode-remote')
+
+    # === Hostname ===
+    try:
+        hostname = socket.gethostname().lower()
+        envs.append(hostname)
+        # Also add short hostname (before first dot)
+        short = hostname.split('.')[0]
+        if short != hostname:
+            envs.append(short)
+    except Exception:
+        pass
+
+    # === OS Detection ===
+    os_type = platform.system().lower()
+    envs.append(os_type)
+
+    os_aliases = {
+        'darwin': ['mac', 'macos', 'osx'],
+        'linux': ['linux'],
+        'windows': ['windows', 'win'],
+        'sunos': ['solaris', 'sunos'],
+        'freebsd': ['freebsd', 'bsd'],
+        'openbsd': ['openbsd', 'bsd'],
+    }
+    envs.extend(os_aliases.get(os_type, []))
+
+    # === Linux Distro Detection ===
+    if os_type == 'linux':
+        distro_files = {
+            '/etc/arch-release': 'arch',
+            '/etc/debian_version': 'debian',
+            '/etc/fedora-release': 'fedora',
+            '/etc/redhat-release': 'rhel',
+            '/etc/gentoo-release': 'gentoo',
+            '/etc/alpine-release': 'alpine',
+            '/etc/nixos': 'nixos',
+        }
+        for path, name in distro_files.items():
+            if os.path.exists(path):
+                envs.append(name)
+                break
+
+    # === Terminal Detection ===
+    term = os.environ.get('TERM_PROGRAM', '').lower()
+    if term:
+        envs.append(term)
+
+    # === Local vs Remote ===
+    remote_indicators = {'ssh', 'remote', 'codespaces', 'gitpod', 'container'}
+    if not any(e in remote_indicators for e in envs):
+        envs.append('local')
+
+    # Dedupe while preserving order
+    seen = set()
+    result = []
+    for e in envs:
+        if e and e not in seen:
+            seen.add(e)
+            result.append(e)
+
+    return result
+
+
+def get_applicable_prerequisites(detected_envs: list = None) -> list:
+    """
+    Get prerequisites that apply to the current environment.
+
+    Args:
+        detected_envs: List of environment identifiers. If None, auto-detect.
+
+    Returns:
+        List of prerequisite dicts sorted by confidence.
+    """
+    if detected_envs is None:
+        detected_envs = detect_environment()
+
+    db = get_db_manager()
+
+    # Get all prerequisites with reasonable confidence
+    try:
+        rows = db.execute_read(CUSTODIAN_DB, """
+            SELECT environment, action, command, check_command, reason,
+                   confidence, frequency, suppressed
+            FROM prerequisites
+            WHERE confidence >= 0.5 AND suppressed = 0
+            ORDER BY confidence DESC, frequency DESC
+        """)
+    except Exception as e:
+        log(f"Error fetching prerequisites: {e}")
+        return []
+
+    applicable = []
+    detected_set = set(detected_envs)
+
+    for row in rows:
+        prereq_env = row['environment'].lower()
+
+        # Check for matches
+        matched = False
+
+        # Exact match
+        if prereq_env in detected_set:
+            matched = True
+
+        # Partial/fuzzy match (e.g., "codespaces" matches "github codespaces")
+        if not matched:
+            for detected in detected_envs:
+                if prereq_env in detected or detected in prereq_env:
+                    matched = True
+                    break
+
+        # "all" or "always" environment matches everything
+        if prereq_env in ('all', 'always', 'any', 'everywhere'):
+            matched = True
+
+        if matched:
+            applicable.append({
+                'environment': row['environment'],
+                'action': row['action'],
+                'command': row['command'],
+                'check_command': row['check_command'],
+                'reason': row['reason'],
+                'confidence': row['confidence'],
+            })
+
+    return applicable
+
+
+def check_prerequisites_and_alert() -> list:
+    """
+    Check all applicable prerequisites and generate alerts for unmet ones.
+
+    Returns list of alert dicts for inclusion in mira_init response.
+    """
+    import subprocess
+
+    applicable = get_applicable_prerequisites()
+    alerts = []
+
+    for prereq in applicable:
+        check_cmd = prereq.get('check_command')
+
+        # If we have a check command, verify the prerequisite
+        if check_cmd:
+            try:
+                result = subprocess.run(
+                    check_cmd,
+                    shell=True,
+                    capture_output=True,
+                    timeout=5
+                )
+                if result.returncode == 0:
+                    # Prerequisite met, no alert needed
+                    continue
+            except subprocess.TimeoutExpired:
+                # Check timed out - treat as unmet
+                pass
+            except Exception as e:
+                log(f"Error checking prerequisite '{prereq['action']}': {e}")
+                continue
+
+        # Prerequisite not met (or no check command) - generate alert
+        priority = 'high' if prereq.get('confidence', 0) > 0.75 else 'medium'
+
+        alert = {
+            'type': 'prerequisite',
+            'priority': priority,
+            'message': prereq['action'],
+            'environment': prereq['environment'],
+        }
+
+        if prereq.get('command'):
+            alert['suggestion'] = f"Run: {prereq['command']}"
+
+        if prereq.get('reason'):
+            alert['context'] = prereq['reason']
+
+        alerts.append(alert)
+
+    return alerts

@@ -12,17 +12,17 @@ MIRA context is automatically injected at session start via the SessionStart hoo
 
 **If context seems stale**, run `mira_init` manually to refresh.
 
-### Tailscale Requirement (Codespaces)
+### Session Prerequisites (Learned)
 
-MIRA uses central storage (Qdrant + PostgreSQL) on GCP, accessed via Tailscale VPN. **Tailscale must be running for MIRA to connect to central storage.**
+MIRA learns environment-specific prerequisites from conversations. State them naturally:
 
-In Codespaces, tailscaled doesn't auto-start. Run this at the beginning of each session:
+- "In Codespaces, I need to start tailscaled first"
+- "On my home workstation, run docker-compose up before tests"
+- "When SSHed into the server, source the env file first"
 
-```bash
-sudo tailscaled --state=/var/lib/tailscale/tailscaled.state --socket=/var/run/tailscale/tailscaled.sock &
-```
+MIRA extracts the environment, action, command, and reason - then reminds you in future sessions when that environment is detected.
 
-Verify connection with `tailscale status` - you should see `mira-server` at `100.107.224.88`.
+**To set environment explicitly:** `export MIRA_ENVIRONMENT=my-workstation`
 
 ---
 
