@@ -13,6 +13,16 @@ const require = createRequire(import.meta.url);
 const pkg = require("../../package.json");
 const VERSION = pkg.version;
 
+// MIRA mascot faces - owl-themed (wisdom & memory)
+const MIRA_FACES = {
+  search: "[◉‿◉]",      // happy searching
+  recent: "[◉_◉]",      // neutral browsing
+  init: "[◉▽◉]",        // greeting
+  status: "[◉~◉]",      // checking
+  error: "[◉!◉]",       // alert
+  decisions: "[◉?◉]",   // questioning
+};
+
 // Tool parameter schemas
 const SearchSchema = z.object({
   query: z.string().describe("Search query for finding conversations"),
@@ -75,13 +85,14 @@ export async function startServer(): Promise<void> {
         };
       }
       try {
-        const result = await callRpc("search", { query, limit, project_path, compact, days });
+        const result = await callRpc("search", { query, limit, project_path, compact, days }) as any;
+        const resultCount = result?.results?.length || result?.total || 0;
         return {
-          content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+          content: [{ type: "text", text: `${MIRA_FACES.search} ${resultCount} results\n${JSON.stringify(result, null, 2)}` }],
         };
       } catch (error) {
         return {
-          content: [{ type: "text", text: `Search error: ${error}` }],
+          content: [{ type: "text", text: `${MIRA_FACES.search} Search error: ${error}` }],
         };
       }
     }
@@ -98,13 +109,14 @@ export async function startServer(): Promise<void> {
         };
       }
       try {
-        const result = await callRpc("recent", { limit, days });
+        const result = await callRpc("recent", { limit, days }) as any;
+        const sessionCount = result?.sessions?.length || 0;
         return {
-          content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+          content: [{ type: "text", text: `${MIRA_FACES.recent} ${sessionCount} sessions\n${JSON.stringify(result, null, 2)}` }],
         };
       } catch (error) {
         return {
-          content: [{ type: "text", text: `Recent error: ${error}` }],
+          content: [{ type: "text", text: `${MIRA_FACES.recent} Recent error: ${error}` }],
         };
       }
     }
@@ -121,13 +133,14 @@ export async function startServer(): Promise<void> {
         };
       }
       try {
-        const result = await callRpc("init", { project_path });
+        const result = await callRpc("init", { project_path }) as any;
+        const userName = result?.custodian?.name || "friend";
         return {
-          content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+          content: [{ type: "text", text: `${MIRA_FACES.init} Hello ${userName}!\n${JSON.stringify(result, null, 2)}` }],
         };
       } catch (error) {
         return {
-          content: [{ type: "text", text: `Init error: ${error}` }],
+          content: [{ type: "text", text: `${MIRA_FACES.init} Init error: ${error}` }],
         };
       }
     }
@@ -144,13 +157,14 @@ export async function startServer(): Promise<void> {
         };
       }
       try {
-        const result = await callRpc("status", { project_path });
+        const result = await callRpc("status", { project_path }) as any;
+        const mode = result?.storage_health?.mode || "local";
         return {
-          content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+          content: [{ type: "text", text: `${MIRA_FACES.status} ${mode} mode\n${JSON.stringify(result, null, 2)}` }],
         };
       } catch (error) {
         return {
-          content: [{ type: "text", text: `Status error: ${error}` }],
+          content: [{ type: "text", text: `${MIRA_FACES.status} Status error: ${error}` }],
         };
       }
     }
@@ -167,13 +181,14 @@ export async function startServer(): Promise<void> {
         };
       }
       try {
-        const result = await callRpc("error_lookup", { query, limit });
+        const result = await callRpc("error_lookup", { query, limit }) as any;
+        const solutionCount = result?.solutions?.length || result?.total || 0;
         return {
-          content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+          content: [{ type: "text", text: `${MIRA_FACES.error} ${solutionCount} solutions found\n${JSON.stringify(result, null, 2)}` }],
         };
       } catch (error) {
         return {
-          content: [{ type: "text", text: `Error lookup error: ${error}` }],
+          content: [{ type: "text", text: `${MIRA_FACES.error} Error lookup error: ${error}` }],
         };
       }
     }
@@ -190,13 +205,14 @@ export async function startServer(): Promise<void> {
         };
       }
       try {
-        const result = await callRpc("decisions", { query, category, limit });
+        const result = await callRpc("decisions", { query, category, limit }) as any;
+        const decisionCount = result?.decisions?.length || result?.total || 0;
         return {
-          content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+          content: [{ type: "text", text: `${MIRA_FACES.decisions} ${decisionCount} decisions\n${JSON.stringify(result, null, 2)}` }],
         };
       } catch (error) {
         return {
-          content: [{ type: "text", text: `Decisions error: ${error}` }],
+          content: [{ type: "text", text: `${MIRA_FACES.decisions} Decisions error: ${error}` }],
         };
       }
     }
