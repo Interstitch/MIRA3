@@ -39,19 +39,19 @@ print_section() {
 }
 
 print_success() {
-    echo -e "${GREEN}✓ $1${NC}"
+    echo -e "${GREEN}[◉‿◉] $1${NC}"
 }
 
 print_warning() {
-    echo -e "${YELLOW}⚠ $1${NC}"
+    echo -e "${YELLOW}[◉!◉] $1${NC}"
 }
 
 print_error() {
-    echo -e "${RED}✗ $1${NC}"
+    echo -e "${RED}[◉_◉] $1${NC}"
 }
 
 fail() {
-    print_error "$1"
+    echo -e "${RED}[◉︵◉] $1${NC}"
     echo ""
     echo "Install log saved to: $LOG_FILE"
     exit 1
@@ -59,7 +59,7 @@ fail() {
 
 # Check for required commands
 check_requirements() {
-    print_section "CHECKING REQUIREMENTS"
+    print_section "[◉_◉] CHECKING REQUIREMENTS"
 
     local missing=()
 
@@ -112,7 +112,7 @@ check_requirements() {
 
 # Check system resources
 check_resources() {
-    print_section "CHECKING RESOURCES"
+    print_section "[◉~◉] CHECKING RESOURCES"
 
     # Check RAM
     local ram_kb=$(grep MemTotal /proc/meminfo 2>/dev/null | awk '{print $2}')
@@ -207,7 +207,7 @@ setup_tailscale() {
     fi
 
     # Tailscale not installed - explain and offer
-    print_section "RECOMMENDED: Tailscale VPN"
+    print_section "[◉?◉] RECOMMENDED: Tailscale VPN"
 
     echo "Tailscale is a free mesh VPN that makes connecting to this server"
     echo "easy and secure - no firewall configuration needed."
@@ -245,7 +245,7 @@ setup_tailscale() {
 
 # Select server IP
 select_server_ip() {
-    print_section "SELECT SERVER IP"
+    print_section "[◉?◉] SELECT SERVER IP"
 
     echo "Which IP should clients use to connect?"
     echo ""
@@ -337,7 +337,7 @@ wait_for_service() {
 
 # Check all services are healthy
 verify_services() {
-    print_section "VERIFYING SERVICES"
+    print_section "[◉~◉] VERIFYING SERVICES"
 
     echo "Waiting for services to start (this may take a minute)..."
     echo ""
@@ -387,7 +387,7 @@ main() {
     check_resources
 
     # Create install directory
-    print_section "INSTALLING"
+    print_section "[◉⌘◉] INSTALLING"
 
     echo "Install directory: $INSTALL_DIR"
     if ! mkdir -p "$INSTALL_DIR" 2>/dev/null; then
@@ -413,7 +413,7 @@ main() {
         cp .env.example .env
 
         # Network setup
-        print_section "NETWORK SETUP"
+        print_section "[◉?◉] NETWORK SETUP"
         TAILSCALE_IP=""
         setup_tailscale && TAILSCALE_IP=$(get_tailscale_ip)
 
@@ -434,7 +434,7 @@ main() {
     fi
 
     # Start services
-    print_section "STARTING SERVICES"
+    print_section "[◉⌘◉] STARTING SERVICES"
     echo "Pulling Docker images (first run may take 2-3 minutes)..."
     docker compose pull
     docker compose up -d || fail "Failed to start services"
@@ -447,7 +447,7 @@ main() {
     source .env
 
     # Final output
-    print_section "INSTALLATION COMPLETE"
+    print_section "[◉‿◉] INSTALLATION COMPLETE"
 
     echo -e "${GREEN}${BOLD}Server: $SERVER_IP${NC}"
     echo ""
@@ -456,7 +456,7 @@ main() {
     echo "  • Qdrant      $SERVER_IP:6333"
     echo "  • Embedding   $SERVER_IP:8200"
 
-    print_section "CLIENT CONFIGURATION"
+    print_section "[◉_◉] CLIENT CONFIGURATION"
 
     echo "Create this file on each machine using MIRA:"
     echo ""
@@ -477,7 +477,7 @@ EOF
 
     # Tailscale reminder
     if [[ "$SERVER_IP" == 100.* ]]; then
-        print_section "TAILSCALE ON CLIENTS"
+        print_section "[◉_◉] TAILSCALE ON CLIENTS"
         echo "You're using Tailscale. Install it on each client machine:"
         echo ""
         echo "  curl -fsSL https://tailscale.com/install.sh | sh"
@@ -486,7 +486,7 @@ EOF
         echo "Use the same Tailscale account to join your network."
     fi
 
-    print_section "USEFUL COMMANDS"
+    print_section "[◉_◉] USEFUL COMMANDS"
 
     echo "  Status:     cd $INSTALL_DIR && docker compose ps"
     echo "  Logs:       cd $INSTALL_DIR && docker compose logs -f"
@@ -497,6 +497,8 @@ EOF
     echo "    cat $INSTALL_DIR/.env"
     echo ""
     echo "Install log: $LOG_FILE"
+    echo ""
+    echo -e "${GREEN}[◉‿◉] MIRA is ready to remember everything!${NC}"
     echo ""
 }
 
