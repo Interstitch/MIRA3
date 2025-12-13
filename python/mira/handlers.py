@@ -12,7 +12,7 @@ from collections import Counter
 from .utils import log, get_mira_path, get_custodian
 from .search import handle_search
 from .artifacts import get_artifact_stats, get_journey_stats
-from .custodian import get_full_custodian_profile, get_danger_zones_for_files, check_prerequisites_and_alert
+from .custodian import get_full_custodian_profile, get_danger_zones_for_files, check_prerequisites_and_alert, format_rule_for_display, RULE_TYPES
 from .insights import search_error_solutions, search_decisions, get_error_stats, get_decision_stats
 from .concepts import get_codebase_knowledge, ConceptStore
 
@@ -841,20 +841,26 @@ def _build_enriched_custodian_summary(profile: dict) -> str:
         if real_prefs:
             sentences.append(f"Prefers {real_prefs[0].lower()}.")
 
-    # Important rules (most critical)
+    # Important rules (most critical - show highest confidence)
     rules = profile.get('rules', {})
     never_rules = rules.get('never', [])
     always_rules = rules.get('always', [])
+    require_rules = rules.get('require', [])
 
     if never_rules:
         rule = never_rules[0].get('rule', '')
         if rule:
-            sentences.append(f"Important: never {rule[:50]}.")
+            sentences.append(f"Important: never {format_rule_for_display(rule, 45)}.")
 
     if always_rules:
         rule = always_rules[0].get('rule', '')
         if rule:
-            sentences.append(f"Always {rule[:50]}.")
+            sentences.append(f"Always {format_rule_for_display(rule, 45)}.")
+
+    if require_rules and not always_rules:  # Only if no always rules
+        rule = require_rules[0].get('rule', '')
+        if rule:
+            sentences.append(f"Required: {format_rule_for_display(rule, 45)}.")
 
     # Danger zones
     danger_zones = profile.get('danger_zones', [])
@@ -908,18 +914,28 @@ def _build_interaction_tips(profile: dict) -> list:
         elif 'explain' in pref_text:
             tips.append("Explain your reasoning as you work")
 
-    # Rules
+    # Rules - handle all rule types with proper formatting
     rules = profile.get('rules', {})
 
-    for never_rule in rules.get('never', [])[:3]:
-        rule_text = never_rule.get('rule', '')
-        if rule_text:
-            tips.append(f"Never: {rule_text}")
+    # Priority order for display: never, always, require, prefer, avoid, prohibit, style
+    rule_display_order = ['never', 'always', 'require', 'prefer', 'avoid', 'prohibit', 'style']
+    rules_added = 0
+    max_rules = 6  # Limit total rules in tips
 
-    for always_rule in rules.get('always', [])[:3]:
-        rule_text = always_rule.get('rule', '')
-        if rule_text:
-            tips.append(f"Always: {rule_text}")
+    for rule_type in rule_display_order:
+        if rules_added >= max_rules:
+            break
+        type_rules = rules.get(rule_type, [])
+        display_name = RULE_TYPES.get(rule_type, rule_type.capitalize())
+
+        for rule in type_rules[:2]:  # Max 2 per type
+            if rules_added >= max_rules:
+                break
+            rule_text = rule.get('rule', '')
+            if rule_text:
+                formatted = format_rule_for_display(rule_text, 60)
+                tips.append(f"{display_name}: {formatted}")
+                rules_added += 1
 
     # Work patterns
     work_patterns = profile.get('work_patterns', [])

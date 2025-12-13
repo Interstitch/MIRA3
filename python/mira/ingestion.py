@@ -571,8 +571,13 @@ def run_full_ingestion(collection, mira_path: Path = None, max_workers: int = 4,
     log(f"╚══════════════════════════════════════════════════════════════╝")
 
     t_discover_start = time.time()
-    conversations = discover_conversations()
+    all_conversations = discover_conversations()
     t_discover = (time.time() - t_discover_start) * 1000
+
+    # Filter out agent sub-conversations (agent-*.jsonl)
+    # These are subagent task logs, not meaningful user-Claude interactions
+    conversations = [c for c in all_conversations if not c.get('is_agent', False)]
+    agent_count = len(all_conversations) - len(conversations)
 
     # Group by project for visibility
     by_project = {}
@@ -580,14 +585,15 @@ def run_full_ingestion(collection, mira_path: Path = None, max_workers: int = 4,
         proj = c.get('project_path', 'unknown')
         by_project[proj] = by_project.get(proj, 0) + 1
 
-    log(f"Discovered {len(conversations)} conversation files ({t_discover:.0f}ms)")
+    log(f"Discovered {len(all_conversations)} files, {agent_count} agent files filtered ({t_discover:.0f}ms)")
     for proj, count in sorted(by_project.items(), key=lambda x: -x[1])[:5]:
         log(f"  - {proj}: {count} files")
 
     stats = {
-        'discovered': len(conversations),
+        'discovered': len(all_conversations),
         'ingested': 0,
         'skipped': 0,
+        'skipped_agent_files': agent_count,
         'skipped_in_central': 0,
         'skipped_no_messages': 0,
         'skipped_unchanged': 0,
@@ -665,7 +671,8 @@ def run_full_ingestion(collection, mira_path: Path = None, max_workers: int = 4,
     log(f"╔══════════════════════════════════════════════════════════════╗")
     log(f"║ INGESTION COMPLETE")
     log(f"║   Ingested: {stats['ingested']}, Failed: {stats['failed']}")
-    log(f"║   Skipped: {stats['skipped']} total")
+    log(f"║   Skipped: {stats['skipped'] + stats['skipped_agent_files']} total")
+    log(f"║     - Agent files (filtered): {stats['skipped_agent_files']}")
     log(f"║     - Already in central: {stats['skipped_in_central']}")
     log(f"║     - No messages: {stats['skipped_no_messages']}")
     log(f"║     - Unchanged (local only): {stats['skipped_unchanged']}")

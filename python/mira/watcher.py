@@ -114,6 +114,11 @@ class ConversationWatcher:
         project_dir = path.parent.name
         is_agent_file = path.name.startswith("agent-")
 
+        # Skip agent sub-conversations (subagent task logs)
+        if is_agent_file:
+            log(f"Skipping agent file: {session_id}")
+            return
+
         try:
             mtime = path.stat().st_mtime
             last_modified = datetime.fromtimestamp(mtime).isoformat()

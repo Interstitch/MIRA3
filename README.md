@@ -342,7 +342,10 @@ When MIRA detects a new or modified conversation file, it runs an **ingestion pi
 | **Vector Embeddings** | Semantic representation of conversation content | Meaning-based search |
 | **Metadata** | Git branch, models used, tools invoked, files touched | Filtering and context |
 
-**Automatic filtering:** MIRA skips file-history snapshots, agent sub-conversations (agent-*.jsonl), and empty conversations. Only meaningful user-Claude interactions are indexed.
+**Automatic filtering:** MIRA filters out noise to index only meaningful content:
+- **Agent sub-conversations** (`agent-*.jsonl`) - Subagent task logs are skipped entirely
+- **Empty conversations** - Sessions with no user/assistant messages are skipped
+- **Non-message content** - Only `user`, `assistant`, and `summary` message types are extracted; other types like `file-history-snapshot` and `tool-result` are ignored
 
 **Incremental updates:** When a conversation is modified (you continue a session), MIRA re-ingests only the changed content, updating summaries and adding new artifacts.
 
