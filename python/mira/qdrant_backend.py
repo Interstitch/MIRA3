@@ -118,10 +118,11 @@ class QdrantBackend:
         if qdrant is None:
             raise ImportError("qdrant-client not installed")
 
-        log.info(f"Connecting to Qdrant at {self.host}:{self.port}")
+        # Use explicit URL to force HTTP (QdrantClient defaults to HTTPS when api_key is set)
+        qdrant_url = f"http://{self.host}:{self.port}"
+        log.info(f"Connecting to Qdrant at {qdrant_url}")
         self._client = qdrant["QdrantClient"](
-            host=self.host,
-            port=self.port,
+            url=qdrant_url,
             timeout=self.timeout,
             api_key=self.api_key,  # None if not set (auth disabled)
         )
