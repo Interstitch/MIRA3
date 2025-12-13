@@ -211,3 +211,120 @@ class TestConfig:
         # Should return True (we warn but don't block)
         result = validate_file_permissions(test_file)
         assert result is True
+
+    def test_api_key_loaded_from_config(self):
+        """Test that Qdrant api_key is properly loaded from config file."""
+        from mira.config import load_config
+
+        # Write config with api_key
+        config_data = {
+            "version": 1,
+            "central": {
+                "enabled": True,
+                "qdrant": {
+                    "host": "10.0.0.1",
+                    "port": 6333,
+                    "api_key": "test_api_key_123"
+                },
+                "postgres": {
+                    "host": "10.0.0.1",
+                    "password": "test_pass"
+                }
+            }
+        }
+        with open(self.config_path, 'w') as f:
+            json.dump(config_data, f)
+
+        old_env = os.environ.get("MIRA_CONFIG_PATH")
+        os.environ["MIRA_CONFIG_PATH"] = str(self.config_path)
+
+        try:
+            config = load_config()
+            assert config.central.qdrant.api_key == "test_api_key_123"
+        finally:
+            if old_env:
+                os.environ["MIRA_CONFIG_PATH"] = old_env
+            else:
+                os.environ.pop("MIRA_CONFIG_PATH", None)
+
+
+class TestModuleImports:
+    """Test that all mira modules can be imported without errors.
+
+    This catches missing imports (like forgetting 'from datetime import datetime')
+    at test time rather than at runtime.
+    """
+
+    def test_import_config(self):
+        """Test mira.config imports successfully."""
+        from mira import config
+        assert hasattr(config, 'load_config')
+
+    def test_import_storage(self):
+        """Test mira.storage imports successfully."""
+        from mira import storage
+        assert hasattr(storage, 'Storage')
+
+    def test_import_handlers(self):
+        """Test mira.handlers imports successfully."""
+        from mira import handlers
+        # The module imports successfully - that's what we're testing
+        assert handlers is not None
+
+    def test_import_local_store(self):
+        """Test mira.local_store imports successfully."""
+        from mira import local_store
+        assert hasattr(local_store, 'LOCAL_DB')
+
+    def test_import_postgres_backend(self):
+        """Test mira.postgres_backend imports successfully."""
+        from mira import postgres_backend
+        assert hasattr(postgres_backend, 'PostgresBackend')
+
+    def test_import_search(self):
+        """Test mira.search imports successfully."""
+        from mira import search
+        # The module imports successfully - that's what we're testing
+        assert search is not None
+
+    def test_import_ingestion(self):
+        """Test mira.ingestion imports successfully."""
+        from mira import ingestion
+        # The module imports successfully - that's what we're testing
+        assert ingestion is not None
+
+    def test_import_metadata(self):
+        """Test mira.metadata imports successfully."""
+        from mira import metadata
+        assert hasattr(metadata, 'extract_metadata')
+
+    def test_import_custodian(self):
+        """Test mira.custodian imports successfully."""
+        from mira import custodian
+        assert hasattr(custodian, 'init_custodian_db')
+
+    def test_import_insights(self):
+        """Test mira.insights imports successfully."""
+        from mira import insights
+        assert hasattr(insights, 'init_insights_db')
+
+    def test_import_artifacts(self):
+        """Test mira.artifacts imports successfully."""
+        from mira import artifacts
+        assert hasattr(artifacts, 'init_artifact_db')
+
+    def test_import_concepts(self):
+        """Test mira.concepts imports successfully."""
+        from mira import concepts
+        # The module imports successfully - that's what we're testing
+        assert concepts is not None
+
+    def test_import_watcher(self):
+        """Test mira.watcher imports successfully."""
+        from mira import watcher
+        assert hasattr(watcher, 'ConversationWatcher')
+
+    def test_import_main(self):
+        """Test mira.main imports successfully."""
+        from mira import main
+        assert hasattr(main, 'main')
