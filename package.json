@@ -1,7 +1,7 @@
 {
   "name": "claude-mira3",
-  "version": "0.2.30",
-  "description": "MCP server for Claude Code conversation history with semantic search via ChromaDB",
+  "version": "0.2.31",
+  "description": "Persistent memory for Claude Code - semantic search, cross-machine sync, learned preferences, error tracking",
   "type": "module",
   "main": "dist/cli.js",
   "bin": {
@@ -26,7 +26,7 @@
     "claude",
     "claude-code",
     "conversation-history",
-    "chromadb",
+    "qdrant",
     "sentence-transformers",
     "semantic-search"
   ],

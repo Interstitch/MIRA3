@@ -410,8 +410,11 @@ class SyncWorker:
                 # Fallback: look up UUID from local session_id (int)
                 local_session_id = payload.get("session_id")
                 if local_session_id and isinstance(local_session_id, int):
-                    from .local_store import local_store
-                    rows = local_store.execute_read(
+                    from .db_manager import get_db_manager
+                    from .local_store import LOCAL_DB
+                    db = get_db_manager()
+                    rows = db.execute_read(
+                        LOCAL_DB,
                         "SELECT session_id FROM sessions WHERE id = ?",
                         (local_session_id,)
                     )
@@ -585,10 +588,13 @@ class SyncWorker:
                 ))
                 if local_session_ids:
                     # Look up UUIDs from local database
-                    from .local_store import local_store
+                    from .db_manager import get_db_manager
+                    from .local_store import LOCAL_DB
+                    db = get_db_manager()
                     uuid_map = {}  # local_id -> uuid
                     for local_id in local_session_ids:
-                        rows = local_store.execute_read(
+                        rows = db.execute_read(
+                            LOCAL_DB,
                             "SELECT session_id FROM sessions WHERE id = ?",
                             (local_id,)
                         )
@@ -781,6 +787,15 @@ def get_sync_worker(storage=None) -> SyncWorker:
 
 def start_sync_worker(storage=None):
     """Start the global sync worker."""
+    # Reset failed items on startup to give them another chance
+    try:
+        queue = get_sync_queue()
+        reset_count = queue.reset_failed_items()
+        if reset_count > 0:
+            log(f"Reset {reset_count} failed sync items for retry")
+    except Exception as e:
+        log(f"Failed to reset failed items: {e}")
+
     worker = get_sync_worker(storage)
     worker.start()
     return worker

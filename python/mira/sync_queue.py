@@ -319,6 +319,39 @@ class SyncQueue:
             (error,) + tuple(item_ids)
         )
 
+    def reset_failed_items(self) -> int:
+        """
+        Reset all failed items to pending for retry.
+
+        Called on startup to give failed items another chance.
+        Returns the number of items reset.
+        """
+        db = get_db_manager()
+
+        # Get count first
+        row = db.execute_read_one(
+            SYNC_QUEUE_DB,
+            "SELECT COUNT(*) as count FROM sync_queue WHERE status = 'failed'",
+            ()
+        )
+        count = row['count'] if row else 0
+
+        if count > 0:
+            db.execute_write(
+                SYNC_QUEUE_DB,
+                """
+                UPDATE sync_queue
+                SET status = 'pending',
+                    retry_count = 0,
+                    last_error = NULL,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE status = 'failed'
+                """,
+                ()
+            )
+
+        return count
+
     def get_stats(self) -> Dict[str, Any]:
         """Get queue statistics."""
         db = get_db_manager()
