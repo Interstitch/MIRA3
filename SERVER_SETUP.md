@@ -35,8 +35,10 @@ curl -sL https://raw.githubusercontent.com/Interstitch/MIRA3/master/server/insta
 
 The script will:
 1. Download `docker-compose.yml` and `.env.example`
-2. Prompt for your server IP and PostgreSQL password
-3. Start all services
+2. Auto-detect available IPs (LAN, Tailscale, public) and let you choose
+3. Generate secure random credentials for PostgreSQL and Qdrant
+4. Start all services
+5. Print the complete `server.json` config to copy to your client machines
 
 ### Manual install
 
@@ -47,7 +49,7 @@ mkdir -p /opt/mira && cd /opt/mira
 curl -O https://raw.githubusercontent.com/Interstitch/MIRA3/master/server/docker-compose.yml
 curl -O https://raw.githubusercontent.com/Interstitch/MIRA3/master/server/.env.example
 cp .env.example .env
-nano .env  # Set POSTGRES_PASSWORD and SERVER_IP
+nano .env  # Set SERVER_IP, POSTGRES_PASSWORD, and QDRANT_API_KEY
 docker compose up -d
 ```
 

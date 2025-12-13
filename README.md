@@ -2,7 +2,7 @@
 
 [![GitHub](https://img.shields.io/badge/GitHub-Interstitch%2FMIRA3-blue?logo=github)](https://github.com/Interstitch/MIRA3)
 
-An MCP server that gives Claude Code persistent memory across sessions, machines, and projects.
+An MCP server that gives Claude Code persistent memory across sessions.
 
 ## The Problem
 
@@ -20,27 +20,13 @@ You end up re-explaining context, re-debugging solved problems, and watching Cla
 
 > *"What were we working on last week?"*
 > *"How did we fix that authentication bug?"*
-> *"Show me the code we used for the caching layer in the other project"*
+> *"Show me the code we used for the caching layer"*
 
 And Claude just *knows* - no re-explanation needed.
 
 ## What This Actually Looks Like
 
-**Scenario 1: You hit an error you've seen before**
-```
-You: Getting "connection refused" on the database
-Claude: [Searches MIRA first] Last time this happened (Dec 5), it was because
-        the Docker container wasn't running. Want me to check `docker ps`?
-```
-
-**Scenario 2: You're about to touch a cursed file**
-```
-You: Let's refactor ingestion.py
-Claude: ⚠️ Heads up - ingestion.py has caused 51 recorded issues in past sessions.
-        Want me to search what went wrong before to avoid repeating mistakes?
-```
-
-**Scenario 3: You forgot where you left off**
+**Scenario 1: You forgot where you left off**
 ```
 You: What was I working on Friday?
 Claude: [Calls mira_recent(days=3)] You had 2 sessions Friday:
@@ -48,43 +34,56 @@ Claude: [Calls mira_recent(days=3)] You had 2 sessions Friday:
         2. Debugging the connection pool - noted you wanted exponential backoff
 ```
 
-**Scenario 4: Reusing code from another project**
+**Scenario 2: You want to reuse a solution from another project**
 ```
 You: How did we implement rate limiting in the API project?
-Claude: [Searches across projects] Found it in api-gateway (Dec 2). You used a
-        token bucket algorithm with Redis. Want me to show the implementation?
+Claude: [Searches across projects] Found it in api-gateway (Nov 15). You used
+        a token bucket algorithm with Redis. Want me to show the implementation?
+```
+
+**Scenario 3: You're about to touch a cursed file**
+```
+You: Let's refactor ingestion.py
+Claude: ⚠️ Heads up - ingestion.py has caused 51 recorded issues in past sessions.
+        Want me to search what went wrong before to avoid repeating mistakes?
 ```
 
 ## Key Features
 
 - **Zero-configuration context** - Claude knows who you are the moment a session starts
 - **Semantic search** - Find "that auth conversation" even if you never used that word
-- **Cross-machine sync** - Your history follows you across laptop, desktop, Codespaces
-- **Error pattern database** - Indexed errors linked to solutions, not just ad-hoc search
+- **Error pattern database** - Indexed errors linked to solutions
 - **Danger zone warnings** - Claude warns before touching files that caused past issues
 - **Workflow enforcement** - MIRA detects your dev pattern (test first? plan first?) and Claude enforces it
-- **Decision journal** - Track architectural decisions with reasoning for future reference
-- **Accomplishment tracking** - Know what you shipped: commits, fixes, releases
+- **Decision journal** - Track architectural decisions with reasoning
 
-## Why MIRA?
+## Installation
 
-Other conversation history tools require you to manually search. **MIRA is proactive:**
+```bash
+claude mcp add claude-mira3 -- npx claude-mira3
+```
 
-| Capability | MIRA | Others |
-|------------|------|--------|
-| Claude knows your name at session start | ✅ Automatic | ❌ You must ask |
-| Learns your workflow preferences | ✅ Detects patterns | ❌ Stateless |
-| Warns about problematic files | ✅ Danger zones | ❌ No tracking |
-| Cross-machine history sync | ✅ Central storage | ❌ Local only |
-| Meaning-based search | ✅ Semantic vectors | ❌ Keywords only |
-| Error → solution linking | ✅ Indexed database | ❌ Ad-hoc search |
-| Decision tracking | ✅ Searchable journal | ❌ Not captured |
+That's it. The SessionStart hook auto-configures on install, injecting MIRA context at the start of every Claude Code session.
 
-**The difference:** Other tools are passive archives you query. MIRA actively shapes Claude's behavior - enforcing your workflow, warning about past mistakes, and never letting Claude say "I don't know" without checking your history first.
+**First search:** When you first search, MIRA downloads a ~100MB embedding model in the background for local semantic search. This only happens once. (If you [set up remote storage](#remote-storage-optional) first, the server handles embeddings and this download is skipped.)
 
-## Claude Knows You From the Start
+### Configuration
 
-**This is where the magic happens.** The SessionStart hook automatically injects your profile before you type anything:
+MIRA configuration is stored in `.mira/config.json`:
+
+```json
+{
+  "project_path": "/workspaces/MIRA3"
+}
+```
+
+| Option | Description |
+|--------|-------------|
+| `project_path` | Restrict MIRA to only index this project's conversations |
+
+## How It Works
+
+**The magic is in the SessionStart hook.** Before you type anything, MIRA injects your profile:
 
 ```
 === MIRA Session Context ===
@@ -94,17 +93,12 @@ Name: Alex
 Summary: Alex is the lead developer (123 sessions). Prefers planning before implementation.
 Development Lifecycle: Plan → Test → Implement → Commit (85% confidence)
 Interaction Tips:
-  - Work pattern: Iterative development with frequent edits
   - Be careful with: ingestion.py (51 recorded issues)
 
 ## When to Consult MIRA
 - [CRITICAL] Encountering an error → call mira_error_lookup first
 - [CRITICAL] About to say "I don't know" → search MIRA before admitting ignorance
 - [CRITICAL] User mentions past discussions → search MIRA to recall context
-- [CRITICAL] Making architectural decisions → call mira_decisions for precedents
-
-## Alerts
-- [HIGH] In Codespaces, start tailscaled first
 ```
 
 **What this means:**
@@ -112,54 +106,163 @@ Interaction Tips:
 - Claude follows your preferred workflow (test first? plan first?)
 - Claude warns before touching files that caused past issues
 - Claude searches your history before saying "I don't know"
-- Claude recalls past conversations when you reference them
-- Claude reminds you of environment-specific prerequisites
 
 No manual prompting. No "remember that I prefer..." every session. MIRA learns from your conversations and Claude just *knows*.
 
-**How it works:** MIRA installs a [SessionStart hook](https://docs.anthropic.com/en/docs/claude-code/hooks) that runs `mira_init` before every conversation. The hook returns your profile, danger zones, critical reminders, and environment-specific alerts - all injected into Claude's context automatically.
+## MCP Tools
 
-**Storage modes:**
-- **Local** - Semantic search works out of the box with fastembed + sqlite-vec (~100MB, auto-downloads on first search)
-- **Remote (optional)** - Add Postgres + Qdrant for cross-machine sync and shared history across devices
+| Tool | Purpose |
+|------|---------|
+| `mira_init` | Session initialization (called automatically via hook) |
+| `mira_search` | Search conversations by meaning |
+| `mira_recent` | Recent sessions. Use `days: 7` for last week |
+| `mira_error_lookup` | Search past errors and their solutions |
+| `mira_decisions` | Search architectural decisions |
+| `mira_code_history` | Track file/function changes across sessions |
+| `mira_status` | System health and ingestion stats |
 
-## Installation
+### Search Parameters
 
-```bash
-claude mcp add claude-mira3 -- npx claude-mira3
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `query` | string | required | Search query |
+| `limit` | number | 10 | Maximum results |
+| `days` | number | - | Filter to last N days |
+| `recency_bias` | boolean | true | Boost recent results. Set `false` for historical searches |
+| `compact` | boolean | true | Compact format (~79% smaller) |
+
+## Search Features
+
+### Semantic Search
+
+MIRA finds conversations by meaning, not just keywords. Search for "authentication bug" and find discussions about "login issues" or "JWT token problems."
+
+**Local mode:** On first search, MIRA downloads `BAAI/bge-small-en-v1.5` (~100MB ONNX model via fastembed). Vectors are stored in SQLite with sqlite-vec. All processing happens locally.
+
+**Remote mode:** If you configure [remote storage](#remote-storage-optional), the embedding-service on your server handles vector generation using `all-MiniLM-L6-v2` (sentence-transformers) with Qdrant for storage and search. No model download needed on client machines.
+
+### Time Decay
+
+Results are ranked with exponential time decay - recent conversations surface first:
+
+| Age | Score Multiplier |
+|-----|------------------|
+| Today | 1.00 |
+| 30 days | 0.79 |
+| 90 days | 0.50 |
+| 1 year | 0.10 (floor) |
+
+Disable with `recency_bias: false` for historical searches like "original architecture decision".
+
+### Fuzzy Matching
+
+Typos are auto-corrected:
+```
+Query: "authentcation implementaton"
+       ↓ (auto-corrected)
+Search: "authentication implementation"
 ```
 
-The SessionStart hook auto-configures on install, injecting MIRA context at the start of every Claude Code session. Semantic search works immediately - on your first search, MIRA downloads a ~100MB embedding model in the background.
+## Data & Indexing
 
-**Optional:** [Set up remote storage](#remote-storage-optional) for cross-machine sync if you work across multiple devices.
+MIRA stores data in `<workspace>/.mira/`. When a new conversation is detected, it extracts and indexes:
 
-### Manual MCP Configuration (Alternative)
+| What's Extracted | Stored In | Purpose |
+|------------------|-----------|---------|
+| Summary, keywords, metadata | `local_store.db` | FTS5 full-text search |
+| Semantic vectors | `local_vectors.db` | Meaning-based search |
+| Error patterns & solutions | `insights.db` | `mira_error_lookup` |
+| Architectural decisions | `insights.db` | `mira_decisions` |
+| Code blocks, commands, configs | `artifacts.db` | Structured content retrieval |
+| User profile, preferences | `custodian.db` | Session context injection |
+| Conversation copies | `archives/` | Offline search, excerpts |
+| Python dependencies | `.venv/` | ~50MB runtime |
 
-Add to your MCP settings (`~/.claude/settings.json`):
+**Filtering:** Agent sub-conversations and empty sessions are skipped automatically.
 
-```json
-{
-  "mcpServers": {
-    "claude-mira3": {
-      "command": "npx",
-      "args": ["claude-mira3"]
-    }
-  }
-}
+## Learning Features
+
+### Custodian Profile
+
+MIRA builds your profile from conversations:
+
+- **Identity** - Your name (from "I'm Sarah" or similar)
+- **Preferences** - Tool preferences, coding style
+- **Rules** - "never commit to main", "always run tests first"
+- **Danger zones** - Files that have caused repeated issues
+- **Workflow** - Your development pattern (test first? plan first?)
+
+### Environment Prerequisites
+
+State prerequisites naturally and MIRA remembers:
+
 ```
+"In Codespaces, I need to start tailscaled first"
+"On my workstation, run docker-compose up before tests"
+```
+
+MIRA detects your environment and reminds you in future sessions.
+
+### Decision Journal
+
+Record decisions explicitly for high confidence:
+
+```
+"Decision: use PostgreSQL for the database"
+"ADR: all API responses include meta field"
+"Going forward, use pnpm instead of npm"
+```
+
+Search with `mira_decisions` to understand past choices.
+
+## Architecture
+
+```
+Claude Code → Node.js MCP Server → Python Backend → SQLite (FTS5 + vectors)
+```
+
+- **Node.js layer**: MCP protocol handling
+- **Python layer**: File watching, ingestion, search, extraction
+- **SQLite**: FTS5 for text search, sqlite-vec for semantic search
+
+## FAQ
+
+**How long until MIRA learns my name?**
+Usually 1-2 sessions. Just mention it naturally: "I'm Sarah" or sign off with your name.
+
+**Does MIRA read my code?**
+No. MIRA only indexes Claude Code conversation history. It never reads your source code files directly.
+
+**Does MIRA store code from my conversations?**
+Yes. Code snippets, commands, and configs discussed in conversations are stored in MIRA's local SQLite databases (in `.mira/`). This data stays on your machine and is only exchanged with Claude Code during your sessions. If you configure remote storage, conversation data syncs to your server - but never to any third-party service.
+
+**How do I teach MIRA my workflow?**
+Just work normally. MIRA detects patterns: if you consistently write tests before implementing, it learns that as your workflow.
+
+## Requirements
+
+- Node.js >= 20.0.0
+- Python >= 3.8
+- Claude Code
+
+**Note:** MIRA has only been tested on Linux (Ubuntu, Debian, Codespaces). macOS and Windows support is untested.
+
+## Known Limitations
+
+**Fresh Install Testing:** Most development has been done on systems with existing MIRA data. Fresh installs have received limited testing. If you encounter issues during initial setup, please [open an issue](https://github.com/Interstitch/MIRA3/issues).
+
+---
 
 ## Remote Storage (Optional)
 
-Remote storage enables **cross-machine sync** - your conversation history follows you everywhere:
+> **Most users don't need this.** Local semantic search works out of the box. Remote storage is only for users who want history to sync across multiple machines or share between team members.
 
-- **Work from anywhere** - Seamless history across laptop, desktop, and Codespaces
-- **Persistent memory** - Rebuild a Codespace and your full history is already there
-- **Cross-project search** - Search all your projects from any machine
-- **Team sharing** - Multiple developers can share the same memory pool
+Remote storage enables:
+- **Cross-machine sync** - History follows you across laptop, desktop, Codespaces
+- **Persistent memory** - Rebuild a Codespace and your history is already there
+- **Team sharing** - Multiple developers share the same memory pool
 
-> **Note:** Semantic search works locally without remote storage. Remote is only needed if you want history to sync across multiple machines.
-
-### Option A: Quick Setup Script
+### Quick Setup
 
 **On your server** (any Linux machine with Docker):
 
@@ -167,11 +270,9 @@ Remote storage enables **cross-machine sync** - your conversation history follow
 curl -sL https://raw.githubusercontent.com/Interstitch/MIRA3/master/server/install.sh | bash
 ```
 
-The script prompts for server IP, PostgreSQL password, and Qdrant API key, then starts everything via Docker Compose.
+The script prompts for server IP, PostgreSQL password, and Qdrant API key.
 
-### Option B: Manual Docker Compose
-
-Create `docker-compose.yml` on your server:
+### Manual Docker Compose
 
 ```yaml
 version: '3.8'
@@ -198,8 +299,16 @@ services:
 
   embedding:
     image: ghcr.io/interstitch/mira-embedding:latest
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      QDRANT_HOST: qdrant
+      QDRANT_API_KEY: ${QDRANT_API_KEY}
     ports:
       - "8100:8100"
+    depends_on:
+      - postgres
+      - qdrant
 
 volumes:
   postgres_data:
@@ -214,7 +323,7 @@ docker-compose up -d
 
 ### Connecting Your Machines
 
-**On each Claude Code machine**, create `.mira/server.json`:
+Create `~/.mira/server.json` on each machine:
 
 ```json
 {
@@ -231,289 +340,9 @@ docker-compose up -d
 chmod 600 ~/.mira/server.json  # Protect credentials
 ```
 
-**Full guide:** [SERVER_SETUP.md](SERVER_SETUP.md) covers firewall ports, verification, and troubleshooting.
+See [SERVER_SETUP.md](SERVER_SETUP.md) for firewall ports and troubleshooting.
 
-### Local-Only Mode
-
-MIRA's default mode - **full semantic search without any server setup:**
-
-- **Meaning-based search** - Find "that auth conversation" even if you never used that word
-- **Zero configuration** - Works immediately after installation
-- **Lightweight** - ~100MB embedding model (fastembed) + sqlite-vec for vector storage
-- **Lazy loading** - Model only downloads when you first search, not on install
-
-**How it works:** When you search without remote storage configured, MIRA downloads a compact ONNX-based embedding model (~100MB) in the background on first use. Vectors are stored in SQLite with the sqlite-vec extension for fast similarity search. All processing happens locally - no API calls, no external services.
-
-**When to add remote storage:** Only if you work across multiple machines (laptop + desktop + Codespaces) and want your history to sync automatically.
-
-### Configuration
-
-MIRA configuration is stored in `.mira/config.json`:
-
-```json
-{
-  "project_path": "/workspaces/MIRA3"
-}
-```
-
-| Option | Description |
-|--------|-------------|
-| `project_path` | Restrict MIRA to only index conversations from this project. Use the full filesystem path (e.g., `/workspaces/MIRA3`). When set, MIRA ignores conversations from other projects. |
-
-**When to use `project_path`:** If you work on many projects but only want MIRA memory for a specific one, set this to avoid indexing unrelated conversations. This keeps search results focused and reduces storage usage.
-
-## Data Locations
-
-### Source (Read-Only)
-
-MIRA3 reads from Claude Code's native conversation storage:
-
-```
-~/.claude/
-├── projects/
-│   └── <project-path>/          # Path-encoded project directories
-│       └── *.jsonl              # Conversation files (one per session)
-└── history.jsonl                # Index of all conversations
-```
-
-Conversation files are JSONL format with one JSON object per line, containing messages, tool calls, and metadata.
-
-### MIRA Storage (Read-Write)
-
-MIRA maintains its own storage in `<workspace>/.mira/`:
-
-| File/Directory | Purpose |
-|----------------|---------|
-| `config.json` | MIRA configuration (project_path filter, etc.) |
-| `server.json` | Remote storage credentials (if configured) |
-| `.venv/` | Python virtualenv with dependencies (~50MB) |
-| `archives/*.jsonl` | Full conversation copies for offline search |
-| `metadata/*.json` | Pre-extracted summaries, keywords, key facts |
-| `local_store.db` | Main SQLite DB with FTS5 full-text search |
-| `local_vectors.db` | Semantic search vectors (fastembed + sqlite-vec) |
-| `custodian.db` | Learned user profile, preferences, danger zones |
-| `insights.db` | Error patterns and architectural decisions |
-| `concepts.db` | Codebase concepts extracted from conversations |
-| `artifacts.db` | Indexed code blocks, commands, configs, tables |
-| `sync_queue.db` | Pending syncs to remote (if configured) |
-| `mira.log` | Runtime logs for debugging |
-
-## Search
-
-MIRA provides semantic search that finds conversations by meaning, not just keywords. Search for "authentication bug" and find discussions about "login issues" or "JWT token problems."
-
-Semantic search works both with remote storage (cross-machine) and locally (single-machine). MIRA automatically uses the best available method.
-
-### Time Decay (Recency Bias)
-
-By default, search results are ranked with **exponential time decay** - recent conversations are weighted higher than older ones:
-
-| Age | Score Multiplier |
-|-----|------------------|
-| Today | 1.00 |
-| 30 days | 0.79 |
-| 90 days | 0.50 (half-life) |
-| 180 days | 0.25 |
-| 1 year | 0.10 (floor) |
-
-This ensures recent context surfaces first while still including old but highly relevant results.
-
-**Disable time decay** with `recency_bias: false` for historical searches:
-```
-mira_search(query='original architecture decision', recency_bias=false)
-mira_search(query='how we first implemented auth', recency_bias=false)
-```
-
-Use `recency_bias: false` when:
-- Looking for **original** decisions or implementations
-- Searching for the **first time** something was discussed
-- Wanting **comprehensive** results regardless of age
-
-### Fuzzy Matching (Typo Tolerance)
-
-MIRA automatically corrects typos in search queries using Damerau-Levenshtein distance:
-
-```
-Query: "authentcation implementaton"
-       ↓ (auto-corrected)
-Search: "authentication implementation"
-```
-
-**How it works:**
-- Vocabulary built from your indexed keywords and summaries
-- Handles insertions, deletions, substitutions, and transpositions
-- Only corrects words ≥4 characters with edit distance ≤2
-- Corrections included in response for transparency
-
-**Example response with corrections:**
-```json
-{
-  "query": "authentication implementation",
-  "original_query": "authentcation implementaton",
-  "corrections": [
-    {"original": "authentcation", "corrected": "authentication", "distance": 1},
-    {"original": "implementaton", "corrected": "implementation", "distance": 1}
-  ],
-  "results": [...]
-}
-```
-
-Fuzzy matching is automatic and applies to all search tools:
-- `mira_search` - conversation search
-- `mira_error_lookup` - error solution search
-- `mira_decisions` - decision search
-
-The vocabulary grows as more conversations are indexed.
-
-**Optimized responses:** Search results use a compact format by default, reducing token usage by ~79%. Each result includes:
-- Short session ID (8 chars)
-- Consolidated summary (max 100 chars)
-- Date (YYYY-MM-DD)
-- Top 5 topics (stopwords filtered)
-- Best matching excerpt (full length preserved)
-
-Pass `compact: false` to get verbose format for debugging.
-
-## Architecture
-
-```
-Claude Code → Node.js MCP Server → Python Backend
-                                        ↓
-                    ┌───────────────────┴───────────────────┐
-                    ↓                                       ↓
-              Local Storage                          Remote Storage
-           (SQLite FTS5 search)            (Postgres + Qdrant semantic search)
-```
-
-- **Node.js layer**: MCP protocol, spawns Python backend
-- **Python layer**: File watching, ingestion, search, metadata extraction
-- **Local storage**: SQLite databases with FTS5 full-text search
-- **Remote storage**: Postgres for metadata, Qdrant for vector embeddings, embedding service for semantic search
-
-## What Gets Indexed
-
-When MIRA detects a new or modified conversation file, it runs an **ingestion pipeline** that extracts structured data from the raw JSONL:
-
-| Extraction | What It Captures | How It's Used |
-|------------|------------------|---------------|
-| **Summary** | Claude's own summarization, or synthesized from first exchange | Quick context in search results |
-| **Keywords** | Technical terms, file names, imports, libraries mentioned | FTS5 search ranking |
-| **Key Facts** | Rules, decisions, constraints stated during conversation | Custodian learning, decision journal |
-| **Task Description** | Cleaned first user request | Understanding session purpose |
-| **Error Patterns** | Errors encountered and their solutions | `mira_error_lookup` database |
-| **Artifacts** | Code blocks, commands, configs, tables, URLs | Precise retrieval of structured content |
-| **Vector Embeddings** | Semantic representation of conversation content | Meaning-based search |
-| **Metadata** | Git branch, models used, tools invoked, files touched | Filtering and context |
-
-**Automatic filtering:** MIRA filters out noise to index only meaningful content:
-- **Agent sub-conversations** (`agent-*.jsonl`) - Subagent task logs are skipped entirely
-- **Empty conversations** - Sessions with no user/assistant messages are skipped
-- **Non-message content** - Only `user`, `assistant`, and `summary` message types are extracted; other types like `file-history-snapshot` and `tool-result` are ignored
-
-**Incremental updates:** When a conversation is modified (you continue a session), MIRA re-ingests only the changed content, updating summaries and adding new artifacts.
-
-## Custodian Learning
-
-MIRA builds your profile from conversations - this is what powers the [automatic context injection](#claude-knows-you-from-the-start):
-
-- **Identity** - Your name (from "My name is John" or "I'm Sarah")
-- **Preferences** - Tool preferences ("I prefer pnpm"), coding style, frameworks
-- **Rules** - Explicit constraints ("never commit to main", "always run tests first")
-- **Danger zones** - Files that have caused repeated issues (tracked automatically)
-- **Development lifecycle** - Your workflow pattern, detected from how you work across sessions
-- **Prerequisites** - Environment-specific setup (see below)
-
-The more you use Claude Code with MIRA, the more it learns. Everything feeds into the session start context.
-
-## Learned Prerequisites
-
-MIRA learns environment-specific prerequisites from your conversations. State them naturally:
-
-```
-"In Codespaces, I need to start tailscaled first"
-"On my home workstation, run docker-compose up before tests"
-"When SSHed into the server, source the env file first"
-```
-
-MIRA extracts the environment, action, command, and reason - then reminds you in future sessions when that environment is detected.
-
-**Environment detection:** Codespaces, Gitpod, WSL, SSH, Docker, hostname, OS, and more. Set explicitly with `export MIRA_ENVIRONMENT=my-workstation`.
-
-## Error Pattern Recognition
-
-MIRA indexes errors and their solutions from conversations. Search past errors with `mira_error_lookup` to find how similar issues were resolved before.
-
-## Decision Journal
-
-MIRA extracts architectural decisions with reasoning. Record decisions explicitly for high confidence:
-
-```
-"Decision: use PostgreSQL for the database"
-"ADR: all API responses include meta field"
-"Policy: configs in YAML format"
-"Going forward, use pnpm instead of npm"
-```
-
-Search with `mira_decisions` to understand past choices and maintain consistency.
-
-## Artifacts
-
-MIRA detects and indexes structured content: code blocks, commands, configs, tables, error messages, URLs. Included in search results automatically.
-
-## MCP Tools
-
-| Tool | Purpose |
-|------|---------|
-| `mira_init` | Session initialization - user profile, prerequisites, danger zones, token count |
-| `mira_search` | Search conversations. Params: `query`, `limit`, `project_path`, `days`, `recency_bias`, `compact` |
-| `mira_recent` | Recent sessions. Params: `limit`, `days` (e.g., `days: 7` for last week) |
-| `mira_error_lookup` | Search past errors and their solutions. Params: `query`, `limit` |
-| `mira_decisions` | Search architectural decisions. Params: `query`, `category`, `limit` |
-| `mira_code_history` | Track file/function history across conversations. Params: `file_path`, `function_name`, `limit` |
-| `mira_status` | Ingestion stats and system health |
-
-### Search Parameters
-
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `query` | string | required | Search query |
-| `limit` | number | 10 | Maximum results |
-| `project_path` | string | - | Filter to specific project |
-| `days` | number | - | Filter to last N days (hard cutoff) |
-| `recency_bias` | boolean | true | Apply time decay to boost recent results. Set `false` for historical searches |
-| `compact` | boolean | true | Compact format (~79% smaller) |
-
-**Note:** `mira_init` is called automatically via the SessionStart hook. You don't need to call it manually unless context seems stale.
-
-## FAQ
-
-**How long until MIRA learns my name?**
-
-Usually 1-2 sessions. Just mention it naturally: "I'm Sarah" or sign off with your name. MIRA extracts it automatically - no configuration needed.
-
-**Does MIRA read my code?**
-
-No. MIRA only indexes Claude Code conversation history (the `.jsonl` files Claude creates). It never reads your source code directly. The insights come from what you and Claude discussed, not from scanning your codebase.
-
-**What if I use multiple machines?**
-
-With remote storage configured, your full history syncs automatically. Start a Codespace, and Claude already knows your name, workflow preferences, and past errors - even if you've never used that specific machine before.
-
-**How do I teach MIRA my workflow preference?**
-
-Just work normally. MIRA detects patterns: if you consistently write tests before implementing, it learns "Test → Implement" as your workflow and tells Claude to enforce that sequence.
-
-## Requirements
-
-- Node.js >= 20.0.0
-- Python >= 3.8
-- Claude Code
-
-**Note:** MIRA has only been tested with Claude Code on Linux (Ubuntu, Debian, Codespaces). macOS and Windows support is untested - contributions welcome.
-
-## Known Limitations
-
-**Fresh Install Testing:** Most development and testing has been done on systems with existing MIRA data. Fresh installs (first-time setup with no prior conversation history) have received limited testing. If you encounter issues during initial setup, please [open an issue](https://github.com/Interstitch/MIRA3/issues).
+---
 
 ## License
 
