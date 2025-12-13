@@ -8,6 +8,13 @@ Three-Tier Search Architecture:
 - Tier 2: Local semantic (sqlite-vec + fastembed) - offline, same quality
 - Tier 3: FTS5 keyword (SQLite) - always available, fast
 
+Fuzzy Matching (Typo Tolerance):
+- Damerau-Levenshtein distance for typo detection
+- Handles insertions, deletions, substitutions, and transpositions
+- Vocabulary built from indexed keywords/summaries
+- Corrections applied before all search tiers
+- Response includes corrections made (if any)
+
 Time Decay Scoring:
 - Exponential decay with 90-day half-life: recent results weighted higher
 - Formula: decayed_score = relevance × e^(-λ × age_days) where λ = ln(2)/90
@@ -355,6 +362,28 @@ def handle_search(params: dict, collection, storage=None) -> dict:
     if not query:
         return {"results": [], "total": 0}
 
+    # Apply fuzzy matching for typo correction
+    original_query = query
+    corrections = []
+    unknown_terms = []
+    try:
+        from .fuzzy import expand_query_with_corrections, get_vocabulary_size, is_in_vocabulary
+        import re as fuzzy_re
+
+        vocab_size = get_vocabulary_size()
+        if vocab_size > 0:  # Only if we have vocabulary
+            # Track which query terms are unknown to the vocabulary
+            tokens = fuzzy_re.findall(r'\b\w{3,}\b', query.lower())  # 3+ char words
+            unknown_terms = [t for t in tokens if not is_in_vocabulary(t)]
+
+            corrected_query, corrections = expand_query_with_corrections(query)
+            if corrections:
+                query = corrected_query
+                log(f"Fuzzy corrected: '{original_query}' → '{query}' ({len(corrections)} corrections)")
+    except Exception as e:
+        log(f"Fuzzy matching failed: {e}")
+        # Continue with original query
+
     # Get storage instance if not provided
     if storage is None:
         try:
@@ -568,6 +597,13 @@ def handle_search(params: dict, collection, storage=None) -> dict:
         }
         if days:
             response["filtered_to_days"] = days
+        # Include typo corrections if any were made
+        if corrections:
+            response["corrections"] = corrections
+            response["original_query"] = original_query
+        # Include unknown terms (not in vocabulary) for user feedback
+        if unknown_terms:
+            response["unknown_terms"] = unknown_terms
         # Include notice about local semantic download if triggered
         if local_semantic_notice and local_semantic_notice.get("notice"):
             response["notice"] = local_semantic_notice["notice"]
@@ -582,6 +618,13 @@ def handle_search(params: dict, collection, storage=None) -> dict:
         }
         if days:
             response["filtered_to_days"] = days
+        # Include typo corrections if any were made
+        if corrections:
+            response["corrections"] = corrections
+            response["original_query"] = original_query
+        # Include unknown terms (not in vocabulary) for user feedback
+        if unknown_terms:
+            response["unknown_terms"] = unknown_terms
         # Include notice about local semantic download if triggered
         if local_semantic_notice and local_semantic_notice.get("notice"):
             response["notice"] = local_semantic_notice["notice"]

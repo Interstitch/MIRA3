@@ -239,6 +239,33 @@ def ingest_conversation(file_info: dict, collection, mira_path: Path = None, sto
         storage_mode = "central" if storage.using_central else "local"
         log(f"[{short_id}] Session upserted ({storage_mode}, id={db_session_id}) ({t_session:.0f}ms)")
 
+        # Populate vocabulary for fuzzy search typo correction
+        try:
+            from .fuzzy import add_terms_to_vocabulary, extract_terms_from_text
+
+            # Add keywords directly (already tokenized)
+            keywords = metadata.get('keywords', [])
+            if keywords:
+                add_terms_to_vocabulary(keywords, source="keyword")
+
+            # Extract and add terms from summary
+            summary = metadata.get('summary', '')
+            if summary:
+                summary_terms = extract_terms_from_text(summary)
+                if summary_terms:
+                    add_terms_to_vocabulary(summary_terms, source="summary")
+
+            # Extract and add terms from task description
+            task_desc = metadata.get('task_description', '')
+            if task_desc:
+                task_terms = extract_terms_from_text(task_desc)
+                if task_terms:
+                    add_terms_to_vocabulary(task_terms, source="task")
+
+        except Exception as e:
+            # Don't fail ingestion if vocabulary population fails
+            log(f"[{short_id}] Vocabulary population failed: {e}")
+
         # Archive conversation (full JSONL content)
         try:
             t0 = time.time()

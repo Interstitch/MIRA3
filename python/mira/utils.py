@@ -39,16 +39,6 @@ def get_venv_pip() -> str:
     return str(venv / "bin" / "pip")
 
 
-def get_models_path() -> Path:
-    """Get the models cache directory."""
-    return get_mira_path() / "models"
-
-
-def get_artifact_db_path() -> Path:
-    """Get the path to the artifacts SQLite database."""
-    return get_mira_path() / "artifacts.db"
-
-
 def get_mira_config() -> dict:
     """
     Load MIRA config.json settings.
@@ -109,17 +99,6 @@ def log(message: str):
             f.write(f"{formatted}\n")
     except Exception:
         pass  # Don't fail if logging fails
-
-
-def configure_model_cache():
-    """Configure environment variables to cache models in .mira/models/."""
-    models_path = get_models_path()
-    models_path.mkdir(parents=True, exist_ok=True)
-
-    # Set environment variables for Hugging Face / sentence-transformers
-    # HF_HOME is the current standard (TRANSFORMERS_CACHE is deprecated)
-    os.environ["HF_HOME"] = str(models_path)
-    os.environ["SENTENCE_TRANSFORMERS_HOME"] = str(models_path)
 
 
 def parse_timestamp(ts: str) -> Optional[datetime]:

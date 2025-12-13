@@ -17,7 +17,7 @@ from .utils import log, get_mira_path
 from .db_manager import get_db_manager
 
 # Current schema version
-CURRENT_VERSION = 4
+CURRENT_VERSION = 5
 
 # Migration registry
 MIGRATIONS_DB = "migrations.db"
@@ -40,6 +40,96 @@ CREATE TABLE IF NOT EXISTS database_versions (
     version INTEGER NOT NULL,
     updated_at TEXT NOT NULL
 );
+"""
+
+# Custodian database schema
+CUSTODIAN_SCHEMA = """
+-- Identity table - who is the custodian
+CREATE TABLE IF NOT EXISTS identity (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL,
+    confidence REAL DEFAULT 0.5,
+    source_session TEXT,
+    learned_at TEXT
+);
+
+-- Preferences table - what they prefer
+CREATE TABLE IF NOT EXISTS preferences (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    category TEXT NOT NULL,
+    preference TEXT NOT NULL,
+    value TEXT,
+    evidence TEXT,
+    frequency INTEGER DEFAULT 1,
+    confidence REAL DEFAULT 0.5,
+    first_seen TEXT,
+    last_seen TEXT,
+    source_sessions TEXT
+);
+
+-- Rules table - explicit always/never rules with enhanced features
+CREATE TABLE IF NOT EXISTS rules (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    rule_type TEXT NOT NULL,
+    rule_text TEXT NOT NULL,
+    normalized_text TEXT,
+    context TEXT,
+    scope TEXT,
+    frequency INTEGER DEFAULT 1,
+    confidence REAL DEFAULT 0.8,
+    first_seen TEXT,
+    last_seen TEXT,
+    source_sessions TEXT,
+    revoked INTEGER DEFAULT 0,
+    revoked_at TEXT
+);
+
+-- Danger zones - files/modules that caused issues
+CREATE TABLE IF NOT EXISTS danger_zones (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    path_pattern TEXT NOT NULL,
+    issue_description TEXT,
+    issue_count INTEGER DEFAULT 1,
+    last_issue TEXT,
+    resolution TEXT,
+    source_sessions TEXT
+);
+
+-- Work patterns - how they work
+CREATE TABLE IF NOT EXISTS work_patterns (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    pattern_type TEXT NOT NULL,
+    pattern_description TEXT NOT NULL,
+    frequency INTEGER DEFAULT 1,
+    confidence REAL DEFAULT 0.5,
+    first_seen TEXT,
+    last_seen TEXT
+);
+
+-- Environment-specific prerequisites learned from conversations
+CREATE TABLE IF NOT EXISTS prerequisites (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    environment TEXT NOT NULL,          -- User-defined env name (lowercase)
+    action TEXT NOT NULL,               -- Human description of what to do
+    command TEXT,                       -- Shell command to run
+    check_command TEXT,                 -- Verification command (exit 0 = met)
+    reason TEXT,                        -- Why it's needed
+    confidence REAL DEFAULT 0.5,        -- 0.0-1.0 confidence score
+    frequency INTEGER DEFAULT 1,        -- Times mentioned/confirmed
+    source_session TEXT,                -- Session ID where first learned
+    learned_at TEXT,                    -- ISO timestamp when learned
+    last_triggered TEXT,                -- Last time shown as alert
+    last_confirmed TEXT,                -- Last user confirmation
+    suppressed INTEGER DEFAULT 0,       -- User said "don't remind me"
+    UNIQUE(environment, action)
+);
+
+-- Create indexes
+CREATE INDEX IF NOT EXISTS idx_pref_category ON preferences(category);
+CREATE INDEX IF NOT EXISTS idx_rules_type ON rules(rule_type);
+CREATE INDEX IF NOT EXISTS idx_danger_path ON danger_zones(path_pattern);
+CREATE INDEX IF NOT EXISTS idx_prereq_env ON prerequisites(environment);
+CREATE INDEX IF NOT EXISTS idx_prereq_confidence ON prerequisites(confidence DESC);
 """
 
 # Migration definitions
@@ -170,6 +260,44 @@ def migrate_v4(db_manager):
 
     # Add confidence to identity table if missing
     add_column_if_missing("identity", "confidence", "REAL DEFAULT 0.5")
+
+    return True
+
+
+@migration(5, "add_vocabulary_table")
+def migrate_v5(db_manager):
+    """Add vocabulary table for fuzzy search typo correction."""
+    log("Migration v5: Adding vocabulary table to local_store.db")
+
+    from .local_store import LOCAL_DB
+
+    try:
+        # Create vocabulary table for typo correction
+        db_manager.execute_write(
+            LOCAL_DB,
+            """CREATE TABLE IF NOT EXISTS vocabulary (
+                term TEXT PRIMARY KEY,
+                frequency INTEGER DEFAULT 1,
+                source TEXT DEFAULT 'unknown',
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )""",
+            ()
+        )
+
+        # Add index for efficient frequency-based lookups
+        db_manager.execute_write(
+            LOCAL_DB,
+            "CREATE INDEX IF NOT EXISTS idx_vocabulary_frequency ON vocabulary(frequency DESC)",
+            ()
+        )
+
+        log("  Created vocabulary table for fuzzy matching")
+
+    except Exception as e:
+        log(f"Migration v5 error: {e}")
+        # Don't fail - table might already exist
+        pass
 
     return True
 

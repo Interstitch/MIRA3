@@ -298,8 +298,3 @@ def get_config() -> ServerConfig:
     return _config
 
 
-def reload_config() -> ServerConfig:
-    """Force reload of server configuration."""
-    global _config
-    _config = load_config()
-    return _config

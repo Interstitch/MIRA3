@@ -197,7 +197,7 @@ def run_backend():
     # Start sync worker - flushes local queue to central storage
     sync_worker = None
     try:
-        from .sync_worker import start_sync_worker
+        from .sync_worker import start_sync_worker, stop_sync_worker
         sync_worker = start_sync_worker(storage)
     except Exception as e:
         log(f"Failed to start sync worker: {e}")
@@ -279,7 +279,7 @@ def run_backend():
             # Handle shutdown
             if request.get("method") == "shutdown":
                 if sync_worker:
-                    sync_worker.stop()
+                    stop_sync_worker()  # Use module function for clean shutdown
                 storage.close()
                 break
 

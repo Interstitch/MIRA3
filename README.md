@@ -329,6 +329,42 @@ Use `recency_bias: false` when:
 - Searching for the **first time** something was discussed
 - Wanting **comprehensive** results regardless of age
 
+### Fuzzy Matching (Typo Tolerance)
+
+MIRA automatically corrects typos in search queries using Damerau-Levenshtein distance:
+
+```
+Query: "authentcation implementaton"
+       ↓ (auto-corrected)
+Search: "authentication implementation"
+```
+
+**How it works:**
+- Vocabulary built from your indexed keywords and summaries
+- Handles insertions, deletions, substitutions, and transpositions
+- Only corrects words ≥4 characters with edit distance ≤2
+- Corrections included in response for transparency
+
+**Example response with corrections:**
+```json
+{
+  "query": "authentication implementation",
+  "original_query": "authentcation implementaton",
+  "corrections": [
+    {"original": "authentcation", "corrected": "authentication", "distance": 1},
+    {"original": "implementaton", "corrected": "implementation", "distance": 1}
+  ],
+  "results": [...]
+}
+```
+
+Fuzzy matching is automatic and applies to all search tools:
+- `mira_search` - conversation search
+- `mira_error_lookup` - error solution search
+- `mira_decisions` - decision search
+
+The vocabulary grows as more conversations are indexed.
+
 **Optimized responses:** Search results use a compact format by default, reducing token usage by ~79%. Each result includes:
 - Short session ID (8 chars)
 - Consolidated summary (max 100 chars)
