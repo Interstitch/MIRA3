@@ -265,6 +265,7 @@ def run_backend():
     log("Ingestion watchdog started")
 
     # Main JSON-RPC loop
+    log("Starting JSON-RPC loop")
     for line in sys.stdin:
         line = line.strip()
         if not line:
@@ -272,8 +273,10 @@ def run_backend():
 
         request = None
         try:
+            log(f"Received RPC request: {line[:100]}...")
             request = json.loads(line)
             response = handle_rpc_request(request, None, storage)
+            log(f"Sending RPC response for {request.get('method')}")
             print(json.dumps(response), flush=True)
 
             # Handle shutdown
