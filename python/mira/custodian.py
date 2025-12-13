@@ -1478,7 +1478,7 @@ def get_custodian_stats() -> dict:
             stats['name'] = best_name[0]
 
         # Count preferences
-        row = db.execute_read_one(CUSTODIAN_DB, "SELECT COUNT(*) as cnt FROM preferences_new")
+        row = db.execute_read_one(CUSTODIAN_DB, "SELECT COUNT(*) as cnt FROM preferences")
         stats['preferences'] = row['cnt'] if row else 0
 
         # Count rules (all rule types)
