@@ -25,7 +25,7 @@ echo "=== MIRA Install Log: $(date) ===" >> "$LOG_FILE"
 print_header() {
     echo -e "${BLUE}${BOLD}"
     echo "==================================="
-    echo "  MIRA Server Installer"
+    echo "  [◉▽◉] MIRA Server Installer"
     echo "==================================="
     echo -e "${NC}"
 }
