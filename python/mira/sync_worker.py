@@ -21,7 +21,7 @@ from .constants import ACTIVE_SESSION_SYNC_INTERVAL
 
 # Sync configuration
 SYNC_CHECK_INTERVAL = 30  # Check queue every 30 seconds
-SYNC_BATCH_SIZE = 50  # Sync up to 50 items per batch
+SYNC_BATCH_SIZE = 10  # Sync up to 10 items per batch (reduced for reliability)
 MAX_RETRIES = 5  # Max retry attempts before giving up
 BACKOFF_BASE = 2  # Exponential backoff base (seconds)
 BACKOFF_MAX = 300  # Max backoff (5 minutes)
@@ -157,9 +157,13 @@ class SyncWorker:
         if not items:
             return 0, 0
 
+        log(f"[sync] Processing {len(items)} {data_type} items")
+
         # Mark items as syncing
         item_ids = [item["id"] for item in items]
+        log(f"[sync] Marking {len(item_ids)} items as syncing...")
         self.queue.mark_syncing(item_ids)
+        log(f"[sync] Marked as syncing, processing {data_type}...")
 
         # For batch-optimized types, process all items together
         if data_type == "file_operation":
@@ -171,14 +175,18 @@ class SyncWorker:
         failed_ids = []
         error_msg = None
 
-        for item in items:
+        log(f"[sync] Starting loop for {len(items)} {data_type} items")
+        for i, item in enumerate(items):
             try:
+                if data_type == "archive":
+                    log(f"[sync] archive {i+1}/{len(items)} starting...")
                 success = self._sync_single_item(data_type, item["payload"])
                 if success:
                     synced_ids.append(item["id"])
                 else:
                     failed_ids.append(item["id"])
             except Exception as e:
+                log(f"[sync] {data_type} {i+1} error: {e}")
                 error_msg = str(e)
                 failed_ids.append(item["id"])
 
@@ -188,6 +196,7 @@ class SyncWorker:
         if failed_ids:
             self.queue.mark_failed(failed_ids, error_msg or "Unknown error")
 
+        log(f"[sync] {data_type}: {len(synced_ids)} synced, {len(failed_ids)} failed")
         return len(synced_ids), len(failed_ids)
 
     def _sync_single_item(self, data_type: str, payload: Dict[str, Any]) -> bool:
@@ -787,14 +796,17 @@ def get_sync_worker(storage=None) -> SyncWorker:
 
 def start_sync_worker(storage=None):
     """Start the global sync worker."""
-    # Reset failed items on startup to give them another chance
+    # Reset stale items on startup
     try:
         queue = get_sync_queue()
+        # Reset items stuck in 'syncing' from previous run
+        stale_count = queue.reset_stale_syncing_items()
+        # Reset failed items to give them another chance
         reset_count = queue.reset_failed_items()
         if reset_count > 0:
             log(f"Reset {reset_count} failed sync items for retry")
     except Exception as e:
-        log(f"Failed to reset failed items: {e}")
+        log(f"Failed to reset stale items: {e}")
 
     worker = get_sync_worker(storage)
     worker.start()

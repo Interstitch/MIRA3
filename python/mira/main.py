@@ -16,9 +16,40 @@ import signal
 import fcntl
 import threading
 import argparse
+import atexit
+import traceback
 from pathlib import Path
 
 from .utils import log, get_mira_path
+
+# Register atexit handler to log when process exits
+def _log_exit():
+    try:
+        log("MIRA process exiting (atexit triggered)")
+        # Also write directly to stderr in case log() fails (only if not quiet)
+        if not os.environ.get('MIRA_QUIET'):
+            sys.stderr.write("[MIRA] Process exiting via atexit\n")
+            sys.stderr.flush()
+    except Exception:
+        pass
+
+atexit.register(_log_exit)
+
+# Signal handlers to catch termination - just log, don't override default behavior
+def _signal_handler(signum, frame):
+    sig_name = signal.Signals(signum).name if hasattr(signal, 'Signals') else str(signum)
+    try:
+        log(f"MIRA received signal {sig_name}")
+        if not os.environ.get('MIRA_QUIET'):
+            sys.stderr.write(f"[MIRA] Received signal {sig_name}\n")
+            sys.stderr.flush()
+    except Exception:
+        pass
+    # Re-raise the default handler
+    signal.signal(signum, signal.SIG_DFL)
+    os.kill(os.getpid(), signum)
+
+# Don't install signal handlers here - they need log() which needs get_mira_path()
 from .bootstrap import ensure_venv_and_deps, reexec_in_venv
 from .config import get_config
 from .storage import get_storage, Storage
@@ -42,6 +73,11 @@ def acquire_singleton_lock(mira_path: Path) -> bool:
     Returns True if lock acquired, False on failure.
     """
     global _lock_file
+
+    # Log who is trying to acquire the lock
+    import traceback
+    log(f"acquire_singleton_lock called by PID {os.getpid()}")
+    log(f"Call stack: {''.join(traceback.format_stack()[-5:-1])}")
 
     lock_path = mira_path / "mira.lock"
     pid_path = mira_path / "mira.pid"
@@ -121,6 +157,11 @@ def run_backend():
     mira_path = get_mira_path()
     archives_path = mira_path / "archives"
     metadata_path = mira_path / "metadata"
+
+    # Install signal handlers now that mira_path is available
+    signal.signal(signal.SIGTERM, _signal_handler)
+    signal.signal(signal.SIGINT, _signal_handler)
+    log("Signal handlers installed")
 
     # Ensure directories exist
     for path in [archives_path, metadata_path]:
@@ -266,6 +307,8 @@ def run_backend():
 
     # Main JSON-RPC loop
     log("Starting JSON-RPC loop")
+    sys.stderr.write("[MIRA DEBUG] Starting JSON-RPC loop\n")
+    sys.stderr.flush()
     for line in sys.stdin:
         line = line.strip()
         if not line:
@@ -273,9 +316,15 @@ def run_backend():
 
         request = None
         try:
+            sys.stderr.write(f"[MIRA DEBUG] Received: {line[:80]}...\n")
+            sys.stderr.flush()
             log(f"Received RPC request: {line[:100]}...")
             request = json.loads(line)
+            sys.stderr.write(f"[MIRA DEBUG] Calling handler for {request.get('method')}\n")
+            sys.stderr.flush()
             response = handle_rpc_request(request, None, storage)
+            sys.stderr.write(f"[MIRA DEBUG] Handler returned for {request.get('method')}\n")
+            sys.stderr.flush()
             log(f"Sending RPC response for {request.get('method')}")
             print(json.dumps(response), flush=True)
 
@@ -289,7 +338,9 @@ def run_backend():
         except json.JSONDecodeError as e:
             log(f"Invalid JSON: {e}")
         except Exception as e:
+            import traceback
             log(f"Error handling request: {e}")
+            log(f"Traceback: {traceback.format_exc()}")
             if request is not None:
                 error_response = {
                     "jsonrpc": "2.0",
@@ -297,6 +348,8 @@ def run_backend():
                     "error": {"code": -32603, "message": "Internal error processing request"}
                 }
                 print(json.dumps(error_response), flush=True)
+
+    log("JSON-RPC loop ended (stdin closed)")
 
 
 def _format_mira_context(result: dict) -> str:

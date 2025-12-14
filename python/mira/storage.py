@@ -48,19 +48,39 @@ class Storage:
     LOCAL-FIRST: All writes go to local SQLite first, then sync to central.
     """
 
+    # Retry central connection every minute after failure
+    CENTRAL_RETRY_INTERVAL = 60  # seconds
+
     def __init__(self, config: Optional[ServerConfig] = None):
         self.config = config or get_config()
         self._qdrant = None
         self._postgres = None
         self._using_central = False
         self._central_init_attempted = False
+        self._central_init_failed_at: Optional[float] = None
 
     def _init_central(self) -> bool:
         """
         Initialize central backends (lazy, for reads).
 
         Returns True if central is available, False otherwise.
+        Retries after CENTRAL_RETRY_INTERVAL seconds if previously failed.
         """
+        # If already using central, we're good
+        if self._using_central:
+            return True
+
+        # If we failed before, check if retry interval has passed
+        if self._central_init_attempted and not self._using_central:
+            if self._central_init_failed_at is not None:
+                elapsed = time.time() - self._central_init_failed_at
+                if elapsed < self.CENTRAL_RETRY_INTERVAL:
+                    return False  # Still in backoff period
+                # Retry interval passed, reset for retry
+                log.info(f"Retrying central connection after {elapsed:.0f}s")
+                self._central_init_attempted = False
+                self._central_init_failed_at = None
+
         if self._central_init_attempted:
             return self._using_central
 
@@ -113,13 +133,16 @@ class Storage:
                 return True
             else:
                 log.error("Central storage health check failed")
+                self._central_init_failed_at = time.time()
                 return False
 
         except ImportError as e:
             log.error(f"Central storage dependencies not installed: {e}")
+            self._central_init_failed_at = time.time()
             return False
         except Exception as e:
             log.error(f"Failed to initialize central storage: {e}")
+            self._central_init_failed_at = time.time()
             return False
 
     @property

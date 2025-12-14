@@ -352,6 +352,39 @@ class SyncQueue:
 
         return count
 
+    def reset_stale_syncing_items(self) -> int:
+        """
+        Reset items stuck in 'syncing' status back to 'pending'.
+
+        Called on startup - any items left in 'syncing' from a previous run
+        are stale and should be retried.
+        Returns the number of items reset.
+        """
+        db = get_db_manager()
+
+        # Get count first
+        row = db.execute_read_one(
+            SYNC_QUEUE_DB,
+            "SELECT COUNT(*) as count FROM sync_queue WHERE status = 'syncing'",
+            ()
+        )
+        count = row['count'] if row else 0
+
+        if count > 0:
+            db.execute_write(
+                SYNC_QUEUE_DB,
+                """
+                UPDATE sync_queue
+                SET status = 'pending',
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE status = 'syncing'
+                """,
+                ()
+            )
+            log(f"Reset {count} stale syncing items to pending")
+
+        return count
+
     def get_stats(self) -> Dict[str, Any]:
         """Get queue statistics."""
         db = get_db_manager()

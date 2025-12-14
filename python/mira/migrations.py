@@ -797,6 +797,47 @@ def run_postgres_migrations(postgres_backend) -> Dict[str, Any]:
                     results["migrations_run"].append({"version": 5, "name": "llm_extraction_tracking"})
                     pg_version = 5
 
+                # Postgres migration v6: Fix file_operations column name
+                if pg_version < 6:
+                    log("Postgres migration v6: Fixing file_operations column name")
+
+                    # Check if 'operation' column exists (old schema) and rename to 'operation_type'
+                    cur.execute("""
+                        SELECT column_name FROM information_schema.columns
+                        WHERE table_name = 'file_operations' AND column_name = 'operation'
+                    """)
+                    if cur.fetchone():
+                        cur.execute("ALTER TABLE file_operations RENAME COLUMN operation TO operation_type")
+                        log("  Renamed operation -> operation_type")
+
+                    # Also add missing columns if they don't exist
+                    cur.execute("""
+                        SELECT column_name FROM information_schema.columns
+                        WHERE table_name = 'file_operations' AND column_name = 'content'
+                    """)
+                    if not cur.fetchone():
+                        cur.execute("ALTER TABLE file_operations ADD COLUMN content TEXT")
+                        cur.execute("ALTER TABLE file_operations ADD COLUMN old_string TEXT")
+                        cur.execute("ALTER TABLE file_operations ADD COLUMN new_string TEXT")
+                        cur.execute("ALTER TABLE file_operations ADD COLUMN replace_all BOOLEAN DEFAULT FALSE")
+                        cur.execute("ALTER TABLE file_operations ADD COLUMN sequence_num INTEGER")
+                        cur.execute("ALTER TABLE file_operations ADD COLUMN operation_hash TEXT UNIQUE")
+                        cur.execute("ALTER TABLE file_operations ADD COLUMN created_at TIMESTAMPTZ DEFAULT NOW()")
+                        log("  Added missing columns to file_operations")
+
+                    # Handle both old (version, applied_at) and new (version, description) schema_version formats
+                    cur.execute("""
+                        SELECT column_name FROM information_schema.columns
+                        WHERE table_name = 'schema_version' AND column_name = 'description'
+                    """)
+                    if cur.fetchone():
+                        cur.execute("INSERT INTO schema_version (version, description) VALUES (6, 'Fix file_operations schema')")
+                    else:
+                        cur.execute("INSERT INTO schema_version (version) VALUES (6)")
+                    conn.commit()
+                    results["migrations_run"].append({"version": 6, "name": "fix_file_operations_schema"})
+                    pg_version = 6
+
                 results["current_version"] = pg_version
 
     except Exception as e:

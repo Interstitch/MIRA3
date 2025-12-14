@@ -684,20 +684,31 @@ def handle_status(params: dict, collection, storage=None) -> dict:
         collection: Deprecated - kept for API compatibility, ignored
         storage: Storage instance for central Qdrant + Postgres
     """
+    import sys
+    sys.stderr.write("[MIRA DEBUG] handle_status START\n")
+    sys.stderr.flush()
+    log("[STATUS] Starting handle_status")
+    sys.stderr.flush()
+
     project_path = params.get("project_path") if params else None
     mira_path = get_mira_path()
     claude_path = Path.home() / ".claude" / "projects"
+    log(f"[STATUS] project_path={project_path}, mira_path={mira_path}")
 
     # Get project_id for scoped queries
+    log("[STATUS] Getting project_id")
     project_id = None
     if project_path and storage and storage.using_central:
         try:
             project_id = storage.get_project_id(project_path)
-        except Exception:
+            log(f"[STATUS] Got project_id={project_id}")
+        except Exception as e:
+            log(f"[STATUS] Failed to get project_id: {e}")
             pass
 
     # Count and categorize source files - global and project-scoped
     # All files with 3+ user/assistant messages are worth indexing
+    log("[STATUS] Starting file categorization")
     file_categories = {
         'sessions': 0,         # Main session files with messages
         'agents': 0,           # Subagent task files with messages
@@ -755,10 +766,13 @@ def handle_status(params: dict, collection, storage=None) -> dict:
 
     total_files = sum(file_categories.values())
     indexable_files = file_categories['sessions'] + file_categories['agents']
+    log(f"[STATUS] File categorization complete: total={total_files}, indexable={indexable_files}")
 
     # Count archived files
+    log("[STATUS] Counting archived files")
     archives_path = mira_path / "archives"
     archived = sum(1 for _ in archives_path.glob("*.jsonl")) if archives_path.exists() else 0
+    log(f"[STATUS] Archived files: {archived}")
 
     # Count indexed from storage - check which current files are indexed
     indexed_global = 0
@@ -805,8 +819,10 @@ def handle_status(params: dict, collection, storage=None) -> dict:
         except Exception:
             pass
 
+    log(f"[STATUS] Getting session counts (using_central={storage.using_central if storage else False})")
     if storage and storage.using_central and storage.postgres:
         # Query central Postgres
+        log("[STATUS] Querying central Postgres for session counts")
         try:
             with storage.postgres._get_connection() as conn:
                 with conn.cursor() as cur:
@@ -837,42 +853,58 @@ def handle_status(params: dict, collection, storage=None) -> dict:
                         )
                         indexed_of_project = cur.fetchone()[0]
                     session_count_source = "central"
+                    log(f"[STATUS] Central session counts: global={indexed_global}, indexable={indexed_of_indexable}")
         except Exception as e:
             # Fall back to local SQLite if central queries fail
-            log(f"Central session count query failed, falling back to local: {e}")
+            log(f"[STATUS] Central session count query failed, falling back to local: {e}")
             _query_local_session_counts()
             if session_count_source == "local":
                 session_count_source = "local_fallback"
     else:
         # Query local SQLite
+        log("[STATUS] Querying local SQLite for session counts")
         _query_local_session_counts()
+    log(f"[STATUS] Session count source: {session_count_source}")
 
     # Get insights stats (local SQLite - always global for now)
+    log("[STATUS] Getting insights stats")
     error_stats = get_error_stats()
+    log(f"[STATUS] error_stats done")
     decision_stats = get_decision_stats()
+    log(f"[STATUS] decision_stats done")
     concepts_stats = get_concepts_stats()
+    log(f"[STATUS] concepts_stats done")
     custodian_stats = get_custodian_stats()
+    log(f"[STATUS] custodian_stats done")
 
     # Get health check info
+    log("[STATUS] Getting health check")
     health = {}
     if storage:
         health = storage.health_check()
+        log(f"[STATUS] health check done")
 
     # Get sync queue stats
+    log("[STATUS] Getting sync queue stats")
     sync_queue_stats = {}
     try:
         from .sync_queue import get_sync_queue
         queue = get_sync_queue()
         sync_queue_stats = queue.get_stats()
-    except Exception:
+        log(f"[STATUS] sync_queue_stats done")
+    except Exception as e:
+        log(f"[STATUS] sync_queue_stats failed: {e}")
         pass
 
     # Get active ingestion jobs
+    log("[STATUS] Getting active ingestions")
     active_ingestions = []
     try:
         from .ingestion import get_active_ingestions
         active_ingestions = get_active_ingestions()
-    except Exception:
+        log(f"[STATUS] active_ingestions: {len(active_ingestions)} jobs")
+    except Exception as e:
+        log(f"[STATUS] active_ingestions failed: {e}")
         pass
 
     # Count active ingestions for this project (if project_path specified)
@@ -884,16 +916,23 @@ def handle_status(params: dict, collection, storage=None) -> dict:
             if encoded_project in job_project or job_project.lstrip('-') == encoded_project:
                 project_active_count += 1
 
-    # Get artifact stats - global and project-scoped
-    artifact_stats = {'global': {}, 'project': {}}
+    # Get artifact stats - always include local, add central if available
+    log("[STATUS] Getting artifact stats")
+    artifact_stats = {'global': {}, 'project': {}, 'local': {}, 'central': {}}
+
+    # Always get local stats first (source of truth before sync)
+    log("[STATUS] Getting local artifact stats")
+    local_stats = get_artifact_stats()
+    artifact_stats['local'] = local_stats
+    artifact_stats['global'] = local_stats  # Default to local for global view
 
     if storage and storage.using_central and storage.postgres:
         try:
             with storage.postgres._get_connection() as conn:
                 with conn.cursor() as cur:
-                    # GLOBAL artifact stats
+                    # GLOBAL artifact stats from central
                     cur.execute("SELECT COUNT(*) FROM artifacts")
-                    artifact_stats['global']['total'] = cur.fetchone()[0]
+                    central_total = cur.fetchone()[0]
 
                     cur.execute("""
                         SELECT artifact_type, COUNT(*)
@@ -901,9 +940,22 @@ def handle_status(params: dict, collection, storage=None) -> dict:
                         GROUP BY artifact_type
                         ORDER BY COUNT(*) DESC
                     """)
-                    artifact_stats['global']['by_type'] = {
+                    central_by_type = {
                         row[0]: row[1] for row in cur.fetchall()
                     }
+
+                    artifact_stats['central'] = {
+                        'total': central_total,
+                        'by_type': central_by_type
+                    }
+
+                    # Use local for global (it has unsynced data), but note central count
+                    artifact_stats['global'] = local_stats
+                    artifact_stats['global']['central_total'] = central_total
+
+                    # Add pending sync count from queue
+                    pending_artifacts = sync_queue_stats.get('pending', {}).get('artifact', 0)
+                    artifact_stats['global']['pending_sync'] = pending_artifacts
 
                     # PROJECT-scoped artifact stats
                     if project_id:
@@ -927,30 +979,57 @@ def handle_status(params: dict, collection, storage=None) -> dict:
                         }
 
                     artifact_stats['storage'] = 'central'
+                    log("[STATUS] artifact stats (central) done")
         except Exception as e:
             # Fall back to local stats if central query fails
-            log(f"Central artifact count query failed, falling back to local: {e}")
-            local_stats = get_artifact_stats()
-            artifact_stats['global'] = local_stats
+            log(f"[STATUS] Central artifact count query failed, falling back to local: {e}")
             artifact_stats['storage'] = 'local_fallback'
     else:
-        # No central storage - use local stats
-        local_stats = get_artifact_stats()
-        artifact_stats['global'] = local_stats
+        # No central storage - use local stats only
+        log("[STATUS] Getting artifact stats from local only")
         artifact_stats['storage'] = 'local_only'
+    log(f"[STATUS] artifact stats storage: {artifact_stats.get('storage')}")
 
-    # Get file operations stats - global and project-scoped
-    file_ops_stats = {'global': {}, 'project': {}}
+    # Get file operations stats - always include local, add central if available
+    log("[STATUS] Getting file operations stats")
+    file_ops_stats = {'global': {}, 'project': {}, 'local': {}, 'central': {}}
+
+    # Always get local stats first
+    try:
+        from .artifacts import get_journey_stats
+        journey = get_journey_stats()
+        local_file_ops = {
+            'total_operations': journey.get('files_created', 0) + journey.get('total_edits', 0),
+            'unique_files': journey.get('unique_files', 0),
+        }
+        file_ops_stats['local'] = local_file_ops
+        file_ops_stats['global'] = local_file_ops  # Default to local
+    except Exception:
+        file_ops_stats['local'] = {'total_operations': 0, 'unique_files': 0}
+        file_ops_stats['global'] = {'total_operations': 0, 'unique_files': 0}
+
     if storage and storage.using_central and storage.postgres:
         try:
             with storage.postgres._get_connection() as conn:
                 with conn.cursor() as cur:
-                    # GLOBAL file operations stats
+                    # GLOBAL file operations stats from central
                     cur.execute("SELECT COUNT(*) FROM file_operations")
-                    file_ops_stats['global']['total_operations'] = cur.fetchone()[0]
+                    central_total = cur.fetchone()[0]
 
                     cur.execute("SELECT COUNT(DISTINCT file_path) FROM file_operations")
-                    file_ops_stats['global']['unique_files'] = cur.fetchone()[0]
+                    central_unique = cur.fetchone()[0]
+
+                    file_ops_stats['central'] = {
+                        'total_operations': central_total,
+                        'unique_files': central_unique,
+                    }
+
+                    # Use local for global (has unsynced data), note central count
+                    file_ops_stats['global']['central_total'] = central_total
+
+                    # Add pending sync count from queue
+                    pending_file_ops = sync_queue_stats.get('pending', {}).get('file_operation', 0)
+                    file_ops_stats['global']['pending_sync'] = pending_file_ops
 
                     # PROJECT-scoped file operations stats
                     if project_id:
@@ -970,21 +1049,9 @@ def handle_status(params: dict, collection, storage=None) -> dict:
 
                     file_ops_stats['storage'] = 'central'
         except Exception:
-            file_ops_stats['global'] = {'total_operations': 0, 'unique_files': 0}
-            file_ops_stats['storage'] = 'pending_migration'
+            file_ops_stats['storage'] = 'local_fallback'
     else:
-        # Get from local storage
-        try:
-            from .artifacts import get_journey_stats
-            journey = get_journey_stats()
-            file_ops_stats['global'] = {
-                'total_operations': journey.get('files_created', 0) + journey.get('total_edits', 0),
-                'unique_files': journey.get('unique_files', 0),
-            }
-            file_ops_stats['storage'] = 'local_only'
-        except Exception:
-            file_ops_stats['global'] = {'total_operations': 0, 'unique_files': 0}
-            file_ops_stats['storage'] = 'error'
+        file_ops_stats['storage'] = 'local_only'
 
     # Get decision stats from central storage - global and project-scoped
     decision_stats_central = {'global': {}, 'project': {}}
@@ -1034,8 +1101,10 @@ def handle_status(params: dict, collection, storage=None) -> dict:
     else:
         decision_stats_central['global'] = decision_stats
         decision_stats_central['storage'] = 'local_only'
+    log(f"[STATUS] decision stats storage: {decision_stats_central.get('storage')}")
 
     # Build response with clear project vs global distinction
+    log("[STATUS] Building result")
     result = {
         "storage_path": str(mira_path),
         "last_sync": datetime.now().isoformat(),
@@ -1112,13 +1181,17 @@ def handle_status(params: dict, collection, storage=None) -> dict:
     }
 
     # Add local semantic search status
+    log("[STATUS] Getting local semantic status")
     try:
         from .local_semantic import get_local_semantic
         ls = get_local_semantic()
         result["local_semantic"] = ls.get_status()
+        log("[STATUS] local semantic status done")
     except Exception as e:
         result["local_semantic"] = {"available": False, "error": str(e)}
+        log(f"[STATUS] local semantic status failed: {e}")
 
+    log("[STATUS] handle_status complete, returning result")
     return result
 
 

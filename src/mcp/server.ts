@@ -437,11 +437,13 @@ export async function startServer(): Promise<void> {
 
   // Handle graceful shutdown
   process.on("SIGINT", async () => {
+    console.error("[MIRA MCP] Received SIGINT, shutting down backend");
     await shutdownBackend();
     process.exit(0);
   });
 
   process.on("SIGTERM", async () => {
+    console.error("[MIRA MCP] Received SIGTERM, shutting down backend");
     await shutdownBackend();
     process.exit(0);
   });
