@@ -6,8 +6,8 @@ Central location for all magic numbers, paths, and configuration constants.
 
 from pathlib import Path
 
-# Version
-VERSION = "0.3.6"
+# Version - imported from single source of truth
+from mira._version import __version__ as VERSION
 
 # Approximate chars per token (for text length estimation)
 CHARS_PER_TOKEN = 4

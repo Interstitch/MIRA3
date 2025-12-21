@@ -5,7 +5,8 @@ Persistent memory for Claude Code: semantic search, cross-session context,
 learned preferences, error tracking, and decision journaling.
 """
 
-__version__ = "0.3.3"
+from ._version import __version__
+
 __author__ = "Max"
 
 from .core.config import get_config

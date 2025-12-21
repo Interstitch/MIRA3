@@ -21,6 +21,60 @@ from .utils import get_venv_path, get_venv_python, get_venv_pip, log
 from .constants import get_mira_path
 
 
+def _configure_claude_code():
+    """
+    Auto-configure Claude Code to use MIRA as MCP server.
+
+    Updates ~/.claude.json and ~/.claude/settings.json if needed.
+    Replaces any old Node.js-based MIRA config with Python version.
+    """
+    home = Path.home()
+    config_paths = [
+        home / ".claude.json",
+        home / ".claude" / "settings.json",
+    ]
+
+    # Get the mira command path
+    venv_path = get_venv_path()
+    mira_bin = str(venv_path / "bin" / "mira")
+
+    new_mira_config = {
+        "command": mira_bin,
+        "args": [],
+    }
+
+    for config_path in config_paths:
+        try:
+            config = {}
+            if config_path.exists():
+                config = json.loads(config_path.read_text())
+
+            if "mcpServers" not in config:
+                config["mcpServers"] = {}
+
+            # Check for old Node.js config and remove it
+            for old_key in ["mira3"]:
+                if old_key in config["mcpServers"]:
+                    old_cfg = config["mcpServers"][old_key]
+                    if old_cfg.get("command") == "node" or "npx" in str(old_cfg.get("args", [])):
+                        log(f"Removing old Node.js config from {config_path}")
+                        del config["mcpServers"][old_key]
+
+            # Check if update needed
+            existing = config["mcpServers"].get("mira")
+            if existing == new_mira_config:
+                continue  # Already configured correctly
+
+            # Update config
+            config["mcpServers"]["mira"] = new_mira_config
+            config_path.parent.mkdir(parents=True, exist_ok=True)
+            config_path.write_text(json.dumps(config, indent=2))
+            log(f"Configured Claude Code: {config_path}")
+
+        except Exception as e:
+            log(f"Could not update {config_path}: {e}")
+
+
 def is_running_in_venv() -> bool:
     """Check if we're running inside our virtualenv."""
     venv_path = get_venv_path()
@@ -111,7 +165,8 @@ def ensure_venv_and_deps() -> bool:
     # v6: Fixed conditional logging for uv
     # v7: Simplified - install uv as dep, use for all installs
     # v8: Added sync worker module (0.3.5)
-    CURRENT_DEPS_VERSION = 8
+    # v9: Auto-configure Claude Code, fix MCP SDK 1.25.0 compatibility (0.3.8)
+    CURRENT_DEPS_VERSION = 9
 
     # Force reinstall if deps version is outdated
     if deps_version < CURRENT_DEPS_VERSION:
@@ -170,6 +225,12 @@ def ensure_venv_and_deps() -> bool:
         server_config_path = mira_path / "server.json"
         if not server_config_path.exists():
             log("Note: server.json not found - running in local-only mode")
+
+        # Auto-configure Claude Code MCP settings
+        try:
+            _configure_claude_code()
+        except Exception as e:
+            log(f"Claude Code config update failed (non-fatal): {e}")
 
         # Mark as installed with version
         config = {

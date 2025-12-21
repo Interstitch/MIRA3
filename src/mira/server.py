@@ -17,6 +17,7 @@ import mcp.server.stdio
 import mcp.types as types
 from mcp.server import Server
 from mcp.server.models import InitializationOptions
+from mcp.server.lowlevel.server import NotificationOptions
 
 from mira.core import (
     VERSION,
@@ -378,7 +379,7 @@ async def run_server():
                     server_name="mira",
                     server_version=VERSION,
                     capabilities=server.get_capabilities(
-                        notification_options=None,
+                        notification_options=NotificationOptions(),
                         experimental_capabilities={}
                     )
                 )

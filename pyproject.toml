@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "claude-mira"
-version = "0.3.6"
+dynamic = ["version"]
 description = "Persistent memory for Claude Code - semantic search, cross-session context, learned preferences"
 readme = "README.md"
 license = "MIT"
@@ -62,6 +62,9 @@ Issues = "https://github.com/Interstitch/MIRA3/issues"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/mira"]
+
+[tool.hatch.version]
+path = "src/mira/_version.py"
 
 [tool.ruff]
 line-length = 100
