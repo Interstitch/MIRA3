@@ -60,7 +60,8 @@ from .utils import (
 from .bootstrap import (
     is_running_in_venv,
     ensure_venv_and_deps,
-    reexec_in_venv,
+    activate_venv_deps,
+    get_venv_site_packages,
 )
 
 from .parsing import (
@@ -118,7 +119,8 @@ __all__ = [
     # Bootstrap
     "is_running_in_venv",
     "ensure_venv_and_deps",
-    "reexec_in_venv",
+    "activate_venv_deps",
+    "get_venv_site_packages",
     # Parsing
     "parse_conversation",
     "extract_tool_usage",

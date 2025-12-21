@@ -92,53 +92,34 @@ def _get_uv_path(venv_path: Path) -> str:
     return get_venv_uv()
 
 
-def _get_venv_mira_version(venv_path: Path) -> str:
+def get_venv_site_packages() -> Path:
+    """Get the site-packages directory in the venv (cross-platform)."""
+    venv_path = get_venv_path()
+    if sys.platform == "win32":
+        return venv_path / "Lib" / "site-packages"
+    else:
+        # Unix: lib/python3.x/site-packages
+        python_version = f"python{sys.version_info.major}.{sys.version_info.minor}"
+        return venv_path / "lib" / python_version / "site-packages"
+
+
+def activate_venv_deps():
     """
-    Get the version of claude-mira3 installed in the venv.
+    Add venv's site-packages to sys.path to use its dependencies.
 
-    Returns empty string if not installed or error.
+    This allows the global mira install to use dependencies from the venv
+    without re-executing. The mira code stays in the global install (no file
+    locking issues on Windows), but dependencies come from the venv.
     """
-    python = get_venv_python()
-    try:
-        result = subprocess.run(
-            [python, "-c", "from mira._version import __version__; print(__version__)"],
-            capture_output=True,
-            text=True,
-            timeout=10
-        )
-        if result.returncode == 0:
-            return result.stdout.strip()
-    except Exception:
-        pass
-    return ""
-
-
-def _upgrade_mira_in_venv(venv_path: Path) -> bool:
-    """
-    Upgrade claude-mira3 in the venv to match the invoking version.
-
-    This is called when the global/invoking version is newer than the venv version.
-    """
-    uv = _get_uv_path(venv_path)
-    python = get_venv_python()
-
-    try:
-        log(f"Upgrading claude-mira3 in venv to {CURRENT_VERSION}...")
-        result = subprocess.run(
-            [uv, "pip", "install", "--python", python, "--upgrade", "claude-mira3", "-q"],
-            capture_output=True,
-            text=True,
-            timeout=120
-        )
-        if result.returncode == 0:
-            log(f"Upgraded to claude-mira3 {CURRENT_VERSION}")
+    site_packages = get_venv_site_packages()
+    if site_packages.exists():
+        site_packages_str = str(site_packages)
+        if site_packages_str not in sys.path:
+            # Insert at beginning so venv packages take priority
+            sys.path.insert(0, site_packages_str)
+            log(f"Activated venv dependencies from {site_packages}")
             return True
-        else:
-            log(f"Upgrade failed: {result.stderr[:200] if result.stderr else 'unknown'}")
-            return False
-    except Exception as e:
-        log(f"Upgrade error: {e}")
-        return False
+    return False
 
 
 def _install_with_uv(venv_path: Path, deps: list, optional: bool = False) -> bool:
@@ -222,29 +203,13 @@ def ensure_venv_and_deps() -> bool:
     # v9: Auto-configure Claude Code, fix MCP SDK 1.25.0 compatibility (0.3.8)
     # v10: Renamed to claude-mira3, Windows compatibility (0.4.0)
     # v11: Hybrid storage model - global venv, project-local data (0.4.0)
-    CURRENT_DEPS_VERSION = 11
+    # v12: Removed claude-mira3 from venv (runs from global install) - fixes Windows upgrade locking
+    CURRENT_DEPS_VERSION = 12
 
     # Force reinstall if deps version is outdated
     if deps_version < CURRENT_DEPS_VERSION:
         deps_installed = False
         log(f"Dependency version outdated ({deps_version} < {CURRENT_DEPS_VERSION}), will reinstall")
-
-    # Check if venv's mira version matches the invoking version
-    # This handles the case where user upgraded globally but venv has old version
-    if deps_installed and venv_path.exists():
-        venv_version = _get_venv_mira_version(venv_path)
-        if venv_version and venv_version != CURRENT_VERSION:
-            log(f"Version mismatch: venv has {venv_version}, invoking {CURRENT_VERSION}")
-            # Try to upgrade just claude-mira3 (fast, no full reinstall)
-            if _upgrade_mira_in_venv(venv_path):
-                # Update config with new version info
-                try:
-                    config = json.loads(config_path.read_text(encoding="utf-8")) if config_path.exists() else {}
-                    config["mira_version"] = CURRENT_VERSION
-                    config["upgraded_at"] = datetime.now().isoformat()
-                    config_path.write_text(json.dumps(config, indent=2), encoding="utf-8")
-                except Exception:
-                    pass
 
     if not venv_path.exists():
         # Find Python with sqlite extension support for sqlite-vec
@@ -334,28 +299,8 @@ def ensure_venv_and_deps() -> bool:
         config_path.write_text(json.dumps(config, indent=2), encoding="utf-8")
         log("Dependencies installed successfully")
 
-    # Check if we need to re-exec in the venv
-    if not is_running_in_venv():
-        return True
+    # Activate venv dependencies (add to sys.path)
+    # No re-exec needed - mira runs from global install, deps from venv
+    activate_venv_deps()
 
-    return False
-
-
-def reexec_in_venv():
-    """Re-execute this script inside the virtualenv."""
-    venv_python = get_venv_python()
-
-    # Build command: always use -m mira to ensure proper module execution
-    # sys.argv[0] might be a file path, so we replace it with module form
-    # Keep all other args (--init, --raw, etc.)
-    cmd = [venv_python, "-m", "mira"] + sys.argv[1:]
-
-    # Preserve environment (including PYTHONPATH for dev mode)
-    result = subprocess.run(
-        cmd,
-        stdin=sys.stdin,
-        stdout=sys.stdout,
-        stderr=sys.stderr,
-        env=os.environ.copy()
-    )
-    sys.exit(result.returncode)
+    return False  # No re-exec needed

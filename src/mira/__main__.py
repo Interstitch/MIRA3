@@ -53,11 +53,11 @@ def main():
     if args.quiet:
         os.environ['MIRA_QUIET'] = '1'
 
-    # Bootstrap: ensure venv and deps BEFORE importing server
+    # Bootstrap: ensure venv deps are installed and activated BEFORE importing server
     # (server.py has top-level imports that require installed deps)
-    from .core.bootstrap import ensure_venv_and_deps, reexec_in_venv
-    if ensure_venv_and_deps():
-        reexec_in_venv()
+    # Note: mira runs from global install, only dependencies come from venv
+    from .core.bootstrap import ensure_venv_and_deps
+    ensure_venv_and_deps()
 
     # Now safe to import server (deps are installed)
     if args.init:

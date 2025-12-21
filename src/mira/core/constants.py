@@ -93,13 +93,14 @@ def get_mira_path() -> Path:
 MIRA_PATH = get_project_mira_path()
 
 # Core dependencies for venv bootstrap
-# NOTE: claude-mira3 is installed first to ensure latest version
+# NOTE: claude-mira3 is NOT installed in venv - runs from global install
+# This avoids file locking issues on Windows when upgrading
 DEPENDENCIES = [
-    "claude-mira3",  # Install/upgrade ourselves first!
     "mcp>=1.25.0",
     "watchdog>=3.0.0",
     "psycopg2-binary>=2.9",
     "qdrant-client",
+    "httpx",  # Required by mcp
 ]
 
 # Optional semantic search dependencies
