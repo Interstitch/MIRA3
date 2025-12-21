@@ -44,7 +44,7 @@ def update_claude_config(config_path: Path, dry_run: bool = False) -> bool:
     # Read existing config
     if config_path.exists():
         try:
-            config = json.loads(config_path.read_text())
+            config = json.loads(config_path.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, IOError):
             pass
 
@@ -101,7 +101,7 @@ def update_claude_config(config_path: Path, dry_run: bool = False) -> bool:
 
     # Write config
     config_path.parent.mkdir(parents=True, exist_ok=True)
-    config_path.write_text(json.dumps(config, indent=2))
+    config_path.write_text(json.dumps(config, indent=2), encoding="utf-8")
     print(f"  Updated {config_path}")
 
     return True
@@ -134,7 +134,7 @@ def uninstall():
             continue
 
         try:
-            config = json.loads(config_path.read_text())
+            config = json.loads(config_path.read_text(encoding="utf-8"))
 
             removed = False
             for key in ["mira", "mira3"]:
@@ -143,7 +143,7 @@ def uninstall():
                     removed = True
 
             if removed:
-                config_path.write_text(json.dumps(config, indent=2))
+                config_path.write_text(json.dumps(config, indent=2), encoding="utf-8")
                 print(f"  Removed from {config_path}")
         except (json.JSONDecodeError, IOError) as e:
             print(f"  Error updating {config_path}: {e}")

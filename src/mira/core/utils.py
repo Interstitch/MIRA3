@@ -69,7 +69,7 @@ def get_mira_config() -> dict:
     if not config_path.exists():
         return {}
     try:
-        with open(config_path, "r") as f:
+        with open(config_path, "r", encoding="utf-8") as f:
             return json.load(f)
     except (json.JSONDecodeError, OSError):
         return {}

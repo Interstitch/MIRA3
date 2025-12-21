@@ -87,7 +87,7 @@ def handle_recent(params: dict, storage=None) -> dict:
                 break
 
             try:
-                meta = json.loads(meta_file.read_text())
+                meta = json.loads(meta_file.read_text(encoding="utf-8"))
                 raw_path = meta.get("project_path", "")
                 sessions.append({
                     "session_id": meta_file.stem,

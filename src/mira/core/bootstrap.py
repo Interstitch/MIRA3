@@ -46,7 +46,7 @@ def _configure_claude_code():
         try:
             config = {}
             if config_path.exists():
-                config = json.loads(config_path.read_text())
+                config = json.loads(config_path.read_text(encoding="utf-8"))
 
             if "mcpServers" not in config:
                 config["mcpServers"] = {}
@@ -67,7 +67,7 @@ def _configure_claude_code():
             # Update config
             config["mcpServers"]["mira"] = new_mira_config
             config_path.parent.mkdir(parents=True, exist_ok=True)
-            config_path.write_text(json.dumps(config, indent=2))
+            config_path.write_text(json.dumps(config, indent=2), encoding="utf-8")
             log(f"Configured Claude Code: {config_path}")
 
         except Exception as e:
@@ -204,7 +204,7 @@ def ensure_venv_and_deps() -> bool:
 
     if config_path.exists():
         try:
-            config = json.loads(config_path.read_text())
+            config = json.loads(config_path.read_text(encoding="utf-8"))
             deps_installed = config.get("deps_installed", False)
             deps_version = config.get("deps_version", 0)
         except (json.JSONDecodeError, IOError, OSError):
@@ -239,10 +239,10 @@ def ensure_venv_and_deps() -> bool:
             if _upgrade_mira_in_venv(venv_path):
                 # Update config with new version info
                 try:
-                    config = json.loads(config_path.read_text()) if config_path.exists() else {}
+                    config = json.loads(config_path.read_text(encoding="utf-8")) if config_path.exists() else {}
                     config["mira_version"] = CURRENT_VERSION
                     config["upgraded_at"] = datetime.now().isoformat()
-                    config_path.write_text(json.dumps(config, indent=2))
+                    config_path.write_text(json.dumps(config, indent=2), encoding="utf-8")
                 except Exception:
                     pass
 
@@ -299,7 +299,7 @@ def ensure_venv_and_deps() -> bool:
                 "deps_version": 0,
                 "install_failed_at": datetime.now().isoformat()
             }
-            config_path.write_text(json.dumps(config, indent=2))
+            config_path.write_text(json.dumps(config, indent=2), encoding="utf-8")
             return True  # Still try to re-exec, maybe partial install works
 
         # Core deps succeeded, try optional semantic deps
@@ -331,7 +331,7 @@ def ensure_venv_and_deps() -> bool:
             "semantic_deps_installed": semantic_deps_installed,
             "installed_at": datetime.now().isoformat()
         }
-        config_path.write_text(json.dumps(config, indent=2))
+        config_path.write_text(json.dumps(config, indent=2), encoding="utf-8")
         log("Dependencies installed successfully")
 
     # Check if we need to re-exec in the venv

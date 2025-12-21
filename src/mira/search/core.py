@@ -483,7 +483,7 @@ def fulltext_search_archives(query: str, limit: int, storage=None) -> list:
         metadata = {}
         if meta_file.exists():
             try:
-                metadata = json.loads(meta_file.read_text())
+                metadata = json.loads(meta_file.read_text(encoding="utf-8"))
             except Exception:
                 pass
 

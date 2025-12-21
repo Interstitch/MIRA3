@@ -400,7 +400,7 @@ def get_current_work_context(project_path: str = "") -> dict:
 
     for meta_file in recent_files:
         try:
-            meta = json.loads(meta_file.read_text())
+            meta = json.loads(meta_file.read_text(encoding="utf-8"))
 
             # Filter by project if specified
             if project_path:

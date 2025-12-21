@@ -111,7 +111,7 @@ def ingest_conversation(
 
     if meta_file.exists():
         try:
-            existing_meta = json.loads(meta_file.read_text())
+            existing_meta = json.loads(meta_file.read_text(encoding="utf-8"))
             last_indexed_message_count = existing_meta.get('last_indexed_message_count', 0)
 
             if existing_meta.get('last_modified') == file_info.get('last_modified'):
@@ -381,7 +381,7 @@ def ingest_conversation(
         log(f"[{short_id}] Ingestion complete ({storage_mode} mode) - TOTAL: {t_total:.0f}ms")
 
         # Save metadata AFTER successful indexing
-        meta_file.write_text(json.dumps(metadata, indent=2))
+        meta_file.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
 
         # Optional LLM extraction
         if os.environ.get("MIRA_LLM_EXTRACTION", "").lower() in ("true", "1", "yes"):
@@ -443,7 +443,7 @@ def sync_active_session(
 
         file_stat = file_path.stat()
         file_size = file_stat.st_size
-        archive_content = file_path.read_text()
+        archive_content = file_path.read_text(encoding="utf-8")
         line_count = archive_content.count('\n')
 
         if not storage.session_exists_in_central(session_id):

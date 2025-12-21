@@ -176,7 +176,7 @@ def load_config() -> ServerConfig:
     validate_file_permissions(config_path)
 
     try:
-        with open(config_path, "r") as f:
+        with open(config_path, "r", encoding="utf-8") as f:
             data = json.load(f)
     except json.JSONDecodeError as e:
         log.error(f"Invalid JSON in {config_path}: {e}")
