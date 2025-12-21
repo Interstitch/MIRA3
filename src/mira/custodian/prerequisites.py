@@ -306,12 +306,32 @@ def get_applicable_prerequisites(detected_envs: list = None) -> list:
     return applicable
 
 
+def _is_mcp_stdio_context() -> bool:
+    """Detect if running in MCP stdio context on Windows.
+
+    MCP uses stdin/stdout for JSON-RPC communication. Subprocess calls
+    with capture_output=True create pipes that can interfere with this transport.
+    """
+    import sys
+    if platform.system() != 'Windows':
+        return False
+    try:
+        return not sys.stdin.isatty()
+    except (AttributeError, OSError):
+        return False
+
+
 def check_prerequisites_and_alert() -> list:
     """
     Check all applicable prerequisites and generate alerts for unmet ones.
 
     Returns list of alert dicts for inclusion in mira_init response.
     """
+    # WINDOWS FIX: Skip subprocess checks when running in MCP stdio context
+    # Subprocess calls with capture_output=True interfere with MCP transport
+    if _is_mcp_stdio_context():
+        return []
+
     applicable = get_applicable_prerequisites()
     alerts = []
 
@@ -332,7 +352,9 @@ def check_prerequisites_and_alert() -> list:
                     result = subprocess.run(
                         check_cmd,
                         shell=True,
-                        capture_output=True,
+                        stdin=subprocess.DEVNULL,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
                         timeout=1  # Quick timeout - don't block startup
                     )
                     check_cache[check_cmd] = (result.returncode == 0)
