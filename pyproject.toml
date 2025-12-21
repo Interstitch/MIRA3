@@ -54,10 +54,8 @@ all = [
     "claude-mira3[remote,dev]",
 ]
 
-[project.scripts]
-mira = "mira.__main__:main"
-mira-install = "mira.install:main"
-mira-reset = "mira.reset:main"
+# No CLI scripts - MIRA runs via: python -m mira
+# This avoids Windows PATH warnings
 
 [project.urls]
 Homepage = "https://github.com/Interstitch/MIRA3"
