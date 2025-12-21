@@ -305,20 +305,6 @@ def ingest_conversation(
         except Exception as e:
             log(f"[{short_id}] File ops failed: {e}")
 
-        # Extract code history
-        try:
-            from mira.extraction.code_history import extract_and_store_from_session
-            t0 = time.time()
-            code_history_ops = extract_and_store_from_session(
-                session_id,
-                file_path,
-                project_path_encoded
-            )
-            t_code_history = (time.time() - t0) * 1000
-            if code_history_ops > 0:
-                log(f"[{short_id}] Code history: {code_history_ops} ops ({t_code_history:.0f}ms)")
-        except Exception as e:
-            log(f"[{short_id}] Code history failed: {e}")
 
         # Create incremental conversation for custodian/insights/concepts
         if is_incremental and new_message_start > 0:

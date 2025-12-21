@@ -190,6 +190,22 @@ class Storage:
             log.error(f"Local upsert_session failed: {e}")
             return None
 
+    def upsert_archive(self, postgres_session_id: Optional[int], content: str, content_hash: str, session_id: str) -> Optional[int]:
+        """Upsert conversation archive - CENTRAL ONLY (local stores raw files)."""
+        # Archives are only stored in central postgres, not locally
+        # Local storage uses the raw .jsonl files directly
+        if self._using_central and self._postgres:
+            try:
+                return self._postgres.upsert_archive(
+                    session_id=postgres_session_id,
+                    content=content,
+                    content_hash=content_hash,
+                )
+            except Exception as e:
+                log.debug(f"Central upsert_archive failed (non-fatal): {e}")
+                return None
+        return None  # No-op when running local-only
+
     def get_recent_sessions(self, project_path: Optional[str] = None, limit: int = 10, since: Optional[datetime] = None) -> List[Dict[str, Any]]:
         """Get recent sessions."""
         from mira.storage import local_store

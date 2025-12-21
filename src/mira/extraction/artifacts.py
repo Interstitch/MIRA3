@@ -272,7 +272,7 @@ def store_artifact(
 
     if storage and storage.central_configured:
         try:
-            from mira.storage.sync_queue import get_sync_queue
+            from mira.storage.sync.queue import get_sync_queue
             queue = get_sync_queue()
 
             metadata = {
@@ -493,7 +493,7 @@ def extract_file_operations_from_messages(
 
     if storage and storage.central_configured:
         try:
-            from mira.storage.sync_queue import get_sync_queue
+            from mira.storage.sync.queue import get_sync_queue
             queue = get_sync_queue()
             for op in operations:
                 queue.enqueue("file_operation", op.get('operation_hash', ''), op)
@@ -599,7 +599,7 @@ def extract_artifacts_from_messages(
 
     # Queue for central sync
     try:
-        from mira.storage.sync_queue import get_sync_queue
+        from mira.storage.sync.queue import get_sync_queue
         queue = get_sync_queue()
 
         batch_items = []

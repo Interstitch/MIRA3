@@ -58,16 +58,13 @@ def _initialize():
     except Exception as e:
         log(f"Schema migration warning: {e}")
 
-    # Initialize storage
+    # Initialize storage (lazy - don't block on central connection)
     try:
         from mira.storage import get_storage
         _storage = get_storage()
-
-        health = _storage.health_check()
-        if _storage.using_central:
-            log(f"Storage: CENTRAL (Qdrant={health.get('qdrant_healthy')}, Postgres={health.get('postgres_healthy')})")
-        else:
-            log("Storage: LOCAL (SQLite with FTS)")
+        # Note: Central connection is lazy - checked on first use, not here
+        # This prevents cold-start timeout when central is slow/unreachable
+        log("Storage: initialized (mode determined on first use)")
     except Exception as e:
         log(f"Storage init error: {e}")
         _storage = None
