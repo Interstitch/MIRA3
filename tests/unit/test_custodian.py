@@ -9,7 +9,7 @@ from mira.custodian import (
     init_custodian_db, extract_custodian_learnings,
     get_full_custodian_profile, get_danger_zones_for_files
 )
-from mira.core import shutdown_db_manager
+from mira.core import shutdown_db_manager, get_global_mira_path, DB_CUSTODIAN
 
 
 class TestCustodian:
@@ -27,8 +27,9 @@ class TestCustodian:
 
             init_custodian_db()
 
-            db_path = mira_path / 'custodian.db'
-            assert db_path.exists()
+            # custodian.db is now stored in GLOBAL path (~/.mira/), not project path
+            global_db_path = get_global_mira_path() / DB_CUSTODIAN
+            assert global_db_path.exists(), f"Expected custodian.db at {global_db_path}"
         finally:
             shutdown_db_manager()  # Clean up connections
             os.chdir(original_cwd)

@@ -3,7 +3,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "claude-mira"
+name = "claude-mira3"
 dynamic = ["version"]
 description = "Persistent memory for Claude Code - semantic search, cross-session context, learned preferences"
 readme = "README.md"
@@ -47,12 +47,13 @@ dev = [
     "mypy>=1.0",
 ]
 all = [
-    "claude-mira[semantic,dev]",
+    "claude-mira3[semantic,dev]",
 ]
 
 [project.scripts]
 mira = "mira.__main__:main"
 mira-install = "mira.install:main"
+mira-reset = "mira.reset:main"
 
 [project.urls]
 Homepage = "https://github.com/Interstitch/MIRA3"

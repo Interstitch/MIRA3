@@ -46,3 +46,4 @@ npm-debug.log*
 # Google Cloud SDK (local install)
 gcloud auth/
 google-cloud-sdk/
+pypi_config.json

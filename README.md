@@ -60,7 +60,7 @@ Claude: ⚠️ Heads up - ingestion.py has caused 51 recorded issues in past ses
 ## Installation
 
 ```bash
-pip install claude-mira
+pip install claude-mira3
 mira-install
 ```
 

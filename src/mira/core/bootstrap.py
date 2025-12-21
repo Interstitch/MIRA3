@@ -16,9 +16,8 @@ import subprocess
 from pathlib import Path
 from datetime import datetime
 
-from .constants import DEPENDENCIES, DEPENDENCIES_SEMANTIC
-from .utils import get_venv_path, get_venv_python, get_venv_pip, log
-from .constants import get_mira_path
+from .constants import DEPENDENCIES, DEPENDENCIES_SEMANTIC, get_global_mira_path, get_project_mira_path
+from .utils import get_venv_path, get_venv_python, get_venv_pip, get_venv_uv, get_venv_mira, log
 from mira._version import __version__ as CURRENT_VERSION
 
 
@@ -35,9 +34,8 @@ def _configure_claude_code():
         home / ".claude" / "settings.json",
     ]
 
-    # Get the mira command path
-    venv_path = get_venv_path()
-    mira_bin = str(venv_path / "bin" / "mira")
+    # Get the mira command path (cross-platform)
+    mira_bin = get_venv_mira()
 
     new_mira_config = {
         "command": mira_bin,
@@ -90,17 +88,17 @@ def is_running_in_venv() -> bool:
 
 
 def _get_uv_path(venv_path: Path) -> str:
-    """Get path to uv binary in venv."""
-    return str(venv_path / "bin" / "uv")
+    """Get path to uv binary in venv (cross-platform)."""
+    return get_venv_uv()
 
 
 def _get_venv_mira_version(venv_path: Path) -> str:
     """
-    Get the version of claude-mira installed in the venv.
+    Get the version of claude-mira3 installed in the venv.
 
     Returns empty string if not installed or error.
     """
-    python = str(venv_path / "bin" / "python")
+    python = get_venv_python()
     try:
         result = subprocess.run(
             [python, "-c", "from mira._version import __version__; print(__version__)"],
@@ -117,23 +115,23 @@ def _get_venv_mira_version(venv_path: Path) -> str:
 
 def _upgrade_mira_in_venv(venv_path: Path) -> bool:
     """
-    Upgrade claude-mira in the venv to match the invoking version.
+    Upgrade claude-mira3 in the venv to match the invoking version.
 
     This is called when the global/invoking version is newer than the venv version.
     """
     uv = _get_uv_path(venv_path)
-    python = str(venv_path / "bin" / "python")
+    python = get_venv_python()
 
     try:
-        log(f"Upgrading claude-mira in venv to {CURRENT_VERSION}...")
+        log(f"Upgrading claude-mira3 in venv to {CURRENT_VERSION}...")
         result = subprocess.run(
-            [uv, "pip", "install", "--python", python, "--upgrade", "claude-mira", "-q"],
+            [uv, "pip", "install", "--python", python, "--upgrade", "claude-mira3", "-q"],
             capture_output=True,
             text=True,
             timeout=120
         )
         if result.returncode == 0:
-            log(f"Upgraded to claude-mira {CURRENT_VERSION}")
+            log(f"Upgraded to claude-mira3 {CURRENT_VERSION}")
             return True
         else:
             log(f"Upgrade failed: {result.stderr[:200] if result.stderr else 'unknown'}")
@@ -150,7 +148,7 @@ def _install_with_uv(venv_path: Path, deps: list, optional: bool = False) -> boo
     Returns True on success, False on failure.
     """
     uv = _get_uv_path(venv_path)
-    python = str(venv_path / "bin" / "python")
+    python = get_venv_python()
 
     try:
         dep_list = ", ".join(deps)
@@ -182,17 +180,23 @@ def ensure_venv_and_deps() -> bool:
     Ensure virtualenv exists and dependencies are installed.
     Returns True if we need to re-exec in the venv.
 
+    Storage layout:
+    - Global (~/.mira/): venv, global config, user-wide databases
+    - Project (<cwd>/.mira/): project-specific databases, logs, archives
+
     Strategy:
     1. Create venv with python -m venv (built-in)
     2. Install uv first via pip
     3. Use uv for remaining deps (fast)
     """
-    mira_path = get_mira_path()
-    venv_path = get_venv_path()
-    config_path = mira_path / "config.json"
+    global_mira_path = get_global_mira_path()
+    project_mira_path = get_project_mira_path()
+    venv_path = get_venv_path()  # Now returns global path
+    config_path = global_mira_path / "config.json"  # Global config for venv state
 
-    # Create .mira directory if needed
-    mira_path.mkdir(parents=True, exist_ok=True)
+    # Create both global and project .mira directories
+    global_mira_path.mkdir(parents=True, exist_ok=True)
+    project_mira_path.mkdir(parents=True, exist_ok=True)
 
     # Check if venv exists and is set up
     deps_installed = False
@@ -216,7 +220,9 @@ def ensure_venv_and_deps() -> bool:
     # v7: Simplified - install uv as dep, use for all installs
     # v8: Added sync worker module (0.3.5)
     # v9: Auto-configure Claude Code, fix MCP SDK 1.25.0 compatibility (0.3.8)
-    CURRENT_DEPS_VERSION = 9
+    # v10: Renamed to claude-mira3, Windows compatibility (0.4.0)
+    # v11: Hybrid storage model - global venv, project-local data (0.4.0)
+    CURRENT_DEPS_VERSION = 11
 
     # Force reinstall if deps version is outdated
     if deps_version < CURRENT_DEPS_VERSION:
@@ -229,7 +235,7 @@ def ensure_venv_and_deps() -> bool:
         venv_version = _get_venv_mira_version(venv_path)
         if venv_version and venv_version != CURRENT_VERSION:
             log(f"Version mismatch: venv has {venv_version}, invoking {CURRENT_VERSION}")
-            # Try to upgrade just claude-mira (fast, no full reinstall)
+            # Try to upgrade just claude-mira3 (fast, no full reinstall)
             if _upgrade_mira_in_venv(venv_path):
                 # Update config with new version info
                 try:
@@ -243,18 +249,22 @@ def ensure_venv_and_deps() -> bool:
     if not venv_path.exists():
         # Find Python with sqlite extension support for sqlite-vec
         python_to_use = sys.executable
-        try:
-            # Check if /usr/bin/python3 has extension support (system Python usually does)
-            result = subprocess.run(
-                ["/usr/bin/python3", "-c",
-                 "import sqlite3; sqlite3.connect(':memory:').enable_load_extension(True); print('ok')"],
-                capture_output=True, text=True, timeout=5
-            )
-            if result.returncode == 0 and "ok" in result.stdout:
-                python_to_use = "/usr/bin/python3"
-                log("Using system Python (has sqlite extension support)")
-        except Exception:
-            pass  # Fall back to sys.executable
+
+        # On Unix, try to use system Python which typically has sqlite extension support
+        # Windows doesn't have /usr/bin/python3, so skip this check
+        if sys.platform != "win32":
+            try:
+                # Check if /usr/bin/python3 has extension support (system Python usually does)
+                result = subprocess.run(
+                    ["/usr/bin/python3", "-c",
+                     "import sqlite3; sqlite3.connect(':memory:').enable_load_extension(True); print('ok')"],
+                    capture_output=True, text=True, timeout=5
+                )
+                if result.returncode == 0 and "ok" in result.stdout:
+                    python_to_use = "/usr/bin/python3"
+                    log("Using system Python (has sqlite extension support)")
+            except Exception:
+                pass  # Fall back to sys.executable
 
         log(f"Creating virtualenv at {venv_path}")
         subprocess.run(
@@ -277,20 +287,35 @@ def ensure_venv_and_deps() -> bool:
 
         # Step 2: Use uv for all remaining deps (fast!)
         semantic_deps_installed = False
+        core_deps_installed = _install_with_uv(venv_path, DEPENDENCIES)
 
-        if _install_with_uv(venv_path, DEPENDENCIES):
-            # Try optional semantic deps
-            semantic_deps_installed = _install_with_uv(
-                venv_path, DEPENDENCIES_SEMANTIC, optional=True
-            )
-            if semantic_deps_installed:
-                log("Semantic search dependencies installed")
-            else:
-                log("Local semantic search unavailable - using keyword search")
+        if not core_deps_installed:
+            # Core dependencies failed - do NOT mark as installed
+            # This ensures bootstrap will retry on next run
+            log("ERROR: Core dependencies failed to install. Will retry on next run.")
+            # Write partial config so we know venv exists but deps failed
+            config = {
+                "deps_installed": False,
+                "deps_version": 0,
+                "install_failed_at": datetime.now().isoformat()
+            }
+            config_path.write_text(json.dumps(config, indent=2))
+            return True  # Still try to re-exec, maybe partial install works
+
+        # Core deps succeeded, try optional semantic deps
+        semantic_deps_installed = _install_with_uv(
+            venv_path, DEPENDENCIES_SEMANTIC, optional=True
+        )
+        if semantic_deps_installed:
+            log("Semantic search dependencies installed")
+        else:
+            log("Local semantic search unavailable - using keyword search")
 
         # Verify server.json exists (required for remote storage)
-        server_config_path = mira_path / "server.json"
-        if not server_config_path.exists():
+        # Check both project-local and global locations
+        project_server_config = project_mira_path / "server.json"
+        global_server_config = global_mira_path / "server.json"
+        if not project_server_config.exists() and not global_server_config.exists():
             log("Note: server.json not found - running in local-only mode")
 
         # Auto-configure Claude Code MCP settings
@@ -299,7 +324,7 @@ def ensure_venv_and_deps() -> bool:
         except Exception as e:
             log(f"Claude Code config update failed (non-fatal): {e}")
 
-        # Mark as installed with version
+        # Mark as installed with version (only if core deps succeeded)
         config = {
             "deps_installed": True,
             "deps_version": CURRENT_DEPS_VERSION,

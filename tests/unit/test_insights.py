@@ -10,7 +10,7 @@ from mira.extraction import (
     search_error_solutions, search_decisions, get_error_stats, get_decision_stats,
     normalize_error_message, generate_error_signature
 )
-from mira.core import shutdown_db_manager
+from mira.core import shutdown_db_manager, get_global_mira_path, DB_INSIGHTS
 
 
 class TestInsights:
@@ -28,8 +28,9 @@ class TestInsights:
 
             init_insights_db()
 
-            db_path = mira_path / 'insights.db'
-            assert db_path.exists()
+            # insights.db is now stored in GLOBAL path (~/.mira/), not project path
+            global_db_path = get_global_mira_path() / DB_INSIGHTS
+            assert global_db_path.exists(), f"Expected insights.db at {global_db_path}"
         finally:
             shutdown_db_manager()
             os.chdir(original_cwd)

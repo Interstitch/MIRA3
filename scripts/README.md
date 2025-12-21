@@ -26,7 +26,8 @@ Standalone CLI wrappers for MIRA MCP tools:
 
 ### dev/
 Local development helpers:
-- `reset_db.py` - Wipe local databases for fresh start
+- `reset_local_db.py` - Wipe local SQLite databases (global + project)
+- `reset_remote_db.py` - Wipe remote Postgres + Qdrant databases
 - `find_unused_code.py` - Find dead code in codebase
 
 ### deploy/
@@ -54,5 +55,6 @@ python scripts/cli/mira_status.py
 python scripts/validate/health_check.py
 
 # Development
-python scripts/dev/reset_db.py --force
+python scripts/dev/reset_local_db.py --force
+python scripts/dev/reset_remote_db.py --dry-run
 ```

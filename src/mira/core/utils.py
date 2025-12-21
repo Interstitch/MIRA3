@@ -13,12 +13,17 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-from .constants import get_mira_path
+from .constants import get_mira_path, get_global_mira_path, get_project_mira_path
 
 
 def get_venv_path() -> Path:
-    """Get the virtualenv path."""
-    return get_mira_path() / ".venv"
+    """
+    Get the global virtualenv path (~/.mira/.venv/).
+
+    The venv is stored globally so it's shared across all projects.
+    This avoids duplicating 600MB+ of Python packages per project.
+    """
+    return get_global_mira_path() / ".venv"
 
 
 def get_venv_python() -> str:
@@ -35,6 +40,22 @@ def get_venv_pip() -> str:
     if sys.platform == "win32":
         return str(venv / "Scripts" / "pip.exe")
     return str(venv / "bin" / "pip")
+
+
+def get_venv_uv() -> str:
+    """Get the uv executable inside the virtualenv."""
+    venv = get_venv_path()
+    if sys.platform == "win32":
+        return str(venv / "Scripts" / "uv.exe")
+    return str(venv / "bin" / "uv")
+
+
+def get_venv_mira() -> str:
+    """Get the mira executable inside the virtualenv."""
+    venv = get_venv_path()
+    if sys.platform == "win32":
+        return str(venv / "Scripts" / "mira.exe")
+    return str(venv / "bin" / "mira")
 
 
 def get_mira_config() -> dict:
@@ -68,7 +89,11 @@ def get_project_filter() -> Optional[str]:
 
     # Convert filesystem path to Claude's encoded format
     # /workspaces/MIRA3 -> -workspaces-MIRA3
-    encoded = project_path.replace("/", "-").lstrip("-")
+    # C:\Users\Max\MIRA3 -> C--Users-Max-MIRA3 (Windows)
+    #
+    # First normalize to forward slashes (Windows uses backslashes)
+    normalized = project_path.replace("\\", "/")
+    encoded = normalized.replace("/", "-").lstrip("-")
     return encoded
 
 
@@ -267,10 +292,17 @@ def get_git_remote_for_claude_path(encoded_path: str) -> Optional[str]:
         return None
 
     # Decode: "-workspaces-MIRA3" -> "/workspaces/MIRA3"
+    # On Windows: "C--Users-Max-MIRA3" -> "C:/Users/Max/MIRA3"
     if encoded_path.startswith('-'):
+        # Unix-style path (started with /)
         decoded = '/' + encoded_path[1:].replace('-', '/')
     else:
+        # Windows-style path (e.g., C--Users-Max-MIRA3)
+        # First segment is drive letter, rest uses - as separator
         decoded = encoded_path.replace('-', '/')
+        # On Windows, convert forward slashes to OS separator
+        if sys.platform == "win32":
+            decoded = decoded.replace('/', os.sep)
 
     if not os.path.isdir(decoded):
         return None

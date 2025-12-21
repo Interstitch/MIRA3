@@ -8,7 +8,21 @@ import json
 from datetime import datetime
 from pathlib import Path
 
-from mira.core import get_mira_path, log
+from mira.core import get_mira_path, get_global_mira_path, get_project_mira_path, log
+
+
+def _get_dir_size_mb(path: Path) -> float:
+    """Get directory size in MB. Returns 0 if path doesn't exist."""
+    if not path.exists():
+        return 0.0
+    total = 0
+    try:
+        for f in path.rglob("*"):
+            if f.is_file():
+                total += f.stat().st_size
+    except (OSError, PermissionError):
+        pass
+    return round(total / (1024 * 1024), 2)
 
 
 def handle_status(params: dict, storage=None) -> dict:
@@ -24,8 +38,21 @@ def handle_status(params: dict, storage=None) -> dict:
     log("[STATUS] Starting handle_status")
 
     project_path = params.get("project_path") if params else None
-    mira_path = get_mira_path()
+    global_mira_path = get_global_mira_path()
+    project_mira_path = get_project_mira_path()
+    mira_path = project_mira_path  # Backwards compat for rest of function
     claude_path = Path.home() / ".claude" / "projects"
+
+    # Calculate storage sizes
+    global_venv_path = global_mira_path / ".venv"
+    storage_info = {
+        "global_path": str(global_mira_path),
+        "global_size_mb": _get_dir_size_mb(global_mira_path),
+        "venv_path": str(global_venv_path),
+        "venv_size_mb": _get_dir_size_mb(global_venv_path),
+        "project_path": str(project_mira_path),
+        "project_size_mb": _get_dir_size_mb(project_mira_path),
+    }
 
     # Get project_id for scoped queries
     project_id = None
@@ -240,7 +267,8 @@ def handle_status(params: dict, storage=None) -> dict:
 
     # Build response
     result = {
-        "storage_path": str(mira_path),
+        "storage_path": str(mira_path),  # Backwards compat (project path)
+        "storage": storage_info,  # New: detailed storage paths and sizes
         "last_sync": datetime.now().isoformat(),
         "storage_health": health,
         "sync_queue": sync_queue_stats,

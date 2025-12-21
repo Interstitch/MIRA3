@@ -14,7 +14,7 @@ import threading
 from pathlib import Path
 from typing import Any, Callable, List, Optional
 
-from .constants import get_mira_path
+from .constants import get_db_path, get_global_mira_path, get_project_mira_path
 from .utils import log
 
 
@@ -70,7 +70,9 @@ class DatabaseManager:
     def _get_write_connection(self, db_name: str) -> sqlite3.Connection:
         """Get or create a write connection for the given database."""
         if db_name not in self._write_connections:
-            db_path = get_mira_path() / db_name
+            db_path = get_db_path(db_name)
+            # Ensure parent directory exists
+            db_path.parent.mkdir(parents=True, exist_ok=True)
             conn = sqlite3.connect(str(db_path), check_same_thread=False, timeout=30.0)
             conn.row_factory = sqlite3.Row
 
@@ -90,7 +92,9 @@ class DatabaseManager:
             self._local.connections = {}
 
         if db_name not in self._local.connections:
-            db_path = get_mira_path() / db_name
+            db_path = get_db_path(db_name)
+            # Ensure parent directory exists
+            db_path.parent.mkdir(parents=True, exist_ok=True)
             conn = sqlite3.connect(str(db_path), check_same_thread=False, timeout=30.0)
             conn.row_factory = sqlite3.Row
             conn.execute("PRAGMA journal_mode=WAL")
