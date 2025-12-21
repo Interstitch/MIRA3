@@ -158,7 +158,7 @@ class LocalSemanticSearch:
                 "SELECT model_ready FROM model_status WHERE id = 1",
                 ()
             )
-            return bool(row and row.get('model_ready'))
+            return bool(row and row['model_ready'])
         except Exception:
             return False
 
@@ -190,7 +190,7 @@ class LocalSemanticSearch:
                 "SELECT COUNT(*) as count FROM indexed_sessions",
                 ()
             )
-            status["indexed_sessions"] = row.get('count', 0) if row else 0
+            status["indexed_sessions"] = row['count'] if row else 0
 
             # Count vectors
             row = db.execute_read_one(
@@ -198,7 +198,7 @@ class LocalSemanticSearch:
                 "SELECT COUNT(*) as count FROM session_vectors",
                 ()
             )
-            status["total_vectors"] = row.get('count', 0) if row else 0
+            status["total_vectors"] = row['count'] if row else 0
 
             # Get model status
             row = db.execute_read_one(
@@ -207,9 +207,9 @@ class LocalSemanticSearch:
                 ()
             )
             if row:
-                status["model_name"] = row.get('model_name', '')
-                if row.get('last_error'):
-                    status["last_error"] = row.get('last_error')
+                status["model_name"] = row['model_name'] or ''
+                if row['last_error']:
+                    status["last_error"] = row['last_error']
 
             status["available"] = status["sqlite_vec"] and status["model_ready"]
 
@@ -603,7 +603,7 @@ def get_pending_indexing_count() -> int:
             "SELECT COUNT(*) as count FROM indexing_queue",
             ()
         )
-        return row.get('count', 0) if row else 0
+        return row['count'] if row else 0
     except Exception:
         return 0
 
@@ -732,7 +732,7 @@ class LocalSemanticIndexer:
         for row in rows:
             session_id = row['session_id']
             content = row['content']
-            summary = row.get('summary', '')
+            summary = row['summary'] or ''
 
             try:
                 success = ls.index_session(session_id, content, summary)

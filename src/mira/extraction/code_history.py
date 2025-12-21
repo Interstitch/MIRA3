@@ -138,8 +138,8 @@ def get_file_timeline(
             "session_id": row['session_id'],
             "operation": row['operation'],
             "timestamp": row['timestamp'],
-            "line_count": row.get('line_count'),
-            "byte_size": row.get('byte_size'),
+            "line_count": row['line_count'] if 'line_count' in row.keys() else None,
+            "byte_size": row['byte_size'] if 'byte_size' in row.keys() else None,
         })
     return results
 
@@ -192,7 +192,7 @@ def get_file_snapshot_at_date(file_path: str, target_date: str) -> Optional[Dict
 
     if row:
         content = row['content']
-        if row.get('compressed'):
+        if row['compressed']:
             content = gzip.decompress(content.encode()).decode()
         return {
             "file_path": row['file_path'],

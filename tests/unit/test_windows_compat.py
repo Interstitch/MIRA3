@@ -583,6 +583,67 @@ class TestFileEncoding:
         )
 
 
+class TestSqliteRowUsage:
+    """Test for sqlite3.Row misuse - Row objects don't have .get() method."""
+
+    def test_no_row_get_calls(self):
+        """Ensure code doesn't call .get() on sqlite3.Row objects.
+
+        sqlite3.Row objects support dict-like access via row['column'] but
+        do NOT have a .get() method. Using row.get() causes AttributeError.
+
+        Pattern to avoid: row.get('column', default)
+        Correct patterns:
+          - row['column']
+          - row['column'] if 'column' in row.keys() else default
+          - dict(row).get('column', default)
+        """
+        violations = []
+
+        # Pattern: row.get( - must be directly on the variable named 'row'
+        # Matches: row.get(, but NOT profile.get( where row appears earlier
+        row_get_pattern = r'\brow\.get\s*\('
+
+        # Context that suggests it's actually a dict, not sqlite3.Row
+        safe_contexts = [
+            r'row\s*=\s*\{',         # row = { (dict literal)
+            r'dict\s*\(\s*row\s*\)', # dict(row).get() is fine
+        ]
+
+        for py_file in get_python_files():
+            analyzer = SourceAnalyzer(py_file)
+            content = analyzer.content
+
+            # Skip files that don't use sqlite
+            if 'sqlite' not in content.lower() and 'execute_read' not in content:
+                continue
+
+            for line_num, line in enumerate(analyzer.lines, 1):
+                if analyzer.is_in_comment_or_docstring(line_num):
+                    continue
+
+                if re.search(row_get_pattern, line):
+                    # Check if it's in a safe context (dict assignment nearby)
+                    context_start = max(0, line_num - 10)
+                    context = "\n".join(analyzer.lines[context_start:line_num])
+
+                    if any(re.search(safe, context) for safe in safe_contexts):
+                        continue
+
+                    violations.append(Violation(
+                        file=py_file,
+                        line_num=line_num,
+                        line_content=line,
+                        message="row.get() - sqlite3.Row has no .get() method",
+                    ))
+
+        assert not violations, (
+            f"Found {len(violations)} potential sqlite3.Row.get() calls:\n"
+            + "\n".join(str(v) for v in violations[:15])
+            + "\n\nFix: Use row['column'] or row['column'] if 'column' in row.keys() else default"
+        )
+
+
 class TestFileOperations:
     """Test for file operations that behave differently on Windows."""
 
