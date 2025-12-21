@@ -19,6 +19,7 @@ from datetime import datetime
 from .constants import DEPENDENCIES, DEPENDENCIES_SEMANTIC
 from .utils import get_venv_path, get_venv_python, get_venv_pip, log
 from .constants import get_mira_path
+from mira._version import __version__ as CURRENT_VERSION
 
 
 def _configure_claude_code():
@@ -91,6 +92,55 @@ def is_running_in_venv() -> bool:
 def _get_uv_path(venv_path: Path) -> str:
     """Get path to uv binary in venv."""
     return str(venv_path / "bin" / "uv")
+
+
+def _get_venv_mira_version(venv_path: Path) -> str:
+    """
+    Get the version of claude-mira installed in the venv.
+
+    Returns empty string if not installed or error.
+    """
+    python = str(venv_path / "bin" / "python")
+    try:
+        result = subprocess.run(
+            [python, "-c", "from mira._version import __version__; print(__version__)"],
+            capture_output=True,
+            text=True,
+            timeout=10
+        )
+        if result.returncode == 0:
+            return result.stdout.strip()
+    except Exception:
+        pass
+    return ""
+
+
+def _upgrade_mira_in_venv(venv_path: Path) -> bool:
+    """
+    Upgrade claude-mira in the venv to match the invoking version.
+
+    This is called when the global/invoking version is newer than the venv version.
+    """
+    uv = _get_uv_path(venv_path)
+    python = str(venv_path / "bin" / "python")
+
+    try:
+        log(f"Upgrading claude-mira in venv to {CURRENT_VERSION}...")
+        result = subprocess.run(
+            [uv, "pip", "install", "--python", python, "--upgrade", "claude-mira", "-q"],
+            capture_output=True,
+            text=True,
+            timeout=120
+        )
+        if result.returncode == 0:
+            log(f"Upgraded to claude-mira {CURRENT_VERSION}")
+            return True
+        else:
+            log(f"Upgrade failed: {result.stderr[:200] if result.stderr else 'unknown'}")
+            return False
+    except Exception as e:
+        log(f"Upgrade error: {e}")
+        return False
 
 
 def _install_with_uv(venv_path: Path, deps: list, optional: bool = False) -> bool:
@@ -172,6 +222,23 @@ def ensure_venv_and_deps() -> bool:
     if deps_version < CURRENT_DEPS_VERSION:
         deps_installed = False
         log(f"Dependency version outdated ({deps_version} < {CURRENT_DEPS_VERSION}), will reinstall")
+
+    # Check if venv's mira version matches the invoking version
+    # This handles the case where user upgraded globally but venv has old version
+    if deps_installed and venv_path.exists():
+        venv_version = _get_venv_mira_version(venv_path)
+        if venv_version and venv_version != CURRENT_VERSION:
+            log(f"Version mismatch: venv has {venv_version}, invoking {CURRENT_VERSION}")
+            # Try to upgrade just claude-mira (fast, no full reinstall)
+            if _upgrade_mira_in_venv(venv_path):
+                # Update config with new version info
+                try:
+                    config = json.loads(config_path.read_text()) if config_path.exists() else {}
+                    config["mira_version"] = CURRENT_VERSION
+                    config["upgraded_at"] = datetime.now().isoformat()
+                    config_path.write_text(json.dumps(config, indent=2))
+                except Exception:
+                    pass
 
     if not venv_path.exists():
         # Find Python with sqlite extension support for sqlite-vec
