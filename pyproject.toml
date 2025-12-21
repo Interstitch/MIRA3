@@ -33,6 +33,8 @@ dependencies = [
     "mcp>=1.25.0",
     "watchdog>=3.0.0",
     "psycopg2-binary>=2.9",
+    "qdrant-client>=1.7.0",
+    "httpx>=0.25.0",
 ]
 
 [project.optional-dependencies]

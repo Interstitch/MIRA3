@@ -7,10 +7,9 @@ Storage Architecture (Hybrid Model):
 =====================================
 
 GLOBAL (~/.mira/):
-  - .venv/           Python virtualenv (shared, ~600MB)
   - custodian.db     User preferences (follow you everywhere)
   - insights.db      Error patterns & decisions (useful across projects)
-  - config.json      Global install state (venv version, etc.)
+  - config.json      Global configuration
 
 PROJECT (<cwd>/.mira/):
   - local_store.db   Conversation index for THIS project
@@ -22,6 +21,10 @@ PROJECT (<cwd>/.mira/):
   - archives/        Conversation file copies
   - metadata/        Extracted session metadata
   - mira.log         Project-specific log
+
+Dependencies are managed via pip (see pyproject.toml):
+  - Core: pip install claude-mira3
+  - Semantic search: pip install claude-mira3[semantic]
 """
 
 from pathlib import Path
@@ -92,22 +95,12 @@ def get_mira_path() -> Path:
 # Shortcut for common use (project path)
 MIRA_PATH = get_project_mira_path()
 
-# Core dependencies for venv bootstrap
-# NOTE: claude-mira3 is NOT installed in venv - runs from global install
-# This avoids file locking issues on Windows when upgrading
-DEPENDENCIES = [
-    "mcp>=1.25.0",
-    "watchdog>=3.0.0",
-    "psycopg2-binary>=2.9",
-    "qdrant-client",
-    "httpx",  # Required by mcp
-]
-
-# Optional semantic search dependencies
-DEPENDENCIES_SEMANTIC = [
-    "fastembed",
-    "sqlite-vec",
-]
+# DEPRECATED: Dependencies are now in pyproject.toml
+# These lists kept for reference only - not used by bootstrap anymore
+# Core deps installed via: pip install claude-mira3
+# Semantic deps installed via: pip install claude-mira3[semantic]
+DEPENDENCIES = []  # Deprecated - see pyproject.toml
+DEPENDENCIES_SEMANTIC = []  # Deprecated - see pyproject.toml
 
 # Local semantic search configuration
 LOCAL_SEMANTIC_ENABLED = True

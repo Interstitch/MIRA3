@@ -16,26 +16,23 @@ from typing import Optional
 from .constants import get_mira_path, get_global_mira_path, get_project_mira_path
 
 
-def get_venv_path() -> Path:
-    """
-    Get the global virtualenv path (~/.mira/.venv/).
+# =============================================================================
+# DEPRECATED: Venv functions (no longer used - deps via pip)
+# Kept for backwards compatibility only
+# =============================================================================
 
-    The venv is stored globally so it's shared across all projects.
-    This avoids duplicating 600MB+ of Python packages per project.
-    """
+def get_venv_path() -> Path:
+    """DEPRECATED: No longer used. Dependencies installed via pip."""
     return get_global_mira_path() / ".venv"
 
 
 def get_venv_python() -> str:
-    """Get the Python executable inside the virtualenv."""
-    venv = get_venv_path()
-    if sys.platform == "win32":
-        return str(venv / "Scripts" / "python.exe")
-    return str(venv / "bin" / "python")
+    """DEPRECATED: Use sys.executable instead."""
+    return sys.executable
 
 
 def get_venv_pip() -> str:
-    """Get the pip executable inside the virtualenv."""
+    """DEPRECATED: No longer used."""
     venv = get_venv_path()
     if sys.platform == "win32":
         return str(venv / "Scripts" / "pip.exe")
@@ -43,7 +40,7 @@ def get_venv_pip() -> str:
 
 
 def get_venv_uv() -> str:
-    """Get the uv executable inside the virtualenv."""
+    """DEPRECATED: No longer used."""
     venv = get_venv_path()
     if sys.platform == "win32":
         return str(venv / "Scripts" / "uv.exe")
@@ -51,11 +48,9 @@ def get_venv_uv() -> str:
 
 
 def get_venv_mira() -> str:
-    """Get the mira executable inside the virtualenv."""
-    venv = get_venv_path()
-    if sys.platform == "win32":
-        return str(venv / "Scripts" / "mira.exe")
-    return str(venv / "bin" / "mira")
+    """DEPRECATED: Use 'python -m mira' instead."""
+    # Return current python with -m mira for compatibility
+    return sys.executable
 
 
 def get_mira_config() -> dict:

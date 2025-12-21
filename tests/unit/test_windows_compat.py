@@ -436,16 +436,15 @@ class TestVenvPaths:
             assert "bin" in path, f"Unix should use bin, got: {path}"
 
     def test_venv_executable_source_has_platform_handling(self):
-        """Verify venv executable functions check platform in source."""
-        import inspect
+        """Verify venv functions exist (DEPRECATED - now return sys.executable)."""
         from mira.core import utils
 
+        # These functions are deprecated but should still exist for compatibility
+        # They now return sys.executable instead of venv-specific paths
         for func_name in ['get_venv_python', 'get_venv_pip', 'get_venv_uv', 'get_venv_mira']:
             func = getattr(utils, func_name)
-            source = inspect.getsource(func)
-            assert 'sys.platform' in source or 'win32' in source, \
-                f"{func_name} should have platform-specific handling"
-            assert '.exe' in source, f"{func_name} should reference .exe for Windows"
+            result = func()
+            assert isinstance(result, str), f"{func_name} should return a string"
 
 
 class TestSubprocessCalls:
@@ -820,12 +819,13 @@ class TestPlatformGuards:
     """Test that platform-specific code has proper guards."""
 
     def test_bootstrap_has_platform_guards(self):
-        """Verify bootstrap.py has proper platform guards."""
+        """Verify bootstrap.py exists (no longer needs platform guards - deps via pip)."""
         bootstrap_file = SRC_DIR / "core" / "bootstrap.py"
         content = read_file_content(bootstrap_file)
 
-        assert 'sys.platform' in content, "bootstrap.py should check sys.platform"
-        assert 'win32' in content, "bootstrap.py should handle Windows (win32)"
+        # Bootstrap no longer creates venv, so no platform-specific code needed
+        # It just creates directories and configures Claude Code
+        assert 'ensure_venv_and_deps' in content, "bootstrap.py should have ensure_venv_and_deps"
 
     def test_utils_has_platform_guards(self):
         """Verify utils.py has proper platform guards."""
@@ -839,8 +839,8 @@ class TestPlatformGuards:
     def test_platform_specific_files_are_guarded(self):
         """Ensure files with platform-specific code have guards."""
         # Files we know should have platform guards
+        # Note: bootstrap.py no longer needs guards (deps installed via pip)
         expected_guarded = [
-            "core/bootstrap.py",
             "core/utils.py",
         ]
 
@@ -879,18 +879,13 @@ class TestCrossPlatformFunctionality:
         ("darwin", "bin", ""),
     ])
     def test_venv_paths_by_platform(self, platform: str, expected_dir: str, expected_ext: str):
-        """Test venv paths produce correct results for each platform."""
+        """Test venv functions (DEPRECATED - now return sys.executable)."""
         from mira.core import utils
 
-        with patch.object(sys, 'platform', platform):
-            # Re-import to pick up patched platform
-            # Note: This tests the logic, actual behavior depends on implementation
-            python_path = utils.get_venv_python()
-
-            if sys.platform == platform:  # Only check if we're actually on this platform
-                if platform == "win32":
-                    assert expected_dir in python_path
-                    assert python_path.endswith(expected_ext)
+        # These functions are deprecated and now return sys.executable
+        # regardless of platform (deps installed via pip, not venv)
+        python_path = utils.get_venv_python()
+        assert python_path == sys.executable, "get_venv_python should return sys.executable"
 
     def test_db_path_creates_parent_directories(self):
         """Test that get_db_path works with non-existent parent directories."""
