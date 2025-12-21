@@ -30,6 +30,13 @@ class TestLocalSemanticSearch:
         # Create .mira directory
         (Path(self.temp_dir) / '.mira').mkdir(exist_ok=True)
 
+        # Reset singleton state for clean tests
+        from mira.search import local_semantic
+        local_semantic._local_semantic = None
+        local_semantic.LocalSemanticSearch._instance = None
+        local_semantic.LocalSemanticSearch._initialized = False
+        local_semantic.LocalSemanticSearch._model = None
+
     def teardown_method(self):
         if self.original_mira_path:
             os.environ['MIRA_PATH'] = self.original_mira_path
@@ -45,6 +52,7 @@ class TestLocalSemanticSearch:
         local_semantic._local_semantic = None
         local_semantic.LocalSemanticSearch._instance = None
         local_semantic.LocalSemanticSearch._initialized = False
+        local_semantic.LocalSemanticSearch._model = None  # Reset cached model
 
     def test_local_semantic_imports(self):
         """Test that local_semantic module imports correctly."""

@@ -126,6 +126,7 @@ class LocalSemanticSearch:
             return True
 
         # Check database status
+        self._ensure_schema()  # Ensure table exists before querying
         db = get_db_manager()
         try:
             row = db.execute_read_one(
@@ -143,6 +144,7 @@ class LocalSemanticSearch:
 
     def get_status(self) -> Dict[str, Any]:
         """Get local semantic search status for mira_status."""
+        self._ensure_schema()  # Ensure tables exist before querying
         db = get_db_manager()
 
         status = {
@@ -208,6 +210,7 @@ class LocalSemanticSearch:
                 return True
 
             self._model_loading = True
+            self._ensure_schema()  # Ensure tables exist before writing
             db = get_db_manager()
 
             try:

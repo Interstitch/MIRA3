@@ -77,7 +77,12 @@ def get_project_mira_path() -> Path:
     - Project-specific logs
 
     This path changes based on your current working directory.
+    Override with MIRA_PATH environment variable for testing.
     """
+    import os
+    env_path = os.environ.get('MIRA_PATH')
+    if env_path:
+        return Path(env_path) / ".mira"
     return Path.cwd() / ".mira"
 
 

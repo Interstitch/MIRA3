@@ -362,75 +362,83 @@ def get_actionable_alerts(mira_path: Path, project_path: str, custodian_profile:
 
     Alerts are prioritized issues or context that Claude should act on.
     """
+    import os
     alerts = []
 
-    # Check for uncommitted git changes
+    # WINDOWS FIX: Skip git subprocess calls when running under MCP stdio transport.
+    # Git subprocess calls with capture_output=True can interfere with Windows stdio
+    # buffering and cause mira_init responses to be lost in the transport layer.
+    skip_git = os.environ.get('MIRA_MCP_MODE')
+
     project_root = mira_path.parent
-    try:
-        result = subprocess.run(
-            ['git', 'status', '--porcelain'],
-            cwd=project_root,
-            capture_output=True,
-            text=True,
-            timeout=2  # Quick - don't block startup
-        )
-        if result.returncode == 0 and result.stdout.strip():
-            lines = result.stdout.strip().split('\n')
-            # Git porcelain format: XY filename (X=index, Y=worktree)
-            # Extract filename by skipping first 3 chars (XY + space)
-            # But handle edge case where there might be extra/fewer spaces
-            def extract_path(line):
-                # Skip the 2-char status prefix, then strip any leading space
-                return line[2:].lstrip() if len(line) > 2 else line
 
-            modified = [extract_path(l) for l in lines if l[1:2] == 'M' or l[0:1] == 'M']
-            added = [extract_path(l) for l in lines if l.startswith('A ') or l.startswith('??')]
-            deleted = [extract_path(l) for l in lines if l[1:2] == 'D' or l[0:1] == 'D']
-
-            if modified or added or deleted:
-                alert = {
-                    'type': 'git_uncommitted',
-                    'priority': 'high',
-                    'message': f"Uncommitted changes: {len(modified)} modified, {len(added)} new, {len(deleted)} deleted",
-                }
-                if modified:
-                    alert['modified'] = modified[:10]
-                if added:
-                    alert['new'] = added[:10]
-                if deleted:
-                    alert['deleted'] = deleted[:5]
-                alerts.append(alert)
-    except Exception:
-        pass
-
-    # Check for danger zones in recently touched files
-    danger_zones = custodian_profile.get('danger_zones', [])
-    if danger_zones:
-        recent_files = []
+    # Git-based alerts (skipped in MCP mode on Windows)
+    if not skip_git:
+        # Check for uncommitted git changes
         try:
             result = subprocess.run(
-                ['git', 'diff', '--name-only', 'HEAD~5..HEAD'],
+                ['git', 'status', '--porcelain'],
                 cwd=project_root,
                 capture_output=True,
                 text=True,
                 timeout=2  # Quick - don't block startup
             )
-            if result.returncode == 0:
-                recent_files = result.stdout.strip().split('\n')
+            if result.returncode == 0 and result.stdout.strip():
+                lines = result.stdout.strip().split('\n')
+
+                def extract_path(line):
+                    return line[2:].lstrip() if len(line) > 2 else line
+
+                modified = [extract_path(l) for l in lines if l[1:2] == 'M' or l[0:1] == 'M']
+                added = [extract_path(l) for l in lines if l.startswith('A ') or l.startswith('??')]
+                deleted = [extract_path(l) for l in lines if l[1:2] == 'D' or l[0:1] == 'D']
+
+                if modified or added or deleted:
+                    alert = {
+                        'type': 'git_uncommitted',
+                        'priority': 'high',
+                        'message': f"Uncommitted changes: {len(modified)} modified, {len(added)} new, {len(deleted)} deleted",
+                    }
+                    if modified:
+                        alert['modified'] = modified[:10]
+                    if added:
+                        alert['new'] = added[:10]
+                    if deleted:
+                        alert['deleted'] = deleted[:5]
+                    alerts.append(alert)
         except Exception:
             pass
 
-        for dz in danger_zones:
-            dz_path = dz.get('path', '')
-            for rf in recent_files:
-                if dz_path in rf:
-                    alerts.append({
-                        'type': 'danger_zone',
-                        'priority': 'medium',
-                        'message': f"Recent changes to danger zone: {dz_path}",
-                        'reason': dz.get('reason', 'Has caused issues before'),
-                    })
-                    break
+        # Check for danger zones in recently touched files
+        danger_zones = custodian_profile.get('danger_zones', [])
+        if danger_zones:
+            recent_files = []
+            try:
+                result = subprocess.run(
+                    ['git', 'diff', '--name-only', 'HEAD~5..HEAD'],
+                    cwd=project_root,
+                    capture_output=True,
+                    text=True,
+                    timeout=2  # Quick - don't block startup
+                )
+                if result.returncode == 0:
+                    recent_files = result.stdout.strip().split('\n')
+            except Exception:
+                pass
+
+            for dz in danger_zones:
+                dz_path = dz.get('path', '')
+                for rf in recent_files:
+                    if dz_path in rf:
+                        alerts.append({
+                            'type': 'danger_zone',
+                            'priority': 'medium',
+                            'message': f"Recent changes to danger zone: {dz_path}",
+                            'reason': dz.get('reason', 'Has caused issues before'),
+                        })
+                        break
+
+    # Non-git alerts (always run)
 
     # Check for any "never" rules that might apply
     rules = custodian_profile.get('rules', {})
