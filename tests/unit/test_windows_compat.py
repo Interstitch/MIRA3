@@ -484,7 +484,7 @@ class TestFileEncoding:
     """Test that file operations explicitly specify UTF-8 encoding."""
 
     def test_open_calls_specify_encoding(self):
-        """Ensure open() calls specify encoding='utf-8' for text mode.
+        """Ensure open() and Path.open() calls specify encoding='utf-8' for text mode.
 
         On Windows, Python defaults to the system locale encoding (often cp1252),
         not UTF-8. This causes issues when reading/writing files with non-ASCII
@@ -492,9 +492,13 @@ class TestFileEncoding:
         """
         violations = []
 
-        # Pattern to match open() calls
-        # Matches: open(...) but not open(..., 'rb') or open(..., 'wb') (binary modes)
-        open_pattern = r'\bopen\s*\([^)]+\)'
+        # Patterns to match open() calls (both builtin and Path.open())
+        # Matches: open(...) and .open(...)
+        open_patterns = [
+            r'\bopen\s*\([^)]+\)',      # builtin open()
+            r'\.open\s*\(\s*\)',         # Path.open() with no args
+            r'\.open\s*\([^)]*\)',       # Path.open() with args
+        ]
 
         # Binary mode patterns - these don't need encoding
         binary_patterns = [
@@ -514,26 +518,28 @@ class TestFileEncoding:
                 if analyzer.is_in_comment_or_docstring(line_num):
                     continue
 
-                # Check for open() calls
-                if re.search(open_pattern, line):
-                    # Skip binary mode opens
-                    if any(re.search(bp, line) for bp in binary_patterns):
-                        continue
+                # Check for open() calls (builtin or Path.open())
+                for open_pattern in open_patterns:
+                    if re.search(open_pattern, line):
+                        # Skip binary mode opens
+                        if any(re.search(bp, line) for bp in binary_patterns):
+                            continue
 
-                    # Skip if encoding is specified
-                    if re.search(encoding_pattern, line):
-                        continue
+                        # Skip if encoding is specified
+                        if re.search(encoding_pattern, line):
+                            continue
 
-                    # Skip read_bytes/write_bytes (these are binary)
-                    if 'read_bytes' in line or 'write_bytes' in line:
-                        continue
+                        # Skip read_bytes/write_bytes (these are binary)
+                        if 'read_bytes' in line or 'write_bytes' in line:
+                            continue
 
-                    violations.append(Violation(
-                        file=py_file,
-                        line_num=line_num,
-                        line_content=line,
-                        message="open() without encoding= (Windows uses cp1252 by default, not UTF-8)",
-                    ))
+                        violations.append(Violation(
+                            file=py_file,
+                            line_num=line_num,
+                            line_content=line,
+                            message="open() without encoding= (Windows uses cp1252 by default, not UTF-8)",
+                        ))
+                        break  # Don't double-count if multiple patterns match
 
         assert not violations, (
             f"Found {len(violations)} open() calls without explicit encoding:\n"

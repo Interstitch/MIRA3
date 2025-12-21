@@ -84,7 +84,7 @@ def handle_status(params: dict, storage=None) -> dict:
 
             try:
                 msg_count = 0
-                with f.open() as fp:
+                with f.open(encoding="utf-8") as fp:
                     for line in fp:
                         try:
                             data = json.loads(line)
