@@ -7,7 +7,7 @@ Central location for all magic numbers, paths, and configuration constants.
 from pathlib import Path
 
 # Version
-VERSION = "0.3.3"
+VERSION = "0.3.6"
 
 # Approximate chars per token (for text length estimation)
 CHARS_PER_TOKEN = 4
@@ -32,7 +32,9 @@ def get_mira_path() -> Path:
 MIRA_PATH = get_mira_path()
 
 # Core dependencies for venv bootstrap
+# NOTE: claude-mira is installed first to ensure latest version
 DEPENDENCIES = [
+    "claude-mira",  # Install/upgrade ourselves first!
     "mcp>=1.25.0",
     "watchdog>=3.0.0",
     "psycopg2-binary>=2.9",

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "claude-mira"
-version = "0.3.5"
+version = "0.3.6"
 description = "Persistent memory for Claude Code - semantic search, cross-session context, learned preferences"
 readme = "README.md"
 license = "MIT"

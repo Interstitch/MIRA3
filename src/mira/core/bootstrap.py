@@ -110,7 +110,8 @@ def ensure_venv_and_deps() -> bool:
     # v5: Added uv support for faster installation
     # v6: Fixed conditional logging for uv
     # v7: Simplified - install uv as dep, use for all installs
-    CURRENT_DEPS_VERSION = 7
+    # v8: Added sync worker module (0.3.5)
+    CURRENT_DEPS_VERSION = 8
 
     # Force reinstall if deps version is outdated
     if deps_version < CURRENT_DEPS_VERSION:
