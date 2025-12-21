@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "claude-mira"
-version = "0.3.3"
+version = "0.3.4"
 description = "Persistent memory for Claude Code - semantic search, cross-session context, learned preferences"
 readme = "README.md"
 license = "MIT"
@@ -52,6 +52,7 @@ all = [
 
 [project.scripts]
 mira = "mira.__main__:main"
+mira-install = "mira.install:main"
 
 [project.urls]
 Homepage = "https://github.com/Interstitch/MIRA3"

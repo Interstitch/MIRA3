@@ -60,10 +60,13 @@ Claude: ⚠️ Heads up - ingestion.py has caused 51 recorded issues in past ses
 ## Installation
 
 ```bash
-claude mcp add claude-mira3 -- npx claude-mira3
+pip install claude-mira
+mira-install
 ```
 
-That's it. The SessionStart hook auto-configures on install, injecting MIRA context at the start of every Claude Code session.
+That's it. The `mira-install` command configures Claude Code to use MIRA as an MCP server. Restart Claude Code after installation.
+
+The SessionStart hook auto-configures on install, injecting MIRA context at the start of every Claude Code session.
 
 **First search:** When you first search, MIRA downloads a ~100MB embedding model in the background for local semantic search. This only happens once. (If you [set up remote storage](#remote-storage-optional) first, the server handles embeddings and this download is skipped.)
 
@@ -218,12 +221,13 @@ Search with `mira_decisions` to understand past choices.
 ## Architecture
 
 ```
-Claude Code → Node.js MCP Server → Python Backend → SQLite (FTS5 + vectors)
+Claude Code ←→ stdio ←→ MIRA (Python MCP Server) ←→ SQLite (FTS5 + vectors)
 ```
 
-- **Node.js layer**: MCP protocol handling
-- **Python layer**: File watching, ingestion, search, extraction
+- **Pure Python MCP server** using the official MCP Python SDK
+- **File watching**: Automatic ingestion of new conversations
 - **SQLite**: FTS5 for text search, sqlite-vec for semantic search
+- **Optional remote storage**: Postgres + Qdrant for cross-machine sync
 
 ## FAQ
 
@@ -241,8 +245,7 @@ Just work normally. MIRA detects patterns: if you consistently write tests befor
 
 ## Requirements
 
-- Node.js >= 20.0.0
-- Python >= 3.8
+- Python >= 3.10
 - Claude Code
 
 **Note:** MIRA has only been tested on Linux (Ubuntu, Debian, Codespaces). macOS and Windows support is untested.
