@@ -1,0 +1,82 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "claude-mira"
+version = "0.3.3"
+description = "Persistent memory for Claude Code - semantic search, cross-session context, learned preferences"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10"
+authors = [
+    { name = "Max" }
+]
+keywords = [
+    "mcp",
+    "claude",
+    "claude-code",
+    "conversation-history",
+    "semantic-search",
+    "memory"
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
+dependencies = [
+    "mcp>=1.25.0",
+    "watchdog>=3.0.0",
+    "psycopg2-binary>=2.9",
+]
+
+[project.optional-dependencies]
+semantic = [
+    "fastembed>=0.3.0",
+    "sqlite-vec>=0.1.0",
+]
+dev = [
+    "pytest>=7.0",
+    "pytest-asyncio>=0.21",
+    "ruff>=0.1.0",
+    "mypy>=1.0",
+]
+all = [
+    "claude-mira[semantic,dev]",
+]
+
+[project.scripts]
+mira = "mira.__main__:main"
+
+[project.urls]
+Homepage = "https://github.com/Interstitch/MIRA3"
+Documentation = "https://github.com/Interstitch/MIRA3#readme"
+Repository = "https://github.com/Interstitch/MIRA3"
+Issues = "https://github.com/Interstitch/MIRA3/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/mira"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W"]
+ignore = ["E501"]  # Line length handled separately
+
+[tool.mypy]
+python_version = "3.10"
+warn_return_any = true
+warn_unused_ignores = true
+disallow_untyped_defs = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+asyncio_mode = "auto"

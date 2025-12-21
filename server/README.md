@@ -212,3 +212,22 @@ docker compose up -d
 | Embedding Service | ~500MB | ~200MB (model) |
 
 **Total:** ~1GB RAM minimum, 2GB recommended
+
+## Directory Contents
+
+```
+server/
+├── README.md           # This file
+├── docker-compose.yml  # Container orchestration
+├── .env.example        # Environment template
+├── install.sh          # One-line installer script
+├── config/
+│   ├── server.schema.json    # JSON Schema for server.json
+│   └── server.template.json  # Template configuration
+└── embedding-service/
+    ├── Dockerfile      # Container build
+    ├── main.py         # FastAPI embedding service
+    └── requirements.txt
+```
+
+The `config/` subdirectory contains JSON schemas for validating `~/.mira/server.json` configuration files.

@@ -251,6 +251,8 @@ Just work normally. MIRA detects patterns: if you consistently write tests befor
 
 **Fresh Install Testing:** Most development has been done on systems with existing MIRA data. Fresh installs have received limited testing. If you encounter issues during initial setup, please [open an issue](https://github.com/Interstitch/MIRA3/issues).
 
+**Local Semantic Search (sqlite-vec):** Local semantic search requires the sqlite-vec extension, which needs Python compiled with `--enable-loadable-sqlite-extensions`. Many Python builds (including pyenv defaults and some Codespaces environments) lack this. In these environments, local semantic search gracefully falls back to FTS5 keyword search. The fastembed model still downloads but won't be used until sqlite-vec works. Remote storage (if configured) handles semantic search server-side and bypasses this limitation.
+
 ---
 
 ## Remote Storage (Optional)
