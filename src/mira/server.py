@@ -26,9 +26,6 @@ from mira.core import (
     get_config,
     shutdown_db_manager,
 )
-# WINDOWS FIX: Set MCP mode to skip git subprocess calls that interfere with stdio
-os.environ['MIRA_MCP_MODE'] = '1'
-
 # Global state
 _storage = None
 _initialized = False

@@ -356,23 +356,39 @@ def filter_codebase_knowledge(knowledge: dict) -> dict:
     return filtered
 
 
+def _is_mcp_stdio_context() -> bool:
+    """Detect if running in MCP stdio context on Windows.
+
+    MCP uses stdin/stdout for JSON-RPC communication. Git subprocess calls
+    with capture_output=True create pipes that can interfere with this transport.
+    """
+    import sys
+    import platform
+    if platform.system() != 'Windows':
+        return False
+    try:
+        # In MCP context, stdin is a pipe (not a tty)
+        return not sys.stdin.isatty()
+    except (AttributeError, OSError):
+        return False
+
+
 def get_actionable_alerts(mira_path: Path, project_path: str, custodian_profile: dict) -> list:
     """
     Generate actionable alerts that require attention.
 
     Alerts are prioritized issues or context that Claude should act on.
     """
-    import os
     alerts = []
 
     # WINDOWS FIX: Skip git subprocess calls when running under MCP stdio transport.
-    # Git subprocess calls with capture_output=True can interfere with Windows stdio
-    # buffering and cause mira_init responses to be lost in the transport layer.
-    skip_git = os.environ.get('MIRA_MCP_MODE')
+    # Git subprocess calls with capture_output=True create pipes that interfere
+    # with MCP's stdin/stdout transport on Windows.
+    skip_git = _is_mcp_stdio_context()
 
     project_root = mira_path.parent
 
-    # Git-based alerts (skipped in MCP mode on Windows)
+    # Git-based alerts (skipped in MCP stdio context on Windows)
     if not skip_git:
         # Check for uncommitted git changes
         try:
