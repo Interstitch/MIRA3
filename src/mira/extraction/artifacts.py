@@ -110,6 +110,7 @@ def store_file_operation(
     timestamp: Optional[str] = None
 ):
     """Store a file Write or Edit operation for later reconstruction."""
+    init_artifact_db()  # Ensure schema exists
     db = get_db_manager()
     db.execute_write(
         DB_ARTIFACTS,
@@ -128,6 +129,7 @@ def get_file_operations(
     session_id: Optional[str] = None
 ) -> List[Dict]:
     """Get file operations for reconstruction."""
+    init_artifact_db()  # Ensure schema exists
     db = get_db_manager()
 
     sql = 'SELECT * FROM file_operations WHERE 1=1'
@@ -149,6 +151,7 @@ def get_file_operations(
 
 def reconstruct_file(file_path: str) -> Optional[str]:
     """Reconstruct a file from stored Write and Edit operations."""
+    init_artifact_db()  # Ensure schema exists
     db = get_db_manager()
 
     write_op = db.execute_read_one(
@@ -617,6 +620,7 @@ def extract_artifacts_from_messages(
 
 def get_artifact_stats(project_path: Optional[str] = None) -> Dict[str, Any]:
     """Get statistics about stored artifacts."""
+    init_artifact_db()  # Ensure schema exists before querying
     db = get_db_manager()
 
     def _get_stats(session_ids: Optional[List] = None) -> Dict[str, Any]:
@@ -697,6 +701,7 @@ def get_artifact_stats(project_path: Optional[str] = None) -> Dict[str, Any]:
 
 def get_journey_stats() -> Dict[str, Any]:
     """Get journey statistics from file operations."""
+    init_artifact_db()  # Ensure schema exists before querying
     db = get_db_manager()
 
     stats = {
@@ -823,6 +828,7 @@ def search_artifacts_for_query(
 
 def _search_artifacts_local(query: str, limit: int = 10) -> List[Dict]:
     """Fallback to local SQLite search for artifacts."""
+    init_artifact_db()  # Ensure schema exists
     db = get_db_manager()
 
     terms = extract_query_terms(query, max_terms=5)
