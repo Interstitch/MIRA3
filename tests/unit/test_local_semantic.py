@@ -89,8 +89,8 @@ class TestLocalSemanticSearch:
         status = ls.get_status()
         assert isinstance(status, dict)
         assert 'model_ready' in status
-        assert 'sqlite_vec' in status
         assert 'available' in status
+        # Note: sqlite_vec no longer in status - pure Python cosine similarity used
 
     def test_is_model_ready_initially_false(self):
         """Test model is not ready on fresh install."""

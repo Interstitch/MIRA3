@@ -97,7 +97,6 @@ class LocalSemanticSearch:
     _lock = threading.Lock()
     _model = None
     _model_loading = False
-    _sqlite_vec_available = None
     _initialized = False
 
     def __new__(cls):
@@ -120,30 +119,6 @@ class LocalSemanticSearch:
             db.init_schema(DB_LOCAL_VECTORS, LOCAL_VECTORS_SCHEMA)
         except Exception as e:
             log(f"Failed to initialize local vectors schema: {e}")
-
-    @property
-    def sqlite_vec_available(self) -> bool:
-        """Check if sqlite-vec extension can be loaded."""
-        if self._sqlite_vec_available is not None:
-            return self._sqlite_vec_available
-
-        try:
-            import sqlite3
-            import sqlite_vec
-
-            # Test if we can load the extension
-            conn = sqlite3.connect(":memory:")
-            conn.enable_load_extension(True)
-            sqlite_vec.load(conn)
-            conn.close()
-
-            self._sqlite_vec_available = True
-            log("sqlite-vec extension available")
-        except Exception as e:
-            self._sqlite_vec_available = False
-            log(f"sqlite-vec not available: {e}")
-
-        return self._sqlite_vec_available
 
     def is_model_ready(self) -> bool:
         """Check if the embedding model is cached and ready."""
@@ -172,16 +147,11 @@ class LocalSemanticSearch:
 
         status = {
             "available": False,
-            "sqlite_vec": self.sqlite_vec_available,
             "model_ready": self.is_model_ready(),
             "download_in_progress": self._model_loading,
             "indexed_sessions": 0,
             "total_vectors": 0,
         }
-
-        if not self.sqlite_vec_available:
-            status["limitation"] = "sqlite-vec extension not available"
-            return status
 
         try:
             # Count indexed sessions
@@ -211,7 +181,9 @@ class LocalSemanticSearch:
                 if row['last_error']:
                     status["last_error"] = row['last_error']
 
-            status["available"] = status["sqlite_vec"] and status["model_ready"]
+            # Local semantic search only requires the embedding model
+            # (uses pure Python cosine similarity, no sqlite-vec needed)
+            status["available"] = status["model_ready"]
 
         except Exception as e:
             status["error"] = str(e)
@@ -317,11 +289,9 @@ class LocalSemanticSearch:
         """
         Semantic search using local vectors.
 
-        Raises RuntimeError if not ready (model not cached, sqlite-vec unavailable).
+        Uses pure Python cosine similarity - no sqlite-vec extension required.
+        Raises RuntimeError if embedding model not ready.
         """
-        if not self.sqlite_vec_available:
-            raise RuntimeError("sqlite-vec not available")
-
         if not self.is_model_ready():
             raise RuntimeError("Embedding model not ready")
 
@@ -349,20 +319,23 @@ class LocalSemanticSearch:
         if not rows:
             return []
 
-        # Compute similarities
-        query_vec = struct.unpack(f'{EMBEDDING_DIM}f', query_blob)
-        scored = []
+        # Compute similarities using numpy for speed
+        import numpy as np
 
+        query_vec = np.array(struct.unpack(f'{EMBEDDING_DIM}f', query_blob), dtype=np.float32)
+        query_norm = np.linalg.norm(query_vec)
+        if query_norm > 0:
+            query_vec = query_vec / query_norm  # Normalize once
+
+        scored = []
         for row in rows:
             try:
                 emb_blob = row['embedding']
-                emb_vec = struct.unpack(f'{EMBEDDING_DIM}f', emb_blob)
+                emb_vec = np.array(struct.unpack(f'{EMBEDDING_DIM}f', emb_blob), dtype=np.float32)
+                emb_norm = np.linalg.norm(emb_vec)
 
-                # Cosine similarity
-                dot = sum(a * b for a, b in zip(query_vec, emb_vec))
-                norm_q = sum(a * a for a in query_vec) ** 0.5
-                norm_e = sum(a * a for a in emb_vec) ** 0.5
-                similarity = dot / (norm_q * norm_e) if norm_q and norm_e else 0
+                # Cosine similarity (query already normalized)
+                similarity = float(np.dot(query_vec, emb_vec) / emb_norm) if emb_norm > 0 else 0.0
 
                 scored.append({
                     'session_id': row['session_id'],
@@ -520,12 +493,11 @@ def is_local_semantic_available() -> bool:
     """
     Check if local semantic search is available.
 
-    Returns True only if:
-    - sqlite-vec extension can be loaded
-    - fastembed model is cached (not downloading)
+    Returns True only if fastembed model is cached (not downloading).
+    Uses pure Python cosine similarity, no sqlite-vec required.
     """
     ls = get_local_semantic()
-    return ls.sqlite_vec_available and ls.is_model_ready()
+    return ls.is_model_ready()
 
 
 def trigger_local_semantic_download() -> Dict[str, str]:
@@ -536,11 +508,6 @@ def trigger_local_semantic_download() -> Dict[str, str]:
     Returns a message to include in search response.
     """
     ls = get_local_semantic()
-
-    if not ls.sqlite_vec_available:
-        return {
-            "notice": "Local semantic search unavailable (sqlite-vec extension not supported)"
-        }
 
     if ls.is_model_ready():
         return {}  # Already ready
@@ -656,11 +623,6 @@ class LocalSemanticIndexer:
     def _worker_loop(self):
         """Main worker loop - periodically processes indexing queue."""
         ls = get_local_semantic()
-
-        # Check if sqlite-vec is available at all
-        if not ls.sqlite_vec_available:
-            log("Local semantic indexer: sqlite-vec not available, disabling")
-            return
 
         # Proactive mode: wait startup delay then download model
         # Lazy mode: only download when triggered by failed remote search

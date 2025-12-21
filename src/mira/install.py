@@ -33,9 +33,41 @@ def get_mira_command():
         return sys.executable, ["-m", "mira"]
 
 
+def get_session_start_hook():
+    """
+    Get the SessionStart hook configuration for MIRA context injection.
+
+    CRITICAL ON WINDOWS: Due to MCP SDK stdio transport bug, mira_init times out
+    via MCP but works fine via CLI. This hook bypasses MCP entirely.
+
+    Hook format requirements:
+    - Must use nested {"hooks": [...]} structure
+    - matcher is optional; if used, must be string not object
+    """
+    import platform
+
+    if platform.system() == "Windows":
+        # Windows: Use full python path, no shell redirects
+        # The --quiet flag suppresses output, making error redirect unnecessary
+        command = f'{sys.executable} -m mira --init --project="%CLAUDE_PROJECT_DIR%" --quiet'
+    else:
+        # Unix: Use shell features for graceful fallback
+        command = 'python -m mira --init --project="$CLAUDE_PROJECT_DIR" --quiet 2>/dev/null || echo \'{"guidance":{"actions":["MIRA unavailable"]}}\''
+
+    return {
+        "hooks": [
+            {
+                "type": "command",
+                "command": command,
+                "timeout": 30000
+            }
+        ]
+    }
+
+
 def update_claude_config(config_path: Path, dry_run: bool = False) -> bool:
     """
-    Update a Claude Code config file with MIRA MCP server.
+    Update a Claude Code config file with MIRA MCP server and SessionStart hook.
 
     Returns True if the config was updated, False if skipped.
     """
@@ -86,17 +118,40 @@ def update_claude_config(config_path: Path, dry_run: bool = False) -> bool:
     else:
         needs_update = True
 
+    # Check if SessionStart hook is configured
+    hooks = config.get("hooks", {})
+    session_start = hooks.get("SessionStart", [])
+    has_mira_hook = any(
+        "mira" in str(hook.get("hooks", [{}])[0].get("command", ""))
+        for hook in session_start
+        if isinstance(hook, dict) and hook.get("hooks")
+    )
+
+    if not has_mira_hook:
+        needs_update = True
+        print(f"  SessionStart hook not configured in {config_path}")
+
     if not needs_update:
         print(f"  {config_path}: Already configured correctly")
         return False
 
-    # Update config
+    # Update MCP server config
     config["mcpServers"]["mira"] = new_mira_config
+
+    # Update SessionStart hook
+    if not has_mira_hook:
+        if "hooks" not in config:
+            config["hooks"] = {}
+        if "SessionStart" not in config["hooks"]:
+            config["hooks"]["SessionStart"] = []
+
+        # Add MIRA hook
+        config["hooks"]["SessionStart"].append(get_session_start_hook())
 
     if dry_run:
         print(f"  Would update {config_path}")
-        print(f"    command: {command}")
-        print(f"    args: {args}")
+        print(f"    MCP server: {command} {' '.join(args)}")
+        print(f"    SessionStart hook: configured")
         return True
 
     # Write config
@@ -110,6 +165,9 @@ def update_claude_config(config_path: Path, dry_run: bool = False) -> bool:
 def install(dry_run: bool = False):
     """Install MIRA into Claude Code's MCP configuration."""
     print("Configuring MIRA for Claude Code...")
+    print("  - MCP server (mira_search, mira_status, etc.)")
+    print("  - SessionStart hook (auto-injects context)")
+    print()
 
     updated = False
     for config_path in get_claude_config_paths():
@@ -119,6 +177,7 @@ def install(dry_run: bool = False):
     if updated and not dry_run:
         print("\nMIRA configured successfully!")
         print("Restart Claude Code to activate MIRA.")
+        print("\nOn first search, MIRA downloads a ~100MB embedding model for local semantic search.")
     elif not updated:
         print("\nMIRA already configured correctly.")
 
@@ -137,14 +196,28 @@ def uninstall():
             config = json.loads(config_path.read_text(encoding="utf-8"))
 
             removed = False
+
+            # Remove MCP server entries
             for key in ["mira", "mira3"]:
                 if key in config.get("mcpServers", {}):
                     del config["mcpServers"][key]
                     removed = True
+                    print(f"  Removed MCP server '{key}' from {config_path}")
+
+            # Remove SessionStart hook
+            session_start = config.get("hooks", {}).get("SessionStart", [])
+            new_hooks = [
+                hook for hook in session_start
+                if not (isinstance(hook, dict) and
+                        "mira" in str(hook.get("hooks", [{}])[0].get("command", "")))
+            ]
+            if len(new_hooks) != len(session_start):
+                config["hooks"]["SessionStart"] = new_hooks
+                removed = True
+                print(f"  Removed SessionStart hook from {config_path}")
 
             if removed:
                 config_path.write_text(json.dumps(config, indent=2), encoding="utf-8")
-                print(f"  Removed from {config_path}")
         except (json.JSONDecodeError, IOError) as e:
             print(f"  Error updating {config_path}: {e}")
 

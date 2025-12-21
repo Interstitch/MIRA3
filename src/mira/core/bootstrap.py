@@ -110,7 +110,8 @@ def has_semantic_deps() -> bool:
     """Check if semantic search dependencies are installed (now in core)."""
     try:
         import fastembed  # noqa: F401
-        import sqlite_vec  # noqa: F401
+        # numpy is a fastembed dependency, used for vector similarity
+        import numpy  # noqa: F401
         return True
     except ImportError:
         return False

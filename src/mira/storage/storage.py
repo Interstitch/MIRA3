@@ -264,6 +264,16 @@ class Storage:
                 log.error(f"Central get_archive failed: {e}")
         return None
 
+    def session_exists_in_central(self, session_id: str) -> bool:
+        """Check if a session exists in central postgres."""
+        if not self._using_central or not self._postgres:
+            return False
+        try:
+            return self._postgres.session_exists_by_uuid(session_id)
+        except Exception as e:
+            log.debug(f"session_exists_in_central check failed: {e}")
+            return False
+
     # ==================== Health & Status ====================
 
     def get_storage_mode(self) -> Dict[str, Any]:

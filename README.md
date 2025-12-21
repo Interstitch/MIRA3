@@ -61,12 +61,16 @@ Claude: ⚠️ Heads up - ingestion.py has caused 51 recorded issues in past ses
 
 ```bash
 pip install claude-mira3
-mira-install
+python -m mira --install
 ```
 
-That's it. The `mira-install` command configures Claude Code to use MIRA as an MCP server. Restart Claude Code after installation.
+That's it. The install command configures Claude Code with:
+- **MCP server** - Provides `mira_search`, `mira_status`, and other tools
+- **SessionStart hook** - Auto-injects your profile and context at session start
 
-The SessionStart hook auto-configures on install, injecting MIRA context at the start of every Claude Code session.
+Restart Claude Code after installation.
+
+The SessionStart hook is the magic - before you type anything, MIRA injects your profile, recent work, and guidance on when to consult your conversation history.
 
 **First search:** When you first search, MIRA downloads a ~100MB embedding model in the background for local semantic search. This only happens once. (If you [set up remote storage](#remote-storage-optional) first, the server handles embeddings and this download is skipped.)
 

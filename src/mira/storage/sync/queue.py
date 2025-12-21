@@ -84,6 +84,35 @@ class SyncQueue:
         finally:
             conn.close()
 
+    def batch_enqueue(self, items: List[tuple]):
+        """
+        Add multiple items to the sync queue efficiently.
+
+        Args:
+            items: List of (data_type, item_hash, payload) tuples
+        """
+        if not items:
+            return
+
+        conn = sqlite3.connect(str(self.db_path))
+        try:
+            for data_type, item_hash, payload in items:
+                payload_json = json.dumps(payload, default=str)
+                conn.execute("""
+                    INSERT INTO sync_queue (data_type, item_hash, payload, status)
+                    VALUES (?, ?, ?, 'pending')
+                    ON CONFLICT(data_type, item_hash) DO UPDATE SET
+                        payload = excluded.payload,
+                        status = 'pending',
+                        updated_at = CURRENT_TIMESTAMP,
+                        error_message = NULL
+                """, (data_type, item_hash, payload_json))
+            conn.commit()
+        except Exception as e:
+            log.error(f"Failed to batch enqueue sync items: {e}")
+        finally:
+            conn.close()
+
     def get_pending(self, limit: int = 10) -> List[Dict[str, Any]]:
         """Get pending items from the queue."""
         conn = sqlite3.connect(str(self.db_path))

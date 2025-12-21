@@ -34,8 +34,8 @@ dependencies = [
     "watchdog>=3.0.0",
     "httpx>=0.25.0",
     # Local semantic search - works out of the box, no remote storage needed
+    # fastembed provides embeddings, numpy (its dependency) handles vector similarity
     "fastembed>=0.3.0",
-    "sqlite-vec>=0.1.0",
 ]
 
 [project.optional-dependencies]

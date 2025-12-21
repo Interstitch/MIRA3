@@ -5,4 +5,4 @@ All version references should import from here.
 Update this file when bumping versions.
 """
 
-__version__ = "0.4.8"
+__version__ = "0.4.9"

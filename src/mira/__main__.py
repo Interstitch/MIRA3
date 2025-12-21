@@ -2,8 +2,9 @@
 MIRA entry point.
 
 Usage:
-    python -m mira          # Start MCP server
-    python -m mira --init   # Run mira_init and output JSON
+    python -m mira              # Start MCP server
+    python -m mira --install    # Configure Claude Code to use MIRA
+    python -m mira --init       # Run mira_init and output JSON (for hooks)
     python -m mira --version
     python -m mira --help
 """
@@ -31,6 +32,16 @@ def main():
         help="Suppress startup messages"
     )
     parser.add_argument(
+        "--install",
+        action="store_true",
+        help="Configure Claude Code to use MIRA (MCP server + SessionStart hook)"
+    )
+    parser.add_argument(
+        "--uninstall",
+        action="store_true",
+        help="Remove MIRA from Claude Code configuration"
+    )
+    parser.add_argument(
         "--init",
         action="store_true",
         help="Run mira_init and output JSON (for hooks)"
@@ -48,6 +59,17 @@ def main():
     )
 
     args = parser.parse_args()
+
+    # Handle install/uninstall before bootstrap (no deps needed)
+    if args.install:
+        from .install import install
+        install()
+        return
+
+    if args.uninstall:
+        from .install import uninstall
+        uninstall()
+        return
 
     # Set quiet mode early
     if args.quiet:

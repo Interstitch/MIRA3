@@ -316,6 +316,16 @@ class PostgresBackend:
                 )
                 return cur.fetchone() is not None
 
+    def session_exists_by_uuid(self, session_id: str) -> bool:
+        """Check if a session exists by UUID (across all projects)."""
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT 1 FROM sessions WHERE session_id = %s LIMIT 1",
+                    (session_id,)
+                )
+                return cur.fetchone() is not None
+
     def upsert_session(
         self,
         project_id: int,

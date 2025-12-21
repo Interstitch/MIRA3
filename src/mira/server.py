@@ -224,21 +224,35 @@ async def list_tools() -> list[types.Tool]:
         ),
         types.Tool(
             name="mira_code_history",
-            description="Get the history of changes to a file across sessions.",
+            description="Get the history of changes to a file across sessions. Supports three modes: timeline (default), snapshot (reconstruct file at date), and changes (list of edits).",
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "file_path": {
+                    "path": {
                         "type": "string",
-                        "description": "Path to the file"
+                        "description": "File path or pattern (e.g., 'handlers.py', 'src/*.py')"
+                    },
+                    "symbol": {
+                        "type": "string",
+                        "description": "Function or class name to search (alternative to path)"
+                    },
+                    "mode": {
+                        "type": "string",
+                        "description": "Query mode: 'timeline' (default), 'snapshot', or 'changes'",
+                        "enum": ["timeline", "snapshot", "changes"],
+                        "default": "timeline"
+                    },
+                    "date": {
+                        "type": "string",
+                        "description": "Target date for snapshot mode (ISO format, e.g., '2025-12-01')"
                     },
                     "limit": {
                         "type": "integer",
-                        "description": "Maximum operations (default 50)",
-                        "default": 50
+                        "description": "Maximum results (default 20)",
+                        "default": 20
                     }
                 },
-                "required": ["file_path"]
+                "required": []
             }
         ),
         types.Tool(
@@ -261,11 +275,22 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[types.TextCont
     try:
         result = await _dispatch_tool(name, arguments)
         import json
-        return [types.TextContent(type="text", text=json.dumps(result, indent=2, default=str))]
+        response = [types.TextContent(type="text", text=json.dumps(result, indent=2, default=str))]
     except Exception as e:
         log(f"Tool {name} error: {e}")
         import traceback
-        return [types.TextContent(type="text", text=f"Error: {str(e)}\n{traceback.format_exc()}")]
+        response = [types.TextContent(type="text", text=f"Error: {str(e)}\n{traceback.format_exc()}")]
+
+    # WINDOWS FIX: Flush stdout after tool responses
+    # The MCP SDK's stdio transport can lose responses in Windows buffering.
+    # Flushing ensures the response is written before the SDK returns.
+    if sys.platform == 'win32':
+        try:
+            sys.stdout.flush()
+        except Exception:
+            pass
+
+    return response
 
 
 async def _dispatch_tool(name: str, arguments: dict[str, Any]) -> dict:
@@ -353,6 +378,18 @@ async def run_server():
     """Run the MCP server."""
     log(f"Starting MIRA MCP server v{VERSION}")
 
+    # WINDOWS FIX: Force binary mode on stdio
+    # The MCP SDK's stdio transport has buffering issues on Windows that cause
+    # responses to be lost. Binary mode prevents newline translation issues.
+    if sys.platform == 'win32':
+        try:
+            import msvcrt
+            msvcrt.setmode(sys.stdin.fileno(), os.O_BINARY)
+            msvcrt.setmode(sys.stdout.fileno(), os.O_BINARY)
+            log("Windows: stdio set to binary mode")
+        except Exception as e:
+            log(f"Windows binary mode warning: {e}")
+
     # Track if shutdown was requested via signal
     shutdown_requested = threading.Event()
 
@@ -430,6 +467,9 @@ def run_init_cli(project_path: str, quiet: bool = False, raw: bool = False):
             }
             print(json.dumps(hook_output))
 
+        # WINDOWS FIX: Flush stdout to ensure hook output is received
+        sys.stdout.flush()
+
         # Clean exit
         if storage:
             try:
@@ -452,6 +492,8 @@ def run_init_cli(project_path: str, quiet: bool = False, raw: bool = False):
                 }
             }
             print(json.dumps(hook_output))
+        # WINDOWS FIX: Flush stdout to ensure error output is received
+        sys.stdout.flush()
         sys.exit(1)
 
 
