@@ -107,10 +107,20 @@ def activate_venv_deps():
 
 
 def has_semantic_deps() -> bool:
-    """Check if optional semantic search dependencies are installed."""
+    """Check if semantic search dependencies are installed (now in core)."""
     try:
         import fastembed  # noqa: F401
         import sqlite_vec  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
+def has_remote_deps() -> bool:
+    """Check if remote storage dependencies are installed (optional)."""
+    try:
+        import qdrant_client  # noqa: F401
+        import psycopg2  # noqa: F401
         return True
     except ImportError:
         return False
@@ -151,17 +161,18 @@ def ensure_venv_and_deps() -> bool:
         except Exception as e:
             log(f"Claude Code config failed (non-fatal): {e}")
 
-        # Check for optional semantic deps
-        if has_semantic_deps():
-            log("Semantic search: available")
-        else:
-            log("Semantic search: not installed (pip install claude-mira3[semantic])")
+        # Check semantic deps (should be in core now)
+        if not has_semantic_deps():
+            log("Warning: Semantic search deps missing - reinstall with: pip install claude-mira3")
 
         # Check for server.json (remote storage config)
         project_server_config = project_mira_path / "server.json"
         global_server_config = global_mira_path / "server.json"
-        if not project_server_config.exists() and not global_server_config.exists():
-            log("Remote storage: not configured (local-only mode)")
+        has_server_config = project_server_config.exists() or global_server_config.exists()
+
+        if has_server_config and not has_remote_deps():
+            log("Remote storage configured but deps not installed")
+            log("Install with: pip install claude-mira3[remote]")
 
         # Mark as configured
         config = {

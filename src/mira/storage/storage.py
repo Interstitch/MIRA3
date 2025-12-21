@@ -96,7 +96,8 @@ class Storage:
                 return False
 
         except ImportError as e:
-            log.error(f"Central storage dependencies not installed: {e}")
+            log.warning(f"Remote storage configured but dependencies not installed: {e}")
+            log.warning("Install with: pip install claude-mira3[remote]")
             self._central_init_failed_at = time.time()
             return False
         except Exception as e:

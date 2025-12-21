@@ -32,15 +32,17 @@ classifiers = [
 dependencies = [
     "mcp>=1.25.0",
     "watchdog>=3.0.0",
-    "psycopg2-binary>=2.9",
-    "qdrant-client>=1.7.0",
     "httpx>=0.25.0",
+    # Local semantic search - works out of the box, no remote storage needed
+    "fastembed>=0.3.0",
+    "sqlite-vec>=0.1.0",
 ]
 
 [project.optional-dependencies]
-semantic = [
-    "fastembed>=0.3.0",
-    "sqlite-vec>=0.1.0",
+# Remote storage for cross-machine sync (Qdrant + PostgreSQL)
+remote = [
+    "qdrant-client>=1.7.0",
+    "psycopg2-binary>=2.9",
 ]
 dev = [
     "pytest>=7.0",
@@ -49,7 +51,7 @@ dev = [
     "mypy>=1.0",
 ]
 all = [
-    "claude-mira3[semantic,dev]",
+    "claude-mira3[remote,dev]",
 ]
 
 [project.scripts]
